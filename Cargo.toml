@@ -1,12 +1,12 @@
 [package]
-name = "proj-beamer"
+name = "ohp"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
 authors = ["Yongjin Park <yongjin.park@ubc.ca>"]
 description = "Present beamer PDF slides in the terminal over the kitty graphics protocol, in pure Rust"
-repository = "https://github.com/YPARK/proj-beamer"
+repository = "https://github.com/YPARK/ohp"
 keywords = ["pdf", "beamer", "slides", "tui", "kitty"]
 categories = ["command-line-utilities", "visualization"]
 

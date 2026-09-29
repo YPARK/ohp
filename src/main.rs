@@ -1,4 +1,4 @@
-//! proj-beamer: present beamer slides in the terminal.
+//! ohp, an overhead projector: present beamer slides in the terminal.
 //!
 //! Slides are rasterised in pure Rust by hayro and shown through
 //! ratatui-image, over the kitty graphics protocol where the terminal has it,
