@@ -7,8 +7,12 @@
 //! The PDF is reloaded when it changes on disk, as after a LaTeX run. The
 //! slides already on screen stay until their new renders arrive, so a reload
 //! does not flash the screen empty.
+//!
+//! Where the terminal has no graphics protocol, slides are shown as their
+//! text over a coarse image instead; `t` switches between the two anywhere.
 
-use crate::render::{self, Deck, Done, Key, Renderer, Stamp};
+use crate::render::{self, Deck, Done, Job, Key, Renderer, Slide, Stamp};
+use crate::text;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
@@ -18,7 +22,6 @@ use ratatui::{DefaultTerminal, Frame};
 use ratatui_image::Image;
 use ratatui_image::picker::cap_parser::{Parser, QueryStdioOptions};
 use ratatui_image::picker::{Picker, ProtocolType};
-use ratatui_image::protocol::Protocol;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -34,14 +37,20 @@ const MAX_WORKERS: usize = 4;
 /// How often the PDF is checked for changes.
 const WATCH_EVERY: Duration = Duration::from_millis(250);
 
-pub fn run(deck: Deck) -> anyhow::Result<()> {
+/// `text` starts with slides as text even where images can be shown.
+pub fn run(deck: Deck, text: bool) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
     let result = (|| {
         let picker = pick();
         quiet_render_panics();
         let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(MAX_WORKERS));
         let renderer = Renderer::spawn(&deck, &picker, workers)?;
-        let mut app = App::new(deck, picker, renderer, workers);
+        let look = if text || picker.protocol_type() == ProtocolType::Halfblocks {
+            Look::Text
+        } else {
+            Look::Image
+        };
+        let mut app = App::new(deck, picker, renderer, workers, look);
         app.run(&mut terminal)?;
         app.clear_images()
     })();
@@ -82,9 +91,20 @@ enum View {
     Grid,
 }
 
-enum Slide {
-    Ready(Protocol),
-    Failed,
+/// How a slide is shown.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Look {
+    Image,
+    Text,
+}
+
+impl Look {
+    fn job(self, key: Key) -> Job {
+        match self {
+            Look::Image => Job::Image(key),
+            Look::Text => Job::Text(key),
+        }
+    }
 }
 
 /// Where the grid's slots go.
@@ -103,6 +123,7 @@ struct App {
     renderer: Renderer,
     workers: usize,
     view: View,
+    look: Look,
     cur: usize,
     /// First grid row on screen.
     top: usize,
@@ -110,11 +131,12 @@ struct App {
     grid_cols: Option<u16>,
     /// Where slides are drawn: the screen above the status line.
     main: Rect,
-    slides: HashMap<Key, Slide>,
+    /// Finished slides, `None` where one could not be rendered.
+    slides: HashMap<Job, Option<Slide>>,
     /// Slides of the deck before the last reload, shown until replaced.
-    stale: HashMap<Key, Slide>,
-    /// Keys queued or being rendered.
-    requested: HashSet<Key>,
+    stale: HashMap<Job, Option<Slide>>,
+    /// Jobs queued or being done.
+    requested: HashSet<Job>,
     /// The PDF as last loaded.
     stamp: Stamp,
     /// A change seen on disk, waiting for the file to stop changing.
@@ -127,7 +149,7 @@ struct App {
 }
 
 impl App {
-    fn new(deck: Deck, picker: Picker, renderer: Renderer, workers: usize) -> Self {
+    fn new(deck: Deck, picker: Picker, renderer: Renderer, workers: usize, look: Look) -> Self {
         App {
             stamp: render::stamp(&deck.path),
             deck,
@@ -135,6 +157,7 @@ impl App {
             renderer,
             workers,
             view: View::Present,
+            look,
             cur: 0,
             top: 0,
             grid_cols: None,
@@ -191,11 +214,10 @@ impl App {
 
     fn receive(&mut self, done: Done) {
         // Unrequested: rendered for a screen size since abandoned.
-        if !self.requested.remove(&done.key) {
+        if !self.requested.remove(&done.job) {
             return;
         }
-        let slide = done.slide.map_or(Slide::Failed, Slide::Ready);
-        self.slides.insert(done.key, slide);
+        self.slides.insert(done.job, done.slide);
         if self.requested.is_empty() {
             self.stale.clear();
         }
@@ -265,6 +287,12 @@ impl App {
                 self.view = match self.view {
                     View::Present => View::Grid,
                     View::Grid => View::Present,
+                }
+            }
+            KeyCode::Char('t') => {
+                self.look = match self.look {
+                    Look::Image => Look::Text,
+                    Look::Text => Look::Image,
                 }
             }
             KeyCode::Enter | KeyCode::Esc if self.view == View::Grid => self.view = View::Present,
@@ -373,7 +401,12 @@ impl App {
         let grid = self.grid();
         let mut wanted = Vec::new();
         let full = |page| Key::new(page, area);
-        let near = [self.cur, self.cur + 1, self.cur.wrapping_sub(1), self.cur + 2];
+        let near = [
+            self.cur,
+            self.cur + 1,
+            self.cur.wrapping_sub(1),
+            self.cur + 2,
+        ];
         match self.view {
             View::Present => wanted.extend(near.map(full)),
             View::Grid => {
@@ -386,13 +419,13 @@ impl App {
         }
         wanted.retain(|k| k.page < self.deck.pages);
 
-        for key in self.renderer.clear() {
-            self.requested.remove(&key);
+        for job in self.renderer.clear() {
+            self.requested.remove(&job);
         }
         let mut jobs = Vec::new();
-        for key in wanted {
-            if !self.slides.contains_key(&key) && self.requested.insert(key) {
-                jobs.push(key);
+        for job in wanted.into_iter().map(|key| self.look.job(key)) {
+            if !self.slides.contains_key(&job) && self.requested.insert(job) {
+                jobs.push(job);
             }
         }
         self.renderer.push(jobs);
@@ -401,7 +434,9 @@ impl App {
         let full = (area.width, area.height);
         let inner = Block::bordered().inner(Rect::new(0, 0, grid.slot.width, grid.slot.height));
         let thumb = (inner.width, inner.height);
-        self.slides.retain(|k, _| {
+        // Both looks are kept, so `t` back is immediate.
+        self.slides.retain(|job, _| {
+            let k = job.key();
             let size = (k.cols, k.rows);
             if size == full {
                 k.page.abs_diff(cur) <= KEEP
@@ -423,10 +458,30 @@ impl App {
     }
 
     fn draw_slide(&self, f: &mut Frame, page: usize, area: Rect) {
-        let key = Key::new(page, area);
-        match self.slides.get(&key).or_else(|| self.stale.get(&key)) {
-            Some(Slide::Ready(proto)) => f.render_widget(Image::new(proto), centred(area, proto.size())),
-            Some(Slide::Failed) => note(f, area, "cannot render this slide"),
+        let job = self.look.job(Key::new(page, area));
+        match self.slides.get(&job).or_else(|| self.stale.get(&job)) {
+            Some(Some(Slide::Image(proto))) => {
+                f.render_widget(Image::new(proto), centred(area, proto.size()));
+            }
+            Some(Some(Slide::Text {
+                cells,
+                backdrop: Some(proto),
+            })) => {
+                let area = centred(area, proto.size());
+                f.render_widget(Image::new(proto), area);
+                text::overlay(cells, area, f.buffer_mut());
+            }
+            Some(Some(Slide::Text {
+                cells,
+                backdrop: None,
+            })) => {
+                if cells.iter().flatten().all(Option::is_none) {
+                    note(f, area, "no text on this slide");
+                } else {
+                    f.render_widget(Paragraph::new(text::lines(cells)), area);
+                }
+            }
+            Some(None) => note(f, area, "cannot render this slide"),
             None => note(f, area, "rendering…"),
         }
     }
@@ -436,7 +491,10 @@ impl App {
         for (i, rect) in self.slots(&grid) {
             let on = i == self.cur;
             let (style, border) = if on {
-                (Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD), BorderType::Thick)
+                (
+                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    BorderType::Thick,
+                )
             } else {
                 (Style::new().fg(Color::DarkGray), BorderType::Plain)
             };
@@ -453,19 +511,35 @@ impl App {
     fn status(&self) -> Line<'_> {
         let dim = Style::new().fg(Color::DarkGray);
         let (view, keys) = match self.view {
-            View::Present => ("present", "n/p ←/→ next/prev · g grid · q quit"),
-            View::Grid => ("grid", "n/p arrows move · +/- zoom · g/enter present · q quit"),
+            View::Present => ("present", "n/p ←/→ next/prev · g grid · t text · q quit"),
+            View::Grid => (
+                "grid",
+                "n/p arrows move · +/- zoom · g/enter present · t text · q quit",
+            ),
+        };
+        let look = match self.look {
+            Look::Image => "",
+            Look::Text => " · text",
         };
         let mut spans = vec![
-            Span::styled(format!(" {} ", self.deck.name), Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" {} ", self.deck.name),
+                Style::new().add_modifier(Modifier::BOLD),
+            ),
             Span::raw(format!(" {}/{} ", self.cur + 1, self.deck.pages)),
-            Span::styled(format!(" {view}"), dim),
+            Span::styled(format!(" {view}{look}"), dim),
         ];
         if !self.requested.is_empty() {
-            spans.push(Span::styled(format!("  rendering {}", self.requested.len()), dim));
+            spans.push(Span::styled(
+                format!("  rendering {}", self.requested.len()),
+                dim,
+            ));
         }
         if let Some(notice) = &self.notice {
-            spans.push(Span::styled(format!("  {notice}"), Style::new().add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(
+                format!("  {notice}"),
+                Style::new().add_modifier(Modifier::BOLD),
+            ));
         }
         spans.push(Span::styled(format!("   {keys}"), dim));
         Line::from(spans)
@@ -492,11 +566,21 @@ fn split(area: Rect) -> (Rect, Rect) {
 
 fn centred(area: Rect, size: Size) -> Rect {
     let (w, h) = (size.width.min(area.width), size.height.min(area.height));
-    Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h)
+    Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    )
 }
 
 fn note(f: &mut Frame, area: Rect, text: &str) {
-    let mid = Rect::new(area.x, area.y + area.height / 2, area.width, 1.min(area.height));
+    let mid = Rect::new(
+        area.x,
+        area.y + area.height / 2,
+        area.width,
+        1.min(area.height),
+    );
     let text = Span::styled(text, Style::new().fg(Color::DarkGray));
     f.render_widget(Paragraph::new(text).centered(), mid);
 }

@@ -11,7 +11,7 @@ fn app(pages: usize) -> (tempfile::TempDir, App) {
     let deck = Deck::open(&fixture::write(dir.path(), pages)).unwrap();
     let picker = Picker::halfblocks();
     let renderer = Renderer::spawn(&deck, &picker, 1).unwrap();
-    let mut app = App::new(deck, picker, renderer, 1);
+    let mut app = App::new(deck, picker, renderer, 1, Look::Image);
     app.main = MAIN;
     (dir, app)
 }
@@ -75,7 +75,10 @@ fn n_p_and_arrows_stay_within_the_deck() {
     let (_dir, mut app) = app(5);
     press(&mut app, &[KeyCode::Char('p'), KeyCode::Left, KeyCode::Up]);
     assert_eq!(app.cur, 0);
-    press(&mut app, &[KeyCode::Char('n'), KeyCode::Right, KeyCode::Down]);
+    press(
+        &mut app,
+        &[KeyCode::Char('n'), KeyCode::Right, KeyCode::Down],
+    );
     assert_eq!(app.cur, 3);
     press(&mut app, &[KeyCode::Char('n'); 10]);
     assert_eq!(app.cur, 4);
@@ -112,7 +115,10 @@ fn the_grid_scrolls_to_keep_the_current_slide_on_screen() {
         app.cur = cur;
         app.scroll();
         let first = app.top * grid.cols;
-        assert!((first..first + grid.rows * grid.cols).contains(&cur), "slide {cur}");
+        assert!(
+            (first..first + grid.rows * grid.cols).contains(&cur),
+            "slide {cur}"
+        );
     }
 }
 
@@ -134,17 +140,76 @@ fn only_the_current_zoom_and_nearby_full_slides_are_kept() {
     press(&mut app, &[KeyCode::Char('g')]);
     let grid = app.grid();
     let inner = Block::bordered().inner(Rect::new(0, 0, grid.slot.width, grid.slot.height));
-    let thumb = |page| Key { page, cols: inner.width, rows: inner.height };
-    let full = |page| Key::new(page, MAIN);
-    let old_zoom = Key { page: 0, cols: inner.width + 5, rows: inner.height + 3 };
-    for key in [thumb(7), full(1), full(20), old_zoom] {
-        app.slides.insert(key, Slide::Failed);
+    let thumb = |page| {
+        Job::Image(Key {
+            page,
+            cols: inner.width,
+            rows: inner.height,
+        })
+    };
+    let full = |page| Job::Text(Key::new(page, MAIN));
+    let old_zoom = Job::Image(Key {
+        page: 0,
+        cols: inner.width + 5,
+        rows: inner.height + 3,
+    });
+    for job in [thumb(7), full(1), full(20), old_zoom] {
+        app.slides.insert(job, None);
     }
     app.schedule();
     assert!(app.slides.contains_key(&thumb(7)));
     assert!(app.slides.contains_key(&full(1)));
     assert!(!app.slides.contains_key(&full(20)));
     assert!(!app.slides.contains_key(&old_zoom));
+}
+
+#[test]
+fn t_switches_between_images_and_text() {
+    let (_dir, mut app) = app(3);
+    press(&mut app, &[KeyCode::Char('t')]);
+    assert_eq!(app.look, Look::Text);
+    press(&mut app, &[KeyCode::Char('g'), KeyCode::Char('t')]);
+    assert_eq!(app.look, Look::Image);
+}
+
+#[test]
+fn the_text_look_asks_for_text() {
+    let (_dir, mut app) = app(3);
+    press(&mut app, &[KeyCode::Char('t')]);
+    app.schedule();
+    assert!(app.requested.contains(&Job::Text(Key::new(0, MAIN))));
+    assert!(!app.requested.iter().any(|job| matches!(job, Job::Image(_))));
+}
+
+#[test]
+fn a_text_slide_is_drawn_over_its_backdrop() {
+    use ratatui::backend::TestBackend;
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = fixture::with(&[fixture::text(40., 200., 24., "Hello")]);
+    let deck = Deck::open(&fixture::write_pdf(dir.path(), &pdf)).unwrap();
+    let picker = Picker::halfblocks();
+    let renderer = Renderer::spawn(&deck, &picker, 1).unwrap();
+    let mut app = App::new(deck, picker, renderer, 1, Look::Text);
+    let mut terminal = ratatui::Terminal::new(TestBackend::new(80, 24)).unwrap();
+    app.main = split(Rect::new(0, 0, 80, 24)).0;
+    app.schedule();
+    let done = app
+        .renderer
+        .done
+        .recv_timeout(Duration::from_secs(10))
+        .expect("a render");
+    app.receive(done);
+    terminal.draw(|f| app.draw(f)).unwrap();
+
+    let buf = terminal.backend().buffer();
+    let screen: String = buf.content().iter().map(|c| c.symbol()).collect();
+    assert!(screen.contains("Hello"));
+    // Black on the white of the slide, whatever the terminal's colours.
+    let h = buf.content().iter().find(|c| c.symbol() == "H").unwrap();
+    assert_eq!(
+        (h.fg, h.bg),
+        (Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255))
+    );
 }
 
 #[test]
@@ -185,7 +250,11 @@ fn a_broken_pdf_keeps_the_old_slides() {
         app.watch();
     }
     assert_eq!(app.deck.pages, 3);
-    assert!(app.notice.as_deref().is_some_and(|n| n.starts_with("reload failed")));
+    assert!(
+        app.notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("reload failed"))
+    );
 }
 
 #[test]
@@ -204,8 +273,8 @@ fn a_shorter_deck_moves_the_current_slide_back() {
 #[test]
 fn a_reload_keeps_old_slides_on_screen_until_replaced() {
     let (dir, mut app) = app(3);
-    let key = Key::new(0, MAIN);
-    app.slides.insert(key, Slide::Failed);
+    let key = Job::Image(Key::new(0, MAIN));
+    app.slides.insert(key, None);
     fixture::write(dir.path(), 4);
     for _ in 0..2 {
         due(&mut app);
