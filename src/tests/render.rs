@@ -93,28 +93,23 @@ fn a_page_past_the_end_renders_nothing() {
     );
 }
 
+/// A job for page `page` in a `cols` × `rows` box.
+fn job(page: usize, cols: u16, rows: u16, look: Look) -> Job {
+    let key = Key { page, cols, rows };
+    Job { key, look }
+}
+
 #[test]
 fn workers_deliver_every_requested_slide() {
     let dir = tempfile::tempdir().unwrap();
     let deck = Deck::open(&fixture::write(dir.path(), 4)).unwrap();
     let renderer = Renderer::spawn(&deck, &Picker::halfblocks(), 2).unwrap();
-    let jobs: Vec<Job> = (0..4)
-        .map(|page| {
-            Job::Image(Key {
-                page,
-                cols: 30,
-                rows: 8,
-            })
-        })
-        .collect();
+    let jobs: Vec<Job> = (0..4).map(|page| job(page, 30, 8, Look::Image)).collect();
     renderer.push(jobs.clone());
 
     let mut got: Vec<Job> = (0..jobs.len())
         .map(|_| {
-            let done = renderer
-                .done
-                .recv_timeout(Duration::from_secs(10))
-                .expect("a render");
+            let done = fixture::next(&renderer);
             assert!(
                 matches!(done.slide, Some(Slide::Image(_))),
                 "{:?} failed",
@@ -123,37 +118,30 @@ fn workers_deliver_every_requested_slide() {
             done.job
         })
         .collect();
-    got.sort_by_key(|j| j.key().page);
+    got.sort_by_key(|j| j.key.page);
     assert_eq!(got, jobs);
 }
 
 #[test]
 fn a_text_job_sets_the_text_on_its_backdrop() {
     let dir = tempfile::tempdir().unwrap();
-    let pdf = fixture::with(&[fixture::text(40., 200., 24., "Hello")]);
-    let deck = Deck::open(&fixture::write_pdf(dir.path(), &pdf)).unwrap();
+    let deck = Deck::open(&fixture::write_pdf(dir.path(), &fixture::hello())).unwrap();
     let renderer = Renderer::spawn(&deck, &Picker::halfblocks(), 1).unwrap();
-    renderer.push([Job::Text(Key {
-        page: 0,
-        cols: 60,
-        rows: 30,
-    })]);
+    renderer.push([job(0, 60, 30, Look::Text)]);
 
-    let done = renderer
-        .done
-        .recv_timeout(Duration::from_secs(10))
-        .expect("a render");
-    let Some(Slide::Text {
-        cells,
-        backdrop: Some(backdrop),
-    }) = done.slide
-    else {
-        panic!("no text with a backdrop");
+    let Some(Slide::Text { cells, backdrop }) = fixture::next(&renderer).slide else {
+        panic!("no text slide");
     };
     let size = backdrop.size();
     assert_eq!(
         (cells.len(), cells[0].len()),
         (size.height.into(), size.width.into())
+    );
+    // 16:9 in 60x30 cells of 10x20 pixels: the full width, and as tall as that makes it.
+    assert_eq!(size.width, 60);
+    assert_eq!(
+        size.height,
+        (60. * 10. * FRAME.1 / FRAME.0 / 20.).round() as u16
     );
     let text: String = cells.iter().flatten().flatten().map(|c| c.ch).collect();
     assert_eq!(text, "Hello");
@@ -167,13 +155,7 @@ fn cleared_jobs_are_not_rendered() {
     // Let the worker reach its wait; jobs queued without waking it then stay queued.
     std::thread::sleep(Duration::from_millis(100));
     let (lock, _) = &*renderer.queue;
-    let jobs = (0..3).map(|page| {
-        Job::Image(Key {
-            page,
-            cols: 30,
-            rows: 8,
-        })
-    });
+    let jobs = (0..3).map(|page| job(page, 30, 8, Look::Image));
     lock.lock().unwrap().waiting.extend(jobs);
     assert_eq!(renderer.clear().len(), 3);
     assert!(

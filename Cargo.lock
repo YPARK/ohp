@@ -1181,6 +1181,7 @@ dependencies = [
  "ratatui",
  "ratatui-image",
  "tempfile",
+ "unicode-width",
 ]
 
 [[package]]

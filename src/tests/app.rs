@@ -7,13 +7,21 @@ const MAIN: Rect = Rect::new(0, 0, 140, 39);
 
 /// An app on a `pages`-page deck, with halfblocks' fixed 10×20 pixel cells.
 fn app(pages: usize) -> (tempfile::TempDir, App) {
+    app_with(&fixture::pdf(pages), Look::Image)
+}
+
+fn app_with(pdf: &[u8], look: Look) -> (tempfile::TempDir, App) {
     let dir = tempfile::tempdir().unwrap();
-    let deck = Deck::open(&fixture::write(dir.path(), pages)).unwrap();
+    let deck = Deck::open(&fixture::write_pdf(dir.path(), pdf)).unwrap();
     let picker = Picker::halfblocks();
     let renderer = Renderer::spawn(&deck, &picker, 1).unwrap();
-    let mut app = App::new(deck, picker, renderer, 1, Look::Image);
+    let mut app = App::new(deck, picker, renderer, 1, look);
     app.main = MAIN;
     (dir, app)
+}
+
+fn job(key: Key, look: Look) -> Job {
+    Job { key, look }
 }
 
 fn press(app: &mut App, keys: &[KeyCode]) {
@@ -140,19 +148,10 @@ fn only_the_current_zoom_and_nearby_full_slides_are_kept() {
     press(&mut app, &[KeyCode::Char('g')]);
     let grid = app.grid();
     let inner = Block::bordered().inner(Rect::new(0, 0, grid.slot.width, grid.slot.height));
-    let thumb = |page| {
-        Job::Image(Key {
-            page,
-            cols: inner.width,
-            rows: inner.height,
-        })
-    };
-    let full = |page| Job::Text(Key::new(page, MAIN));
-    let old_zoom = Job::Image(Key {
-        page: 0,
-        cols: inner.width + 5,
-        rows: inner.height + 3,
-    });
+    let at = |page, cols, rows| Key { page, cols, rows };
+    let thumb = |page| job(at(page, inner.width, inner.height), Look::Image);
+    let full = |page| job(Key::new(page, MAIN), Look::Text);
+    let old_zoom = job(at(0, inner.width + 5, inner.height + 3), Look::Image);
     for job in [thumb(7), full(1), full(20), old_zoom] {
         app.slides.insert(job, None);
     }
@@ -177,28 +176,18 @@ fn the_text_look_asks_for_text() {
     let (_dir, mut app) = app(3);
     press(&mut app, &[KeyCode::Char('t')]);
     app.schedule();
-    assert!(app.requested.contains(&Job::Text(Key::new(0, MAIN))));
-    assert!(!app.requested.iter().any(|job| matches!(job, Job::Image(_))));
+    assert!(app.requested.contains(&job(Key::new(0, MAIN), Look::Text)));
+    assert!(app.requested.iter().all(|job| job.look == Look::Text));
 }
 
 #[test]
 fn a_text_slide_is_drawn_over_its_backdrop() {
     use ratatui::backend::TestBackend;
-    let dir = tempfile::tempdir().unwrap();
-    let pdf = fixture::with(&[fixture::text(40., 200., 24., "Hello")]);
-    let deck = Deck::open(&fixture::write_pdf(dir.path(), &pdf)).unwrap();
-    let picker = Picker::halfblocks();
-    let renderer = Renderer::spawn(&deck, &picker, 1).unwrap();
-    let mut app = App::new(deck, picker, renderer, 1, Look::Text);
+    let (_dir, mut app) = app_with(&fixture::hello(), Look::Text);
     let mut terminal = ratatui::Terminal::new(TestBackend::new(80, 24)).unwrap();
     app.main = split(Rect::new(0, 0, 80, 24)).0;
     app.schedule();
-    let done = app
-        .renderer
-        .done
-        .recv_timeout(Duration::from_secs(10))
-        .expect("a render");
-    app.receive(done);
+    app.receive(fixture::next(&app.renderer));
     terminal.draw(|f| app.draw(f)).unwrap();
 
     let buf = terminal.backend().buffer();
@@ -273,7 +262,7 @@ fn a_shorter_deck_moves_the_current_slide_back() {
 #[test]
 fn a_reload_keeps_old_slides_on_screen_until_replaced() {
     let (dir, mut app) = app(3);
-    let key = Job::Image(Key::new(0, MAIN));
+    let key = job(Key::new(0, MAIN), Look::Image);
     app.slides.insert(key, None);
     fixture::write(dir.path(), 4);
     for _ in 0..2 {

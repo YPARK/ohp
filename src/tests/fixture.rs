@@ -1,6 +1,8 @@
 //! Small PDFs written for tests.
 
+use crate::render::{Done, Renderer};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// A beamer 16:9 frame, in points.
 pub const FRAME: (f32, f32) = (453.54, 255.12);
@@ -73,4 +75,17 @@ pub fn write_pdf(dir: &Path, pdf: &[u8]) -> PathBuf {
 /// A content stream writing `text` at (`x`, `y`) in `size`-point Helvetica.
 pub fn text(x: f32, y: f32, size: f32, text: &str) -> String {
     format!("BT /F1 {size} Tf {x} {y} Td ({text}) Tj ET\n")
+}
+
+/// A one-page PDF that says "Hello".
+pub fn hello() -> Vec<u8> {
+    with(&[text(40., 200., 24., "Hello")])
+}
+
+/// The renderer's next finished job.
+pub fn next(renderer: &Renderer) -> Done {
+    renderer
+        .done
+        .recv_timeout(Duration::from_secs(10))
+        .expect("a render")
 }

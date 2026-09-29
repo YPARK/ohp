@@ -8,15 +8,17 @@
 
 use crate::text;
 use anyhow::{Context, anyhow};
-use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_interpret::{InterpreterCache, InterpreterSettings};
 use hayro::hayro_syntax::Pdf;
+use hayro::hayro_syntax::page::Page;
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{RenderCache, RenderSettings};
 use image::{DynamicImage, RgbaImage};
 use ratatui::layout::{Rect, Size};
 use ratatui_image::Resize;
-use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::picker::Picker;
 use ratatui_image::protocol::Protocol;
+use ratatui_image::protocol::halfblocks::Halfblocks;
 use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
 use std::panic::{self, AssertUnwindSafe};
@@ -99,29 +101,32 @@ impl Key {
             rows: area.height,
         }
     }
-}
 
-/// Work for a render worker: a slide for its cell box, as an image or as text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Job {
-    Image(Key),
-    Text(Key),
-}
-
-impl Job {
-    pub fn key(self) -> Key {
-        match self {
-            Job::Image(key) | Job::Text(key) => key,
-        }
+    pub fn size(self) -> Size {
+        Size::new(self.cols, self.rows)
     }
+}
+
+/// How a slide is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Look {
+    Image,
+    Text,
+}
+
+/// Work for a render worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Job {
+    pub key: Key,
+    pub look: Look,
 }
 
 pub enum Slide {
     Image(Protocol),
-    /// The slide's text, set over `backdrop`'s cells when there is one.
+    /// The slide's text, set over the cells of `backdrop`.
     Text {
         cells: text::Cells,
-        backdrop: Option<Protocol>,
+        backdrop: Protocol,
     },
 }
 
@@ -158,15 +163,12 @@ impl Renderer {
     pub fn spawn(deck: &Deck, picker: &Picker, workers: usize) -> anyhow::Result<Self> {
         let queue: Queue = Arc::default();
         let (tx, rx) = channel();
-        // Text goes over a coarse image in coloured cells, which any terminal shows.
-        let mut blocks = picker.clone();
-        blocks.set_protocol_type(ProtocolType::Halfblocks);
         for _ in 0..workers.max(1) {
-            let (data, queue, tx) = (deck.data.clone(), queue.clone(), tx.clone());
-            let pickers = (picker.clone(), blocks.clone());
+            let (data, queue, tx, picker) =
+                (deck.data.clone(), queue.clone(), tx.clone(), picker.clone());
             std::thread::Builder::new()
                 .name(THREAD.into())
-                .spawn(move || work(data, &pickers, &queue, &tx))?;
+                .spawn(move || work(data, &picker, &queue, &tx))?;
         }
         Ok(Renderer { queue, done: rx })
     }
@@ -188,12 +190,12 @@ impl Renderer {
     }
 }
 
-/// `pickers` encode images and text backdrops.
-fn work(data: Arc<Vec<u8>>, pickers: &(Picker, Picker), queue: &Queue, tx: &Sender<Done>) {
+fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, tx: &Sender<Done>) {
     let Ok(pdf) = Pdf::new(data) else {
         return;
     };
     let cache = RenderCache::new();
+    let fonts = InterpreterCache::new();
     let settings = InterpreterSettings::default();
     let (lock, cvar) = &**queue;
     loop {
@@ -209,12 +211,14 @@ fn work(data: Arc<Vec<u8>>, pickers: &(Picker, Picker), queue: &Queue, tx: &Send
                 jobs = cvar.wait(jobs).expect("render queue");
             }
         };
-        let slide = caught(|| match job {
-            Job::Image(key) => {
-                let image = rasterise(&pdf, &cache, &settings, &pickers.0, key)?;
-                encode(&pickers.0, image, key).map(Slide::Image)
+        let slide = caught(|| match job.look {
+            Look::Image => {
+                let image = rasterise(&pdf, &cache, &settings, picker, job.key)?;
+                let image = DynamicImage::ImageRgba8(image);
+                let proto = picker.new_protocol(image, job.key.size(), Resize::Fit(None));
+                proto.ok().map(Slide::Image)
             }
-            Job::Text(key) => read(&pdf, &cache, &settings, &pickers.1, key),
+            Look::Text => read(&pdf, &cache, &fonts, &settings, picker, job.key),
         });
         if tx.send(Done { job, slide }).is_err() {
             return;
@@ -222,37 +226,49 @@ fn work(data: Arc<Vec<u8>>, pickers: &(Picker, Picker), queue: &Queue, tx: &Send
     }
 }
 
-fn encode(picker: &Picker, image: RgbaImage, key: Key) -> Option<Protocol> {
-    let size = Size::new(key.cols, key.rows);
-    picker
-        .new_protocol(DynamicImage::ImageRgba8(image), size, Resize::Fit(None))
-        .ok()
-}
-
-/// The slide's text, set on the cells of a backdrop that has the text
-/// painted out; on the whole box if the backdrop cannot be made.
+/// The slide's text set over a coarse image of it, in coloured half-block
+/// cells, which any terminal shows.
 fn read<'a>(
     pdf: &'a Pdf,
     cache: &RenderCache<'a>,
+    fonts: &InterpreterCache<'a>,
     settings: &InterpreterSettings,
     picker: &Picker,
     key: Key,
 ) -> Option<Slide> {
-    let page = text::extract(pdf, key.page)?;
-    let backdrop = rasterise(pdf, cache, settings, picker, key).and_then(|mut image| {
-        page.erase(&mut image);
-        encode(picker, image, key)
-    });
-    let size = backdrop
-        .as_ref()
-        .map_or(Size::new(key.cols, key.rows), Protocol::size);
-    let cells = page.layout(size.width, size.height);
-    Some(Slide::Text { cells, backdrop })
+    let page = pdf.pages().get(key.page)?;
+    let (w, h) = page.render_dimensions();
+    let font = picker.font_size();
+    let (fw, fh) = (f32::from(font.width), f32::from(font.height));
+    let scale = fit(key, (fw, fh), (w, h));
+    let cells = |v: f32, box_: u16| (v.round() as u16).min(box_);
+    let size = Size::new(
+        cells(w * scale / fw, key.cols),
+        cells(h * scale / fh, key.rows),
+    );
+    // Four pixels a half-block each way, so glyphs are painted out finely.
+    let x_scale = 4. * f32::from(size.width) / w;
+    let y_scale = 8. * f32::from(size.height) / h;
+    let mut image = raster(page, cache, settings, x_scale, y_scale)?;
+    let mut text = text::extract(pdf, key.page, fonts, settings)?;
+    let cells = text.set_over(&mut image, size.width, size.height);
+    let backdrop = Halfblocks::new(DynamicImage::ImageRgba8(image), size).ok()?;
+    Some(Slide::Text {
+        cells,
+        backdrop: Protocol::Halfblocks(backdrop),
+    })
 }
 
 /// `f`'s result, or `None` if it panics: hayro does on some malformed PDFs.
 fn caught<T>(f: impl FnOnce() -> Option<T>) -> Option<T> {
     panic::catch_unwind(AssertUnwindSafe(f)).ok().flatten()
+}
+
+/// The scale that fits a `page`-sized page into the pixels behind `key`'s
+/// cells of `font` size.
+fn fit(key: Key, font: (f32, f32), page: (f32, f32)) -> f32 {
+    let (bw, bh) = (f32::from(key.cols) * font.0, f32::from(key.rows) * font.1);
+    (bw / page.0).min(bh / page.1)
 }
 
 /// Page `key.page` as large as fits the pixels behind `key`'s cells, on white.
@@ -265,18 +281,29 @@ fn rasterise<'a>(
 ) -> Option<RgbaImage> {
     let page = pdf.pages().get(key.page)?;
     let font = picker.font_size();
-    let (bw, bh) = (
-        f32::from(key.cols) * f32::from(font.width),
-        f32::from(key.rows) * f32::from(font.height),
+    let scale = fit(
+        key,
+        (font.width.into(), font.height.into()),
+        page.render_dimensions(),
     );
+    raster(page, cache, settings, scale, scale)
+}
+
+fn raster<'a>(
+    page: &'a Page<'a>,
+    cache: &RenderCache<'a>,
+    settings: &InterpreterSettings,
+    x_scale: f32,
+    y_scale: f32,
+) -> Option<RgbaImage> {
     let (w, h) = page.render_dimensions();
-    let scale = (bw / w).min(bh / h);
-    if !(scale.is_finite() && w * scale >= 1. && h * scale >= 1.) {
+    let sane = |s: f32, len: f32| s.is_finite() && len * s >= 1.;
+    if !(sane(x_scale, w) && sane(y_scale, h)) {
         return None;
     }
     let render = RenderSettings {
-        x_scale: scale,
-        y_scale: scale,
+        x_scale,
+        y_scale,
         bg_color: WHITE,
         ..Default::default()
     };

@@ -11,7 +11,7 @@
 //! Where the terminal has no graphics protocol, slides are shown as their
 //! text over a coarse image instead; `t` switches between the two anywhere.
 
-use crate::render::{self, Deck, Done, Job, Key, Renderer, Slide, Stamp};
+use crate::render::{self, Deck, Done, Job, Key, Look, Renderer, Slide, Stamp};
 use crate::text;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect, Size};
@@ -65,7 +65,11 @@ fn pick() -> Picker {
         kitty_compression: over_ssh(),
         ..Default::default()
     };
-    Picker::from_query_stdio_with_options(options).unwrap_or_else(|_| Picker::halfblocks())
+    let mut picker =
+        Picker::from_query_stdio_with_options(options).unwrap_or_else(|_| Picker::halfblocks());
+    // Pads an image rounded a pixel short of its cells, as the slide's own white.
+    picker.set_background_color(Some([255, 255, 255, 255]));
+    picker
 }
 
 fn over_ssh() -> bool {
@@ -89,22 +93,6 @@ fn quiet_render_panics() {
 enum View {
     Present,
     Grid,
-}
-
-/// How a slide is shown.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Look {
-    Image,
-    Text,
-}
-
-impl Look {
-    fn job(self, key: Key) -> Job {
-        match self {
-            Look::Image => Job::Image(key),
-            Look::Text => Job::Text(key),
-        }
-    }
 }
 
 /// Where the grid's slots go.
@@ -423,7 +411,8 @@ impl App {
             self.requested.remove(&job);
         }
         let mut jobs = Vec::new();
-        for job in wanted.into_iter().map(|key| self.look.job(key)) {
+        let look = self.look;
+        for job in wanted.into_iter().map(|key| Job { key, look }) {
             if !self.slides.contains_key(&job) && self.requested.insert(job) {
                 jobs.push(job);
             }
@@ -431,15 +420,14 @@ impl App {
         self.renderer.push(jobs);
 
         let cur = self.cur;
-        let full = (area.width, area.height);
-        let inner = Block::bordered().inner(Rect::new(0, 0, grid.slot.width, grid.slot.height));
-        let thumb = (inner.width, inner.height);
+        let full = area.as_size();
+        let slot = Rect::new(0, 0, grid.slot.width, grid.slot.height);
+        let thumb = Block::bordered().inner(slot).as_size();
         // Both looks are kept, so `t` back is immediate.
         self.slides.retain(|job, _| {
-            let k = job.key();
-            let size = (k.cols, k.rows);
+            let size = job.key.size();
             if size == full {
-                k.page.abs_diff(cur) <= KEEP
+                job.key.page.abs_diff(cur) <= KEEP
             } else {
                 size == thumb
             }
@@ -458,28 +446,18 @@ impl App {
     }
 
     fn draw_slide(&self, f: &mut Frame, page: usize, area: Rect) {
-        let job = self.look.job(Key::new(page, area));
+        let job = Job {
+            key: Key::new(page, area),
+            look: self.look,
+        };
         match self.slides.get(&job).or_else(|| self.stale.get(&job)) {
             Some(Some(Slide::Image(proto))) => {
                 f.render_widget(Image::new(proto), centred(area, proto.size()));
             }
-            Some(Some(Slide::Text {
-                cells,
-                backdrop: Some(proto),
-            })) => {
-                let area = centred(area, proto.size());
-                f.render_widget(Image::new(proto), area);
+            Some(Some(Slide::Text { cells, backdrop })) => {
+                let area = centred(area, backdrop.size());
+                f.render_widget(Image::new(backdrop), area);
                 text::overlay(cells, area, f.buffer_mut());
-            }
-            Some(Some(Slide::Text {
-                cells,
-                backdrop: None,
-            })) => {
-                if cells.iter().flatten().all(Option::is_none) {
-                    note(f, area, "no text on this slide");
-                } else {
-                    f.render_widget(Paragraph::new(text::lines(cells)), area);
-                }
             }
             Some(None) => note(f, area, "cannot render this slide"),
             None => note(f, area, "rendering…"),
