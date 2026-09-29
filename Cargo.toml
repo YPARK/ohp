@@ -1,0 +1,20 @@
+[package]
+name = "proj-beamer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+authors = ["Yongjin Park <yongjin.park@ubc.ca>"]
+description = "Present beamer PDF slides in the terminal over the kitty graphics protocol, in pure Rust"
+repository = "https://github.com/YPARK/proj-beamer"
+keywords = ["pdf", "beamer", "slides", "tui", "kitty"]
+categories = ["command-line-utilities", "visualization"]
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive"] }
+hayro = "0.7.1"
+image = { version = "0.25", default-features = false }
+ratatui = "0.30"
+# Without default features: `chafa-dyn` links a C library.
+ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
