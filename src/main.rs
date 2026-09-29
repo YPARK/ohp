@@ -6,6 +6,7 @@
 //! are shown as their text, over a coarse image of the slide.
 
 mod app;
+mod remote;
 mod render;
 mod text;
 
@@ -31,7 +32,8 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
-    /// The slides.
+    /// The slides: a file here, or on another machine as `[user@]host:path`,
+    /// copied over ssh and reloaded when it changes there.
     pdf: PathBuf,
     /// Start with slides as text, even where the terminal shows images.
     #[arg(long)]
@@ -40,6 +42,11 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let deck = render::Deck::open(&args.pdf)?;
+    let remote = match remote::split(&args.pdf) {
+        Some((host, path)) => Some(remote::Remote::open("ssh".as_ref(), host, path)?),
+        None => None,
+    };
+    let path = remote.as_ref().map_or(args.pdf.as_path(), |r| r.path());
+    let deck = render::Deck::open(path)?;
     app::run(deck, args.text)
 }
