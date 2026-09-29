@@ -340,6 +340,11 @@ pub fn overlay(cells: &Cells, area: Area, buf: &mut Buffer) {
     for (dy, row) in cells.iter().enumerate().take(area.height.into()) {
         for (dx, cell) in row.iter().enumerate().take(area.width.into()) {
             let Some(cell) = cell else { continue };
+            let wide = cell.ch.width() == Some(2);
+            // Half of it would show past the area.
+            if wide && dx + 1 >= usize::from(area.width) {
+                continue;
+            }
             let (x, y) = (area.x + dx as u16, area.y + dy as u16);
             let Some(target) = buf.cell_mut((x, y)) else {
                 continue;
@@ -357,9 +362,7 @@ pub fn overlay(cells: &Cells, area: Area, buf: &mut Buffer) {
                 style = style.add_modifier(Modifier::BOLD);
             }
             target.set_char(cell.ch).set_style(style);
-            if cell.ch.width() == Some(2)
-                && let Some(next) = buf.cell_mut((x + 1, y))
-            {
+            if wide && let Some(next) = buf.cell_mut((x + 1, y)) {
                 next.set_char(' ').set_style(style);
             }
         }

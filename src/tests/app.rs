@@ -148,7 +148,7 @@ fn only_the_current_zoom_and_nearby_full_slides_are_kept() {
     press(&mut app, &[KeyCode::Char('g')]);
     let grid = app.grid();
     let inner = Block::bordered().inner(Rect::new(0, 0, grid.slot.width, grid.slot.height));
-    let at = |page, cols, rows| Key { page, cols, rows };
+    let at = |page, cols, rows| Key::new(page, Rect::new(0, 0, cols, rows));
     let thumb = |page| job(at(page, inner.width, inner.height), Look::Image);
     let full = |page| job(Key::new(page, MAIN), Look::Text);
     let old_zoom = job(at(0, inner.width + 5, inner.height + 3), Look::Image);
@@ -160,6 +160,77 @@ fn only_the_current_zoom_and_nearby_full_slides_are_kept() {
     assert!(app.slides.contains_key(&full(1)));
     assert!(!app.slides.contains_key(&full(20)));
     assert!(!app.slides.contains_key(&old_zoom));
+}
+
+#[test]
+fn plus_zooms_the_slide_about_the_middle_and_arrows_pan() {
+    let (_dir, mut app) = app(5);
+    press(&mut app, &[KeyCode::Char('+')]);
+    // 150% of a slide 140 cells wide: the middle 70 stays in the middle.
+    assert_eq!((app.zoom.percent, app.zoom.x), (150, 35));
+    press(&mut app, &[KeyCode::Right]);
+    assert_eq!(app.cur, 0);
+    assert!(app.zoom.x > 35);
+    // The slide is 1.5 × 138.6 cells wide: 208, 68 more than the screen.
+    press(&mut app, &[KeyCode::Right, KeyCode::Down]);
+    assert_eq!(app.zoom.x, 68, "stops at the slide's right edge");
+    assert!(app.zoom.y > 0);
+    press(&mut app, &[KeyCode::Char('n')]);
+    assert_eq!(app.cur, 1);
+    assert_eq!(app.zoom.percent, 150, "zoom kept from slide to slide");
+    press(&mut app, &[KeyCode::Char('0'), KeyCode::Right]);
+    assert_eq!((app.zoom, app.cur), (Zoom::FIT, 2));
+}
+
+#[test]
+fn slide_zoom_stops_at_its_steps() {
+    let (_dir, mut app) = app(5);
+    press(&mut app, &[KeyCode::Char('+'); 10]);
+    assert_eq!(app.zoom.percent, *ZOOMS.last().unwrap());
+    press(&mut app, &[KeyCode::Char('-'); 10]);
+    assert_eq!(app.zoom, Zoom::FIT);
+}
+
+#[test]
+fn a_resize_keeps_the_pan_within_the_slide() {
+    let (_dir, mut app) = app(5);
+    press(
+        &mut app,
+        &[KeyCode::Char('+'), KeyCode::Right, KeyCode::Right],
+    );
+    app.main = Rect::new(0, 0, 200, 60);
+    app.clamp_pan();
+    let most = (f32::from(app.main.width) * 1.5).round() as u16 - app.main.width;
+    assert!(app.zoom.x <= most);
+}
+
+#[test]
+fn the_zoomed_slide_is_asked_for_and_other_zooms_dropped() {
+    let (_dir, mut app) = app(5);
+    let at = |zoom| {
+        job(
+            Key {
+                zoom,
+                ..Key::new(0, MAIN)
+            },
+            Look::Image,
+        )
+    };
+    let old = at(Zoom {
+        percent: 300,
+        x: 5,
+        y: 5,
+    });
+    app.slides.insert(at(Zoom::FIT), None);
+    app.slides.insert(old, None);
+    press(&mut app, &[KeyCode::Char('+')]);
+    app.schedule();
+    assert!(app.requested.contains(&at(app.zoom)));
+    assert!(
+        app.slides.contains_key(&at(Zoom::FIT)),
+        "fitted slides are kept"
+    );
+    assert!(!app.slides.contains_key(&old));
 }
 
 #[test]

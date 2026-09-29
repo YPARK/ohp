@@ -13,6 +13,7 @@ use hayro::hayro_syntax::Pdf;
 use hayro::hayro_syntax::page::Page;
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{RenderCache, RenderSettings};
+use image::imageops::{self, FilterType};
 use image::{DynamicImage, RgbaImage};
 use ratatui::layout::{Rect, Size};
 use ratatui_image::Resize;
@@ -85,12 +86,39 @@ impl Deck {
     }
 }
 
-/// A slide fitted into a box of terminal cells.
+/// Most pixels a zoomed page is rendered with: hayro renders whole pages,
+/// so past this the part shown is rendered smaller and enlarged.
+const MAX_PIXELS: f32 = 16e6;
+
+/// A slide fitted into a box of terminal cells, or part of it enlarged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Key {
     pub page: usize,
     pub cols: u16,
     pub rows: u16,
+    pub zoom: Zoom,
+}
+
+/// How much a slide is enlarged past fitting its box, and which part of it
+/// the box shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Zoom {
+    pub percent: u16,
+    /// The box's top-left within the enlarged slide, in cells; kept within it.
+    pub x: u16,
+    pub y: u16,
+}
+
+impl Zoom {
+    pub const FIT: Zoom = Zoom {
+        percent: 100,
+        x: 0,
+        y: 0,
+    };
+
+    fn scale(self) -> f32 {
+        f32::from(self.percent) / 100.
+    }
 }
 
 impl Key {
@@ -99,6 +127,7 @@ impl Key {
             page,
             cols: area.width,
             rows: area.height,
+            zoom: Zoom::FIT,
         }
     }
 
@@ -227,7 +256,8 @@ fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, tx: &Sender<Done>) {
 }
 
 /// The slide's text set over a coarse image of it, in coloured half-block
-/// cells, which any terminal shows.
+/// cells, which any terminal shows. Zoomed, the text is set on a grid as
+/// much larger, and the box shows part of it.
 fn read<'a>(
     pdf: &'a Pdf,
     cache: &RenderCache<'a>,
@@ -240,11 +270,17 @@ fn read<'a>(
     let (w, h) = page.render_dimensions();
     let font = picker.font_size();
     let (fw, fh) = (f32::from(font.width), f32::from(font.height));
-    let scale = fit(key, (fw, fh), (w, h));
+    let enlarge = |len: u16| (f32::from(len) * key.zoom.scale()).min(f32::from(u16::MAX)) as u16;
+    let whole = Key {
+        cols: enlarge(key.cols),
+        rows: enlarge(key.rows),
+        ..key
+    };
+    let scale = fit(whole, (fw, fh), (w, h));
     let cells = |v: f32, box_: u16| (v.round() as u16).min(box_);
     let size = Size::new(
-        cells(w * scale / fw, key.cols),
-        cells(h * scale / fh, key.rows),
+        cells(w * scale / fw, whole.cols),
+        cells(h * scale / fh, whole.rows),
     );
     // Four pixels a half-block each way, so glyphs are painted out finely.
     let x_scale = 4. * f32::from(size.width) / w;
@@ -252,7 +288,19 @@ fn read<'a>(
     let mut image = raster(page, cache, settings, x_scale, y_scale)?;
     let mut text = text::extract(pdf, key.page, fonts, settings)?;
     let cells = text.set_over(&mut image, size.width, size.height);
-    let backdrop = Halfblocks::new(DynamicImage::ImageRgba8(image), size).ok()?;
+
+    let shown = Size::new(size.width.min(key.cols), size.height.min(key.rows));
+    let x = key.zoom.x.min(size.width - shown.width);
+    let y = key.zoom.y.min(size.height - shown.height);
+    let span = |at: u16, len: u16| usize::from(at)..usize::from(at + len);
+    let cells = cells[span(y, shown.height)]
+        .iter()
+        .map(|row| row[span(x, shown.width)].to_vec())
+        .collect();
+    let (px, py) = (4 * u32::from(x), 8 * u32::from(y));
+    let (pw, ph) = (4 * u32::from(shown.width), 8 * u32::from(shown.height));
+    let part = imageops::crop_imm(&image, px, py, pw, ph).to_image();
+    let backdrop = Halfblocks::new(DynamicImage::ImageRgba8(part), shown).ok()?;
     Some(Slide::Text {
         cells,
         backdrop: Protocol::Halfblocks(backdrop),
@@ -271,7 +319,8 @@ fn fit(key: Key, font: (f32, f32), page: (f32, f32)) -> f32 {
     (bw / page.0).min(bh / page.1)
 }
 
-/// Page `key.page` as large as fits the pixels behind `key`'s cells, on white.
+/// Page `key.page` as large as fits the pixels behind `key`'s cells, on
+/// white; when zoomed, the part of it enlarged that the box shows.
 fn rasterise<'a>(
     pdf: &'a Pdf,
     cache: &RenderCache<'a>,
@@ -281,12 +330,36 @@ fn rasterise<'a>(
 ) -> Option<RgbaImage> {
     let page = pdf.pages().get(key.page)?;
     let font = picker.font_size();
-    let scale = fit(
-        key,
-        (font.width.into(), font.height.into()),
-        page.render_dimensions(),
+    let (fw, fh) = (f32::from(font.width), f32::from(font.height));
+    let (w, h) = page.render_dimensions();
+    let scale = fit(key, (fw, fh), (w, h)) * key.zoom.scale();
+    if key.zoom == Zoom::FIT {
+        return raster(page, cache, settings, scale, scale);
+    }
+    let drawn = scale.min((MAX_PIXELS / (w * h)).sqrt());
+    let image = raster(page, cache, settings, drawn, drawn)?;
+    // The box, in the pixels drawn.
+    let k = drawn / scale;
+    let (bw, bh) = (f32::from(key.cols) * fw * k, f32::from(key.rows) * fh * k);
+    let (x, y) = (
+        f32::from(key.zoom.x) * fw * k,
+        f32::from(key.zoom.y) * fh * k,
     );
-    raster(page, cache, settings, scale, scale)
+    let cut = |at: f32, len: f32, max: u32| {
+        let len = (len as u32).clamp(1, max);
+        ((at as u32).min(max - len), len)
+    };
+    let (x, cw) = cut(x, bw, image.width());
+    let (y, ch) = cut(y, bh, image.height());
+    let part = imageops::crop_imm(&image, x, y, cw, ch).to_image();
+    if k >= 1. {
+        return Some(part);
+    }
+    let (ow, oh) = (
+        (cw as f32 / k).round() as u32,
+        (ch as f32 / k).round() as u32,
+    );
+    Some(imageops::resize(&part, ow, oh, FilterType::Triangle))
 }
 
 fn raster<'a>(

@@ -19,9 +19,12 @@ use std::path::PathBuf;
 /// Present a beamer PDF in the terminal.
 ///
 /// Keys: n/p or arrows next/previous slide (up/down move a row in the grid),
-/// g or tab switches between the slide and a grid of all slides, +/- zoom
-/// the grid, enter presents the slide picked in the grid, t switches between
-/// images and text, q quits.
+/// g or tab switches between the slide and a grid of all slides, enter
+/// presents the slide picked in the grid, t switches between images and
+/// text, q quits.
+///
+/// +/- zoom the slide, or the grid. Zoomed in, arrows pan the slide and 0
+/// fits it back to the screen.
 ///
 /// The PDF is reloaded whenever it changes on disk, so recompiling the
 /// slides updates them in place.

@@ -11,7 +11,7 @@
 //! Where the terminal has no graphics protocol, slides are shown as their
 //! text over a coarse image instead; `t` switches between the two anywhere.
 
-use crate::render::{self, Deck, Done, Job, Key, Look, Renderer, Slide, Stamp};
+use crate::render::{self, Deck, Done, Job, Key, Look, Renderer, Slide, Stamp, Zoom};
 use crate::text;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect, Size};
@@ -29,6 +29,8 @@ use std::time::{Duration, Instant};
 /// Slides the grid tries to show at once.
 const GRID_TARGET: usize = 12;
 const GRID_MAX_COLS: u16 = 8;
+/// Zoom steps for the presented slide, in percent of fitting the screen.
+const ZOOMS: [u16; 5] = [100, 150, 200, 300, 400];
 /// Narrowest grid slot +/- zooms out to, in cells.
 const MIN_SLOT_WIDTH: u16 = 10;
 /// Full-size slides kept either side of the current one.
@@ -117,6 +119,8 @@ struct App {
     top: usize,
     /// Grid columns chosen with +/-; `None` fits the grid to the screen.
     grid_cols: Option<u16>,
+    /// How the presented slide is zoomed, kept from slide to slide.
+    zoom: Zoom,
     /// Where slides are drawn: the screen above the status line.
     main: Rect,
     /// Finished slides, `None` where one could not be rendered.
@@ -149,6 +153,7 @@ impl App {
             cur: 0,
             top: 0,
             grid_cols: None,
+            zoom: Zoom::FIT,
             main: Rect::default(),
             slides: HashMap::new(),
             stale: HashMap::new(),
@@ -174,6 +179,7 @@ impl App {
             if self.dirty {
                 self.dirty = false;
                 self.scroll();
+                self.clamp_pan();
                 self.schedule();
                 terminal.draw(|f| self.draw(f))?;
             }
@@ -267,6 +273,10 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
+            KeyCode::Right if self.zoomed() => self.pan(1, 0),
+            KeyCode::Left if self.zoomed() => self.pan(-1, 0),
+            KeyCode::Down if self.zoomed() => self.pan(0, 1),
+            KeyCode::Up if self.zoomed() => self.pan(0, -1),
             KeyCode::Char('n') | KeyCode::Right => self.step(1),
             KeyCode::Char('p') | KeyCode::Left => self.step(-1),
             KeyCode::Down => self.step(self.row_step()),
@@ -284,11 +294,63 @@ impl App {
                 }
             }
             KeyCode::Enter | KeyCode::Esc if self.view == View::Grid => self.view = View::Present,
-            KeyCode::Char('+' | '=') if self.view == View::Grid => self.zoom(-1),
-            KeyCode::Char('-' | '_') if self.view == View::Grid => self.zoom(1),
+            KeyCode::Char('+' | '=') if self.view == View::Grid => self.zoom_grid(-1),
+            KeyCode::Char('-' | '_') if self.view == View::Grid => self.zoom_grid(1),
+            KeyCode::Char('+' | '=') => self.zoom_slide(1),
+            KeyCode::Char('-' | '_') => self.zoom_slide(-1),
+            KeyCode::Char('0') if self.view == View::Present => self.zoom = Zoom::FIT,
             _ => return,
         }
         self.dirty = true;
+    }
+
+    fn zoomed(&self) -> bool {
+        self.view == View::Present && self.zoom != Zoom::FIT
+    }
+
+    /// Zoom the presented slide `by` steps, keeping the middle of the screen
+    /// on the same part of it.
+    fn zoom_slide(&mut self, by: isize) {
+        let at = ZOOMS
+            .iter()
+            .position(|&z| z == self.zoom.percent)
+            .unwrap_or(0);
+        let percent = ZOOMS[at.saturating_add_signed(by).min(ZOOMS.len() - 1)];
+        let k = f32::from(percent) / f32::from(self.zoom.percent);
+        let keep = |at: u16, screen: u16| {
+            let half = f32::from(screen) / 2.;
+            ((f32::from(at) + half) * k - half).max(0.) as u16
+        };
+        self.zoom = Zoom {
+            percent,
+            x: keep(self.zoom.x, self.main.width),
+            y: keep(self.zoom.y, self.main.height),
+        };
+        self.clamp_pan();
+    }
+
+    /// Move the zoomed slide a quarter of the screen across and down.
+    fn pan(&mut self, across: i32, down: i32) {
+        let by = |at: u16, screen: u16, steps: i32| {
+            let step = i32::from((screen / 4).max(1));
+            (i32::from(at) + steps * step).clamp(0, u16::MAX.into()) as u16
+        };
+        self.zoom.x = by(self.zoom.x, self.main.width, across);
+        self.zoom.y = by(self.zoom.y, self.main.height, down);
+        self.clamp_pan();
+    }
+
+    /// Keep the zoomed slide covering the screen where it is large enough to.
+    fn clamp_pan(&mut self) {
+        let font = self.picker.font_size();
+        let (fw, fh) = (f32::from(font.width), f32::from(font.height));
+        let (pw, ph) = self.deck.page_size;
+        let (cols, rows) = (self.main.width, self.main.height);
+        let fit = (f32::from(cols) * fw / pw).min(f32::from(rows) * fh / ph);
+        let scale = fit * f32::from(self.zoom.percent) / 100.;
+        let most = |len: f32, screen: u16| (len.round() as u16).saturating_sub(screen);
+        self.zoom.x = self.zoom.x.min(most(pw * scale / fw, cols));
+        self.zoom.y = self.zoom.y.min(most(ph * scale / fh, rows));
     }
 
     fn step(&mut self, by: isize) {
@@ -305,7 +367,7 @@ impl App {
     }
 
     /// Change the grid by `by` columns: fewer columns, bigger slides.
-    fn zoom(&mut self, by: i32) {
+    fn zoom_grid(&mut self, by: i32) {
         let cols = i32::try_from(self.grid().cols).unwrap_or(i32::MAX);
         let cols = (cols + by).clamp(1, self.widest().into());
         self.grid_cols = Some(cols as u16);
@@ -383,12 +445,17 @@ impl App {
     }
 
     /// Queue what the view shows, most wanted first. Kept are the full-size
-    /// slides near the current one and the grid's slides at its zoom.
+    /// slides near the current one, fitted and at the current zoom, and the
+    /// grid's slides at its zoom.
     fn schedule(&mut self) {
         let area = self.main;
         let grid = self.grid();
         let mut wanted = Vec::new();
-        let full = |page| Key::new(page, area);
+        let zoom = self.zoom;
+        let full = |page| Key {
+            zoom,
+            ..Key::new(page, area)
+        };
         let near = [
             self.cur,
             self.cur + 1,
@@ -425,11 +492,11 @@ impl App {
         let thumb = Block::bordered().inner(slot).as_size();
         // Both looks are kept, so `t` back is immediate.
         self.slides.retain(|job, _| {
-            let size = job.key.size();
-            if size == full {
-                job.key.page.abs_diff(cur) <= KEEP
+            let key = job.key;
+            if key.size() == full {
+                key.page.abs_diff(cur) <= KEEP && (key.zoom == zoom || key.zoom == Zoom::FIT)
             } else {
-                size == thumb
+                key.size() == thumb
             }
         });
     }
@@ -439,15 +506,22 @@ impl App {
     fn draw(&self, f: &mut Frame) {
         let (main, status) = split(f.area());
         match self.view {
-            View::Present => self.draw_slide(f, self.cur, main),
+            View::Present => {
+                let key = Key {
+                    zoom: self.zoom,
+                    ..Key::new(self.cur, main)
+                };
+                self.draw_slide(f, key, main);
+            }
             View::Grid => self.draw_grid(f),
         }
         f.render_widget(Paragraph::new(self.status()), status);
     }
 
-    fn draw_slide(&self, f: &mut Frame, page: usize, area: Rect) {
+    /// The slide `key` names, in `area`, which is `key`'s size.
+    fn draw_slide(&self, f: &mut Frame, key: Key, area: Rect) {
         let job = Job {
-            key: Key::new(page, area),
+            key,
             look: self.look,
         };
         match self.slides.get(&job).or_else(|| self.stale.get(&job)) {
@@ -482,14 +556,22 @@ impl App {
                 .title(Span::styled(format!(" {} ", i + 1), style));
             let inner = block.inner(rect);
             f.render_widget(block, rect);
-            self.draw_slide(f, i, inner);
+            self.draw_slide(f, Key::new(i, inner), inner);
         }
     }
 
     fn status(&self) -> Line<'_> {
         let dim = Style::new().fg(Color::DarkGray);
+        let zoom = format!("present {}%", self.zoom.percent);
         let (view, keys) = match self.view {
-            View::Present => ("present", "n/p ←/→ next/prev · g grid · t text · q quit"),
+            View::Present if self.zoomed() => (
+                zoom.as_str(),
+                "arrows pan · +/- zoom · 0 fit · n/p next/prev · t text · q quit",
+            ),
+            View::Present => (
+                "present",
+                "n/p ←/→ next/prev · +/- zoom · g grid · t text · q quit",
+            ),
             View::Grid => (
                 "grid",
                 "n/p arrows move · +/- zoom · g/enter present · t text · q quit",

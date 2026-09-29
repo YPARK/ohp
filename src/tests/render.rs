@@ -55,11 +55,7 @@ fn a_slide_fills_its_cell_box_without_overflowing() {
     let font = picker.font_size();
 
     for (cols, rows) in [(40, 10), (20, 30), (140, 39)] {
-        let key = Key {
-            page: 1,
-            cols,
-            rows,
-        };
+        let key = key(1, cols, rows);
         let image = rasterise(&pdf, &cache, &InterpreterSettings::default(), &picker, key).unwrap();
         let (bw, bh) = (u32::from(cols * font.width), u32::from(rows * font.height));
         assert!(image.width() <= bw && image.height() <= bh, "{cols}x{rows}");
@@ -75,11 +71,7 @@ fn a_page_past_the_end_renders_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let deck = Deck::open(&fixture::write(dir.path(), 2)).unwrap();
     let pdf = Pdf::new(deck.data.clone()).unwrap();
-    let key = Key {
-        page: 2,
-        cols: 40,
-        rows: 10,
-    };
+    let key = key(2, 40, 10);
     let settings = InterpreterSettings::default();
     assert!(
         rasterise(
@@ -93,10 +85,16 @@ fn a_page_past_the_end_renders_nothing() {
     );
 }
 
-/// A job for page `page` in a `cols` × `rows` box.
+/// Page `page` fitted to a `cols` × `rows` box.
+fn key(page: usize, cols: u16, rows: u16) -> Key {
+    Key::new(page, Rect::new(0, 0, cols, rows))
+}
+
 fn job(page: usize, cols: u16, rows: u16, look: Look) -> Job {
-    let key = Key { page, cols, rows };
-    Job { key, look }
+    Job {
+        key: key(page, cols, rows),
+        look,
+    }
 }
 
 #[test]
@@ -164,4 +162,118 @@ fn cleared_jobs_are_not_rendered() {
             .recv_timeout(Duration::from_millis(200))
             .is_err()
     );
+}
+
+/// A zoomed rasterisation of page 1 of a two-page deck, whose square sits
+/// low on the left, in a 40×10 box of 10×20 pixel cells.
+fn zoomed(zoom: Zoom) -> RgbaImage {
+    let dir = tempfile::tempdir().unwrap();
+    let deck = Deck::open(&fixture::write(dir.path(), 2)).unwrap();
+    let pdf = Pdf::new(deck.data.clone()).unwrap();
+    let key = Key {
+        zoom,
+        ..key(1, 40, 10)
+    };
+    let settings = InterpreterSettings::default();
+    rasterise(
+        &pdf,
+        &RenderCache::new(),
+        &settings,
+        &Picker::halfblocks(),
+        key,
+    )
+    .unwrap()
+}
+
+fn has_blue(image: &RgbaImage) -> bool {
+    image.pixels().any(|p| p.0[2] > 200 && p.0[0] < 50)
+}
+
+#[test]
+fn a_zoomed_slide_fills_its_box_with_the_part_panned_to() {
+    let top = zoomed(Zoom {
+        percent: 200,
+        x: 0,
+        y: 0,
+    });
+    assert_eq!(top.dimensions(), (400, 200));
+    assert!(!has_blue(&top), "the square is in the bottom half");
+    let bottom = zoomed(Zoom {
+        percent: 200,
+        x: 0,
+        y: 10,
+    });
+    assert_eq!(bottom.dimensions(), (400, 200));
+    assert!(has_blue(&bottom));
+}
+
+#[test]
+fn panning_past_the_edge_still_fills_the_box() {
+    let far = zoomed(Zoom {
+        percent: 200,
+        x: 1000,
+        y: 1000,
+    });
+    assert_eq!(far.dimensions(), (400, 200));
+}
+
+#[test]
+fn a_zoom_too_large_to_render_is_enlarged_to_fill_the_box() {
+    let dir = tempfile::tempdir().unwrap();
+    let deck = Deck::open(&fixture::write(dir.path(), 1)).unwrap();
+    let pdf = Pdf::new(deck.data.clone()).unwrap();
+    // 400% of a slide fitted to 1400×780 pixels is over 17 million pixels.
+    let zoom = Zoom {
+        percent: 400,
+        x: 0,
+        y: 0,
+    };
+    let key = Key {
+        zoom,
+        ..key(0, 140, 39)
+    };
+    let settings = InterpreterSettings::default();
+    let image = rasterise(
+        &pdf,
+        &RenderCache::new(),
+        &settings,
+        &Picker::halfblocks(),
+        key,
+    )
+    .unwrap();
+    assert_eq!(image.dimensions(), (1400, 780));
+}
+
+#[test]
+fn a_zoomed_text_job_shows_the_part_panned_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let deck = Deck::open(&fixture::write_pdf(dir.path(), &fixture::hello())).unwrap();
+    let renderer = Renderer::spawn(&deck, &Picker::halfblocks(), 1).unwrap();
+    let text = |x| {
+        let key = Key {
+            zoom: Zoom {
+                percent: 200,
+                x,
+                y: 0,
+            },
+            ..key(0, 60, 30)
+        };
+        renderer.push([Job {
+            key,
+            look: Look::Text,
+        }]);
+        let Some(Slide::Text { cells, backdrop }) = fixture::next(&renderer).slide else {
+            panic!("no text slide");
+        };
+        assert_eq!(backdrop.size(), Size::new(60, 30));
+        assert_eq!((cells.len(), cells[0].len()), (30, 60));
+        cells
+            .iter()
+            .flatten()
+            .flatten()
+            .map(|c| c.ch)
+            .collect::<String>()
+    };
+    assert_eq!(text(0), "Hello");
+    assert_eq!(text(60), "");
 }
