@@ -7,13 +7,18 @@
 mod app;
 mod render;
 
+#[cfg(test)]
+#[path = "tests/fixture.rs"]
+mod fixture;
+
 use clap::Parser;
 use std::path::PathBuf;
 
 /// Present a beamer PDF in the terminal.
 ///
-/// Keys: n/p next/previous slide, g or tab switches between the slide and
-/// a grid of all slides, enter presents the slide picked in the grid, q quits.
+/// Keys: n/p or arrows next/previous slide (up/down move a row in the grid),
+/// g or tab switches between the slide and a grid of all slides, +/- zoom
+/// the grid, enter presents the slide picked in the grid, q quits.
 ///
 /// The PDF is reloaded whenever it changes on disk, so recompiling the
 /// slides updates them in place.

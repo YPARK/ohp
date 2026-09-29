@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 /// Slides the grid tries to show at once.
 const GRID_TARGET: usize = 12;
 const GRID_MAX_COLS: u16 = 8;
+/// Narrowest grid slot +/- zooms out to, in cells.
+const MIN_SLOT_WIDTH: u16 = 10;
 /// Full-size slides kept either side of the current one.
 const KEEP: usize = 2;
 const MAX_WORKERS: usize = 4;
@@ -104,6 +106,10 @@ struct App {
     cur: usize,
     /// First grid row on screen.
     top: usize,
+    /// Grid columns chosen with +/-; `None` fits the grid to the screen.
+    grid_cols: Option<u16>,
+    /// Where slides are drawn: the screen above the status line.
+    main: Rect,
     slides: HashMap<Key, Slide>,
     /// Slides of the deck before the last reload, shown until replaced.
     stale: HashMap<Key, Slide>,
@@ -131,6 +137,8 @@ impl App {
             view: View::Present,
             cur: 0,
             top: 0,
+            grid_cols: None,
+            main: Rect::default(),
             slides: HashMap::new(),
             stale: HashMap::new(),
             requested: HashSet::new(),
@@ -149,13 +157,13 @@ impl App {
             let now = Rect::new(0, 0, size.width, size.height);
             if now != screen {
                 screen = now;
+                self.main = split(screen).0;
                 self.forget();
             }
             if self.dirty {
                 self.dirty = false;
-                let (main, _) = split(screen);
-                self.scroll(main);
-                self.schedule(main);
+                self.scroll();
+                self.schedule();
                 terminal.draw(|f| self.draw(f))?;
             }
             if event::poll(Duration::from_millis(30))? {
@@ -249,8 +257,10 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
-            KeyCode::Char('n') => self.step(1),
-            KeyCode::Char('p') => self.step(-1),
+            KeyCode::Char('n') | KeyCode::Right => self.step(1),
+            KeyCode::Char('p') | KeyCode::Left => self.step(-1),
+            KeyCode::Down => self.step(self.row_step()),
+            KeyCode::Up => self.step(-self.row_step()),
             KeyCode::Char('g') | KeyCode::Tab => {
                 self.view = match self.view {
                     View::Present => View::Grid,
@@ -258,6 +268,8 @@ impl App {
                 }
             }
             KeyCode::Enter | KeyCode::Esc if self.view == View::Grid => self.view = View::Present,
+            KeyCode::Char('+' | '=') if self.view == View::Grid => self.zoom(-1),
+            KeyCode::Char('-' | '_') if self.view == View::Grid => self.zoom(1),
             _ => return,
         }
         self.dirty = true;
@@ -268,23 +280,49 @@ impl App {
         self.cur = self.cur.saturating_add_signed(by).min(last);
     }
 
+    /// Slides up/down moves by: a grid row, or one slide when presenting.
+    fn row_step(&self) -> isize {
+        match self.view {
+            View::Present => 1,
+            View::Grid => isize::try_from(self.grid().cols).unwrap_or(1),
+        }
+    }
+
+    /// Change the grid by `by` columns: fewer columns, bigger slides.
+    fn zoom(&mut self, by: i32) {
+        let cols = i32::try_from(self.grid().cols).unwrap_or(i32::MAX);
+        let cols = (cols + by).clamp(1, self.widest().into());
+        self.grid_cols = Some(cols as u16);
+    }
+
     // ── layout ──────────────────────────────────────────────────────────
 
-    fn grid(&self, area: Rect) -> Grid {
+    /// Most grid columns the screen and the deck allow.
+    fn widest(&self) -> u16 {
+        (self.main.width / MIN_SLOT_WIDTH)
+            .min(u16::try_from(self.deck.pages).unwrap_or(u16::MAX))
+            .max(1)
+    }
+
+    fn grid(&self) -> Grid {
+        if let Some(cols) = self.grid_cols {
+            return self.grid_with(cols.clamp(1, self.widest()));
+        }
         let want = self.deck.pages.min(GRID_TARGET);
-        let widest = GRID_MAX_COLS.min(self.deck.pages as u16).max(1);
-        let mut grid = self.grid_with(area, 1);
+        let widest = GRID_MAX_COLS.min(self.widest());
+        let mut grid = self.grid_with(1);
         for cols in 2..=widest {
             if grid.cols * grid.rows >= want {
                 break;
             }
-            grid = self.grid_with(area, cols);
+            grid = self.grid_with(cols);
         }
         grid
     }
 
     /// `cols` slots across, each as tall as a slide its width needs.
-    fn grid_with(&self, area: Rect, cols: u16) -> Grid {
+    fn grid_with(&self, cols: u16) -> Grid {
+        let area = self.main;
         let font = self.picker.font_size();
         let (pw, ph) = self.deck.page_size;
         let slot_w = (area.width / cols).max(3);
@@ -314,10 +352,13 @@ impl App {
         })
     }
 
-    /// Keep the current slide's grid row on screen.
-    fn scroll(&mut self, area: Rect) {
-        let grid = self.grid(area);
+    /// Keep the current slide's grid row on screen, and no rows past the
+    /// last below it.
+    fn scroll(&mut self) {
+        let grid = self.grid();
         let row = self.cur / grid.cols;
+        let rows = self.deck.pages.div_ceil(grid.cols);
+        self.top = self.top.min(rows.saturating_sub(grid.rows));
         if row < self.top {
             self.top = row;
         } else if row >= self.top + grid.rows {
@@ -325,16 +366,17 @@ impl App {
         }
     }
 
-    /// Queue what the view shows, most wanted first, and drop full-size
-    /// slides far from the current one.
-    fn schedule(&mut self, area: Rect) {
+    /// Queue what the view shows, most wanted first. Kept are the full-size
+    /// slides near the current one and the grid's slides at its zoom.
+    fn schedule(&mut self) {
+        let area = self.main;
+        let grid = self.grid();
         let mut wanted = Vec::new();
         let full = |page| Key::new(page, area);
         let near = [self.cur, self.cur + 1, self.cur.wrapping_sub(1), self.cur + 2];
         match self.view {
             View::Present => wanted.extend(near.map(full)),
             View::Grid => {
-                let grid = self.grid(area);
                 let thumb = |(i, r): (usize, Rect)| Key::new(i, Block::bordered().inner(r));
                 wanted.extend(self.slots(&grid).find(|&(i, _)| i == self.cur).map(thumb));
                 wanted.extend(self.slots(&grid).map(thumb));
@@ -355,8 +397,18 @@ impl App {
         }
         self.renderer.push(jobs);
 
-        let (cur, (cols, rows)) = (self.cur, (area.width, area.height));
-        self.slides.retain(|k, _| (k.cols, k.rows) != (cols, rows) || k.page.abs_diff(cur) <= KEEP);
+        let cur = self.cur;
+        let full = (area.width, area.height);
+        let inner = Block::bordered().inner(Rect::new(0, 0, grid.slot.width, grid.slot.height));
+        let thumb = (inner.width, inner.height);
+        self.slides.retain(|k, _| {
+            let size = (k.cols, k.rows);
+            if size == full {
+                k.page.abs_diff(cur) <= KEEP
+            } else {
+                size == thumb
+            }
+        });
     }
 
     // ── drawing ─────────────────────────────────────────────────────────
@@ -365,7 +417,7 @@ impl App {
         let (main, status) = split(f.area());
         match self.view {
             View::Present => self.draw_slide(f, self.cur, main),
-            View::Grid => self.draw_grid(f, main),
+            View::Grid => self.draw_grid(f),
         }
         f.render_widget(Paragraph::new(self.status()), status);
     }
@@ -379,8 +431,8 @@ impl App {
         }
     }
 
-    fn draw_grid(&self, f: &mut Frame, area: Rect) {
-        let grid = self.grid(area);
+    fn draw_grid(&self, f: &mut Frame) {
+        let grid = self.grid();
         for (i, rect) in self.slots(&grid) {
             let on = i == self.cur;
             let (style, border) = if on {
@@ -401,8 +453,8 @@ impl App {
     fn status(&self) -> Line<'_> {
         let dim = Style::new().fg(Color::DarkGray);
         let (view, keys) = match self.view {
-            View::Present => ("present", "n/p next/prev · g grid · q quit"),
-            View::Grid => ("grid", "n/p next/prev · g/enter present · q quit"),
+            View::Present => ("present", "n/p ←/→ next/prev · g grid · q quit"),
+            View::Grid => ("grid", "n/p arrows move · +/- zoom · g/enter present · q quit"),
         };
         let mut spans = vec![
             Span::styled(format!(" {} ", self.deck.name), Style::new().add_modifier(Modifier::BOLD)),
@@ -448,3 +500,7 @@ fn note(f: &mut Frame, area: Rect, text: &str) {
     let text = Span::styled(text, Style::new().fg(Color::DarkGray));
     f.render_widget(Paragraph::new(text).centered(), mid);
 }
+
+#[cfg(test)]
+#[path = "tests/app.rs"]
+mod tests;

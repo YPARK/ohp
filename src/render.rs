@@ -223,3 +223,7 @@ fn rasterise<'a>(
         pixmap.data_as_u8_slice().to_vec(),
     )
 }
+
+#[cfg(test)]
+#[path = "tests/render.rs"]
+mod tests;
