@@ -22,6 +22,7 @@ use ratatui::{DefaultTerminal, Frame};
 use ratatui_image::Image;
 use ratatui_image::picker::cap_parser::{Parser, QueryStdioOptions};
 use ratatui_image::picker::{Picker, ProtocolType};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -121,6 +122,9 @@ struct App {
     grid_cols: Option<u16>,
     /// How the presented slide is zoomed, kept from slide to slide.
     zoom: Zoom,
+    /// The slide last drawn when presenting, shown while its replacement
+    /// at a new zoom renders.
+    shown: Cell<Option<Job>>,
     /// Where slides are drawn: the screen above the status line.
     main: Rect,
     /// Finished slides, `None` where one could not be rendered.
@@ -154,6 +158,7 @@ impl App {
             top: 0,
             grid_cols: None,
             zoom: Zoom::FIT,
+            shown: Cell::new(None),
             main: Rect::default(),
             slides: HashMap::new(),
             stale: HashMap::new(),
@@ -444,33 +449,48 @@ impl App {
         }
     }
 
-    /// Queue what the view shows, most wanted first. Kept are the full-size
-    /// slides near the current one, fitted and at the current zoom, and the
-    /// grid's slides at its zoom.
+    /// The slides on screen, the current one first.
+    fn visible(&self) -> Vec<Key> {
+        match self.view {
+            View::Present => vec![self.presented()],
+            View::Grid => {
+                let grid = self.grid();
+                let thumb = |(i, r): (usize, Rect)| Key::new(i, Block::bordered().inner(r));
+                let cur = self.slots(&grid).find(|&(i, _)| i == self.cur).map(thumb);
+                cur.into_iter()
+                    .chain(self.slots(&grid).map(thumb))
+                    .collect()
+            }
+        }
+    }
+
+    /// The current slide as presented.
+    fn presented(&self) -> Key {
+        Key {
+            zoom: self.zoom,
+            ..Key::new(self.cur, self.main)
+        }
+    }
+
+    fn job(&self, key: Key) -> Job {
+        Job {
+            key,
+            look: self.look,
+        }
+    }
+
+    /// Queue what the view shows, then what it may show next: the slides
+    /// either side fitted to the screen, and the presented slide from the
+    /// grid. Kept are those, the slides either side fitted and zoomed, the
+    /// slide last presented until its replacement arrives, and the grid's
+    /// slides at its zoom.
     fn schedule(&mut self) {
         let area = self.main;
-        let grid = self.grid();
-        let mut wanted = Vec::new();
-        let zoom = self.zoom;
-        let full = |page| Key {
-            zoom,
-            ..Key::new(page, area)
-        };
-        let near = [
-            self.cur,
-            self.cur + 1,
-            self.cur.wrapping_sub(1),
-            self.cur + 2,
-        ];
-        match self.view {
-            View::Present => wanted.extend(near.map(full)),
-            View::Grid => {
-                let thumb = |(i, r): (usize, Rect)| Key::new(i, Block::bordered().inner(r));
-                wanted.extend(self.slots(&grid).find(|&(i, _)| i == self.cur).map(thumb));
-                wanted.extend(self.slots(&grid).map(thumb));
-                // So leaving the grid shows the slide at once.
-                wanted.push(full(self.cur));
-            }
+        let mut wanted = self.visible();
+        let fitted = [self.cur + 1, self.cur.wrapping_sub(1), self.cur + 2];
+        wanted.extend(fitted.map(|page| Key::new(page, area)));
+        if self.view == View::Grid {
+            wanted.push(self.presented());
         }
         wanted.retain(|k| k.page < self.deck.pages);
 
@@ -478,23 +498,25 @@ impl App {
             self.requested.remove(&job);
         }
         let mut jobs = Vec::new();
-        let look = self.look;
-        for job in wanted.into_iter().map(|key| Job { key, look }) {
+        let wanted: Vec<Job> = wanted.into_iter().map(|key| self.job(key)).collect();
+        for job in wanted {
             if !self.slides.contains_key(&job) && self.requested.insert(job) {
                 jobs.push(job);
             }
         }
         self.renderer.push(jobs);
 
-        let cur = self.cur;
+        let (cur, zoom, shown) = (self.cur, self.zoom, self.shown.get());
         let full = area.as_size();
+        let grid = self.grid();
         let slot = Rect::new(0, 0, grid.slot.width, grid.slot.height);
         let thumb = Block::bordered().inner(slot).as_size();
         // Both looks are kept, so `t` back is immediate.
         self.slides.retain(|job, _| {
             let key = job.key;
             if key.size() == full {
-                key.page.abs_diff(cur) <= KEEP && (key.zoom == zoom || key.zoom == Zoom::FIT)
+                let kept = key.zoom == zoom || key.zoom == Zoom::FIT || Some(*job) == shown;
+                key.page.abs_diff(cur) <= KEEP && kept
             } else {
                 key.size() == thumb
             }
@@ -507,24 +529,33 @@ impl App {
         let (main, status) = split(f.area());
         match self.view {
             View::Present => {
-                let key = Key {
-                    zoom: self.zoom,
-                    ..Key::new(self.cur, main)
-                };
-                self.draw_slide(f, key, main);
+                let job = self.job(self.presented());
+                let shown = self.draw_slide(f, job, main);
+                self.shown.set(shown.or(self.shown.get()));
             }
             View::Grid => self.draw_grid(f),
         }
         f.render_widget(Paragraph::new(self.status()), status);
     }
 
-    /// The slide `key` names, in `area`, which is `key`'s size.
-    fn draw_slide(&self, f: &mut Frame, key: Key, area: Rect) {
-        let job = Job {
-            key,
-            look: self.look,
+    /// The slide `job` renders, in `area`, which is its key's size; until it
+    /// is rendered, the same slide as last presented or fitted. Returns the
+    /// job whose slide is drawn.
+    fn draw_slide(&self, f: &mut Frame, job: Job, area: Rect) -> Option<Job> {
+        let fitted = Job {
+            key: Key {
+                zoom: Zoom::FIT,
+                ..job.key
+            },
+            ..job
         };
-        match self.slides.get(&job).or_else(|| self.stale.get(&job)) {
+        let same = |other: &Job| other.key.page == job.key.page && other.look == job.look;
+        let found = [Some(job), self.shown.get().filter(same), Some(fitted)]
+            .into_iter()
+            .flatten()
+            .filter(|j| j.key.size() == job.key.size())
+            .find_map(|j| Some((j, self.slides.get(&j).or_else(|| self.stale.get(&j))?)));
+        match found.map(|(_, slide)| slide) {
             Some(Some(Slide::Image(proto))) => {
                 f.render_widget(Image::new(proto), centred(area, proto.size()));
             }
@@ -536,6 +567,7 @@ impl App {
             Some(None) => note(f, area, "cannot render this slide"),
             None => note(f, area, "rendering…"),
         }
+        found.map(|(j, _)| j)
     }
 
     fn draw_grid(&self, f: &mut Frame) {
@@ -556,7 +588,7 @@ impl App {
                 .title(Span::styled(format!(" {} ", i + 1), style));
             let inner = block.inner(rect);
             f.render_widget(block, rect);
-            self.draw_slide(f, Key::new(i, inner), inner);
+            self.draw_slide(f, self.job(Key::new(i, inner)), inner);
         }
     }
 
@@ -589,11 +621,13 @@ impl App {
             Span::raw(format!(" {}/{} ", self.cur + 1, self.deck.pages)),
             Span::styled(format!(" {view}{look}"), dim),
         ];
-        if !self.requested.is_empty() {
-            spans.push(Span::styled(
-                format!("  rendering {}", self.requested.len()),
-                dim,
-            ));
+        let waiting = self
+            .visible()
+            .into_iter()
+            .filter(|&key| !self.slides.contains_key(&self.job(key)))
+            .count();
+        if waiting > 0 {
+            spans.push(Span::styled(format!("  rendering {waiting}"), dim));
         }
         if let Some(notice) = &self.notice {
             spans.push(Span::styled(

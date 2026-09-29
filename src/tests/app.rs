@@ -233,6 +233,65 @@ fn the_zoomed_slide_is_asked_for_and_other_zooms_dropped() {
     assert!(!app.slides.contains_key(&old));
 }
 
+/// Draw the whole screen, 140×40 as `MAIN` is part of, and return its text.
+fn screen(app: &App) -> String {
+    use ratatui::backend::TestBackend;
+    let mut terminal = ratatui::Terminal::new(TestBackend::new(140, 40)).unwrap();
+    terminal.draw(|f| app.draw(f)).unwrap();
+    let buf = terminal.backend().buffer();
+    buf.content().iter().map(|c| c.symbol()).collect()
+}
+
+#[test]
+fn the_last_view_stays_on_screen_while_a_new_zoom_renders() {
+    let (_dir, mut app) = app_with(&fixture::hello(), Look::Image);
+    app.schedule();
+    app.receive(fixture::next(&app.renderer));
+    let fitted = job(Key::new(0, MAIN), Look::Image);
+    assert!(app.slides.contains_key(&fitted));
+    screen(&app);
+    assert_eq!(app.shown.get(), Some(fitted));
+
+    press(&mut app, &[KeyCode::Char('+')]);
+    app.schedule();
+    let text = screen(&app);
+    assert!(
+        !text.contains("rendering…"),
+        "the slide blanked while zooming"
+    );
+    assert!(
+        text.contains("rendering 1"),
+        "the zoomed slide is waited for"
+    );
+    assert_eq!(app.shown.get(), Some(fitted));
+    assert!(app.slides.contains_key(&fitted));
+}
+
+#[test]
+fn slides_either_side_are_fetched_fitted_even_when_zoomed() {
+    let (_dir, mut app) = app(5);
+    press(&mut app, &[KeyCode::Char('+')]);
+    app.schedule();
+    assert!(app.requested.contains(&job(Key::new(1, MAIN), Look::Image)));
+    assert!(
+        !app.requested
+            .iter()
+            .any(|j| j.key.page == 1 && j.key.zoom != Zoom::FIT)
+    );
+}
+
+#[test]
+fn slides_fetched_ahead_are_not_counted_as_rendering() {
+    let (_dir, mut app) = app(5);
+    app.schedule();
+    app.slides.insert(job(Key::new(0, MAIN), Look::Image), None);
+    assert!(
+        !app.requested.is_empty(),
+        "the slides either side are on their way"
+    );
+    assert!(!app.status().to_string().contains("rendering"));
+}
+
 #[test]
 fn t_switches_between_images_and_text() {
     let (_dir, mut app) = app(3);
