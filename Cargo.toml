@@ -2,7 +2,7 @@
 name = "ohp"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.92"
 license = "MIT"
 authors = ["Yongjin Park <yongjin.park@ubc.ca>"]
 description = "Present beamer PDF slides in the terminal over the kitty graphics protocol, in pure Rust"
