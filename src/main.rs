@@ -48,5 +48,5 @@ fn main() -> anyhow::Result<()> {
     };
     let path = remote.as_ref().map_or(args.pdf.as_path(), |r| r.path());
     let deck = render::Deck::open(path)?;
-    app::run(deck, args.text)
+    app::run(deck, args.text, remote.as_ref().map(remote::Remote::link))
 }

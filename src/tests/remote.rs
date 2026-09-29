@@ -10,7 +10,7 @@ fn fake_ssh(dir: &Path) -> PathBuf {
     std::fs::write(
         &ssh,
         "#!/bin/sh\n\
-         while [ \"$1\" = -o ]; do shift 2; done\n\
+         while :; do case \"$1\" in -o) shift 2 ;; -T) shift ;; *) break ;; esac; done\n\
          if [ \"$1\" = down ]; then echo 'ssh: connect to host down: Connection refused' >&2; exit 255; fi\n\
          shift\n\
          exec sh -c \"$1\"\n",
@@ -70,18 +70,84 @@ fn a_remote_pdf_is_copied_and_follows_changes() {
     assert_eq!(Deck::open(remote.path()).unwrap().pages, 3);
 
     fixture::write(&odd, 5);
+    wait_for(&remote, 5);
+
+    let copy = remote.path().to_path_buf();
+    drop(remote);
+    assert!(!copy.exists(), "the copy outlived ohp");
+}
+
+/// Wait up to ten seconds for the copy to have `pages` pages.
+fn wait_for(remote: &Remote, pages: usize) {
     let start = Instant::now();
-    while Deck::open(remote.path()).map_or(0, |d| d.pages) != 5 {
+    while Deck::open(remote.path()).map_or(0, |d| d.pages) != pages {
         assert!(
             start.elapsed() < Duration::from_secs(10),
             "the copy never changed"
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+}
 
-    let copy = remote.path().to_path_buf();
-    drop(remote);
-    assert!(!copy.exists(), "the copy outlived ohp");
+#[test]
+fn remote_names_cannot_clash_with_files_kept_beside_the_copy() {
+    let tools = tempfile::tempdir().unwrap();
+    let ssh = fake_ssh(tools.path());
+    let far = tempfile::tempdir().unwrap();
+    let deck = fixture::write(far.path(), 3);
+    for name in ["ssh", "ssh.log", "part", "x.part", "copy"] {
+        let original = far.path().join(name);
+        std::fs::copy(&deck, &original).unwrap();
+        let remote =
+            Remote::open(ssh.as_os_str(), "astrocyte", original.to_str().unwrap()).unwrap();
+        assert_eq!(remote.path().file_name().unwrap(), name);
+        assert_eq!(Deck::open(remote.path()).unwrap().pages, 3, "{name}");
+    }
+}
+
+#[test]
+fn the_control_socket_path_is_short() {
+    let tools = tempfile::tempdir().unwrap();
+    let ssh = fake_ssh(tools.path());
+    let far = tempfile::tempdir().unwrap();
+    let original = fixture::write(far.path(), 1);
+    let remote = Remote::open(ssh.as_os_str(), "astrocyte", original.to_str().unwrap()).unwrap();
+    // ssh adds a suffix of up to 17 bytes, and macOS allows 104.
+    let socket = remote
+        .path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("ssh");
+    assert!(socket.as_os_str().len() + 17 < 104, "{}", socket.display());
+}
+
+#[test]
+fn a_lost_connection_is_reported_and_remade() {
+    let tools = tempfile::tempdir().unwrap();
+    let ssh = fake_ssh(tools.path());
+    let far = tempfile::tempdir().unwrap();
+    let original = fixture::write(far.path(), 3);
+    let remote = Remote::open(ssh.as_os_str(), "astrocyte", original.to_str().unwrap()).unwrap();
+    assert_eq!(remote.link().trouble(), None);
+
+    let mut child = remote.master.lock().unwrap().child.take().unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let start = Instant::now();
+    while remote.link().trouble().is_none() {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the loss went unnoticed"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(remote.link().trouble().unwrap().contains("astrocyte"));
+
+    fixture::write(far.path(), 5);
+    wait_for(&remote, 5);
+    assert_eq!(remote.link().trouble(), None);
 }
 
 #[test]

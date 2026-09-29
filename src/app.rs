@@ -11,6 +11,7 @@
 //! Where the terminal has no graphics protocol, slides are shown as their
 //! text over a coarse image instead; `t` switches between the two anywhere.
 
+use crate::remote::Link;
 use crate::render::{self, Deck, Done, Job, Key, Look, Renderer, Slide, Stamp, Zoom};
 use crate::text;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -41,7 +42,9 @@ const MAX_WORKERS: usize = 4;
 const WATCH_EVERY: Duration = Duration::from_millis(250);
 
 /// `text` starts with slides as text even where images can be shown.
-pub fn run(deck: Deck, text: bool) -> anyhow::Result<()> {
+/// `link` is the connection the slides come over, for slides on another
+/// machine.
+pub fn run(deck: Deck, text: bool, link: Option<Link>) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
     let result = (|| {
         let picker = pick();
@@ -54,6 +57,7 @@ pub fn run(deck: Deck, text: bool) -> anyhow::Result<()> {
             Look::Image
         };
         let mut app = App::new(deck, picker, renderer, workers, look);
+        app.link = link;
         app.run(&mut terminal)?;
         app.clear_images()
     })();
@@ -140,6 +144,9 @@ struct App {
     checked: Instant,
     /// Shown in the status line until the next key press.
     notice: Option<String>,
+    link: Option<Link>,
+    /// What is wrong with `link`, shown in the status line until it is not.
+    trouble: Option<String>,
     dirty: bool,
     quit: bool,
 }
@@ -166,6 +173,8 @@ impl App {
             settling: None,
             checked: Instant::now(),
             notice: None,
+            link: None,
+            trouble: None,
             dirty: true,
             quit: false,
         }
@@ -230,6 +239,11 @@ impl App {
             return;
         }
         self.checked = Instant::now();
+        let trouble = self.link.as_ref().and_then(Link::trouble);
+        if trouble != self.trouble {
+            self.trouble = trouble;
+            self.dirty = true;
+        }
         let now = render::stamp(&self.deck.path);
         if now == self.stamp {
             self.settling = None;
@@ -628,6 +642,12 @@ impl App {
             .count();
         if waiting > 0 {
             spans.push(Span::styled(format!("  rendering {waiting}"), dim));
+        }
+        if let Some(trouble) = &self.trouble {
+            spans.push(Span::styled(
+                format!("  {trouble}"),
+                Style::new().add_modifier(Modifier::BOLD),
+            ));
         }
         if let Some(notice) = &self.notice {
             spans.push(Span::styled(
