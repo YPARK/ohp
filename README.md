@@ -60,3 +60,7 @@ before the slides take over the terminal.
 If the connection is lost, the status line says so and ohp reconnects by
 itself. It never asks for a password once the slides are up, so this needs
 a key or an ssh agent.
+
+## License
+
+MIT; see [LICENSE](LICENSE).
