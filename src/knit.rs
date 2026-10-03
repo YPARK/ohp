@@ -35,14 +35,11 @@ pub fn has_chunks(text: &str, rmd: bool) -> bool {
 /// own, with the plots beside it. Chunks run in `rmd`'s directory, as
 /// knitting there would run them, until they end or `stop` is set.
 pub fn knit(rmd: &Path, stop: &AtomicBool) -> Knitted {
-    match run(rmd, stop) {
-        Ok(Some((dir, md))) => Knitted::Done(dir, md),
-        Ok(None) => Knitted::Stopped,
-        Err(why) => Knitted::Failed(why),
-    }
+    run(rmd, stop).unwrap_or_else(Knitted::Failed)
 }
 
-fn run(rmd: &Path, stop: &AtomicBool) -> Result<Option<(TempDir, String)>, String> {
+/// As `knit`, with why it failed as an error, to be given with `?`.
+fn run(rmd: &Path, stop: &AtomicBool) -> Result<Knitted, String> {
     let rmd = std::path::absolute(rmd).map_err(|e| e.to_string())?;
     let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let out = dir.path().join("knitted.md");
@@ -69,12 +66,9 @@ fn run(rmd: &Path, stop: &AtomicBool) -> Result<Option<(TempDir, String)>, Strin
         .stderr(stderr);
     let status = match child::run(&mut command, stop, None) {
         Ok(Ended::Exited(status)) => status,
-        Ok(Ended::Stopped) => return Ok(None),
-        // Without a time limit, a chunk may take as long as it takes; one
-        // paused would never go on.
-        Ok(Ended::Paused | Ended::TimedOut) => {
-            return Err("knitting paused by a signal, chunks shown as code".into());
-        }
+        Ok(Ended::Stopped) => return Ok(Knitted::Stopped),
+        // A chunk may take as long as it takes: knitting has no time limit.
+        Ok(Ended::TimedOut) => return Err("knitting timed out, chunks shown as code".into()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err("R not found: chunks shown as code".into());
         }
@@ -93,7 +87,7 @@ fn run(rmd: &Path, stop: &AtomicBool) -> Result<Option<(TempDir, String)>, Strin
         ));
     }
     let md = std::fs::read_to_string(&out).map_err(|e| format!("knitr wrote nothing: {e}"))?;
-    Ok(Some((dir, md)))
+    Ok(Knitted::Done(dir, md))
 }
 
 #[cfg(test)]

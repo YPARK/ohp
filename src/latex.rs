@@ -16,6 +16,10 @@ use std::time::Duration;
 
 use crate::process::child::{self, Ended};
 
+/// Most LaTeX runs at once, well within the programs ohp may run.
+const MAX_WORKERS: usize = 16;
+const _: () = assert!(MAX_WORKERS < child::MOST);
+
 /// Longest a formula's LaTeX run may take.
 const LATEX_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -47,16 +51,8 @@ static AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
 /// Every edit of a formula, or of the preamble, renders another.
 const KEPT: usize = 512;
 
-/// What a formula's LaTeX run came to.
-enum Run {
-    Set(Rendered),
-    Failed,
-    TimedOut,
-    /// Stopped, as ohp quits: neither set nor failed.
-    Stopped,
-}
-
-/// A formula as kept: set, failed, or timed out once, to be tried again.
+/// What a formula's LaTeX run came to, as kept: set, failed, or timed out
+/// once, to be tried again.
 #[derive(Clone, Debug)]
 enum Kept {
     Set(Rendered),
@@ -83,7 +79,7 @@ pub fn render(
     stop: &AtomicBool,
 ) -> HashMap<Formula, Rendered> {
     let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
-    render_on(formulas, preamble, stop, workers)
+    render_on(formulas, preamble, stop, workers.min(MAX_WORKERS))
 }
 
 /// As `render`, with `workers` LaTeX runs at once.
@@ -125,23 +121,21 @@ fn render_on(
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        let runs: Vec<Run> = std::thread::scope(|s| {
+        // A run stopped is neither set nor failed, and is not kept.
+        let runs: Vec<Option<Kept>> = std::thread::scope(|s| {
             let runs: Vec<_> = batch
                 .iter()
                 .map(|(f, _)| s.spawn(|| run(&f.0, f.1, preamble, stop, LATEX_TIMEOUT)))
                 .collect();
             runs.into_iter()
-                .map(|r| r.join().unwrap_or(Run::Failed))
+                .map(|r| r.join().unwrap_or(Some(Kept::Failed)))
                 .collect()
         });
-        for (&(f, timed_out_before), ran) in batch.iter().zip(runs) {
-            let kept = match ran {
-                Run::Set(rendered) => Kept::Set(rendered),
-                Run::Failed => Kept::Failed,
-                Run::TimedOut if timed_out_before => Kept::Failed,
-                Run::TimedOut => Kept::TimedOut,
-                // Neither set nor failed, it is not kept.
-                Run::Stopped => continue,
+        for (&(f, timed_out_before), kept) in batch.iter().zip(runs) {
+            let kept = match kept {
+                Some(Kept::TimedOut) if timed_out_before => Kept::Failed,
+                Some(kept) => kept,
+                None => continue,
             };
             made.push((f, kept));
         }
@@ -169,12 +163,17 @@ fn evict(done: &mut Done, kept: usize) {
     done.retain(|_, (used, _)| *used >= oldest);
 }
 
-/// `formula` rendered by one LaTeX run, in a directory of its own.
 /// `formula` rendered by one LaTeX run, in a directory of its own, unless it
-/// runs past `timeout` or `stop` is set.
-fn run(formula: &str, display: bool, preamble: &str, stop: &AtomicBool, timeout: Duration) -> Run {
+/// runs past `timeout`, or `stop` is set: then `None`, as it is not kept.
+fn run(
+    formula: &str,
+    display: bool,
+    preamble: &str,
+    stop: &AtomicBool,
+    timeout: Duration,
+) -> Option<Kept> {
     let Ok(dir) = tempfile::tempdir() else {
-        return Run::Failed;
+        return Some(Kept::Failed);
     };
     let style = if display { "\\displaystyle" } else { "" };
     let tex = format!(
@@ -191,7 +190,7 @@ fn run(formula: &str, display: bool, preamble: &str, stop: &AtomicBool, timeout:
          \\end{{document}}\n"
     );
     if std::fs::write(dir.path().join("f.tex"), tex).is_err() {
-        return Run::Failed;
+        return Some(Kept::Failed);
     }
     let mut command = Command::new("pdflatex");
     command
@@ -206,10 +205,12 @@ fn run(formula: &str, display: bool, preamble: &str, stop: &AtomicBool, timeout:
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     match child::run(&mut command, stop, Some(timeout)) {
-        Ok(Ended::Exited(status)) if status.success() => read(&dir).map_or(Run::Failed, Run::Set),
-        Ok(Ended::Stopped) => Run::Stopped,
-        Ok(Ended::TimedOut) => Run::TimedOut,
-        Ok(Ended::Exited(_) | Ended::Paused) | Err(_) => Run::Failed,
+        Ok(Ended::Exited(status)) if status.success() => {
+            Some(read(&dir).map_or(Kept::Failed, Kept::Set))
+        }
+        Ok(Ended::Stopped) => None,
+        Ok(Ended::TimedOut) => Some(Kept::TimedOut),
+        Ok(Ended::Exited(_)) | Err(_) => Some(Kept::Failed),
     }
 }
 

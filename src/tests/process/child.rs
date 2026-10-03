@@ -57,14 +57,39 @@ fn a_program_past_its_time_is_ended() {
 
 #[cfg(unix)]
 #[test]
-fn a_paused_program_is_ended() {
-    let go = AtomicBool::new(false);
+fn a_program_leads_a_session_of_its_own() {
+    // In a session of its own it has no terminal, to ask for a password on
+    // and wait there, as a chunk might.
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = stop.clone();
+    let running = std::thread::spawn(move || run(&mut shell("sleep 30"), &stopping, None));
     let start = Instant::now();
-    // It pauses itself, as one that touched the terminal from the background
-    // would be paused.
-    let ended = run(&mut shell("kill -STOP $$; sleep 60"), &go, None).unwrap();
-    assert!(matches!(ended, Ended::Paused), "{ended:?}");
-    assert!(start.elapsed() < Duration::from_secs(5));
+    // Each program running, any test's, with its session, read while it
+    // runs: each is to lead its own.
+    let mut sessions = Vec::new();
+    while sessions.is_empty() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+        sessions = group::running()
+            .into_iter()
+            // SAFETY: getsid only reads a process's session.
+            .map(|id| (id, unsafe { libc::getsid(id) }))
+            // -1 for one that ended as it was read.
+            .filter(|&(_, session)| session != -1)
+            .collect();
+    }
+    stop.store(true, Ordering::Relaxed);
+    running.join().unwrap().unwrap();
+    assert!(!sessions.is_empty());
+    for (id, session) in sessions {
+        assert_eq!(session, id, "{id} does not lead its session");
+    }
+}
+
+#[test]
+fn a_program_is_not_started_once_stopped() {
+    let stopped = AtomicBool::new(true);
+    let ended = run(&mut Command::new("no-such-program-ohp"), &stopped, None).unwrap();
+    assert!(matches!(ended, Ended::Stopped), "{ended:?}");
 }
 
 #[test]

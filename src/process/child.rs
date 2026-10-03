@@ -1,10 +1,10 @@
 //! Programs ohp runs and must be able to end, as knitr's R and LaTeX.
 //!
-//! Each runs in a process group of its own, so what it starts, as a chunk's
-//! processes or LaTeX's font makers, can be ended with it. It is waited on
-//! until it exits, ohp stops it, or its time runs out. One paused by a
-//! signal, as a program that touched the terminal from the background, would
-//! never go on, and is ended too.
+//! Each runs in a session of its own, without a terminal: what it starts,
+//! as a chunk's processes or LaTeX's font makers, is in its process group,
+//! to be ended with it, and none can read the terminal, as to ask for a
+//! password, and wait there for ever, nor write over the slides. It is
+//! waited on until it exits, ohp stops it, or its time runs out.
 //!
 //! Ending kills the group twice: while the program, unreaped, holds the
 //! group's id, so no other group can have been given it, and once more
@@ -24,9 +24,11 @@ pub enum Ended {
     Stopped,
     /// Ended for running past its time.
     TimedOut,
-    /// Ended for being paused by a signal.
-    Paused,
 }
+
+/// Most programs that may run at once: more are refused.
+#[cfg(unix)]
+pub const MOST: usize = group::SLOTS;
 
 /// First wait between looks at a program, so a quick one is seen done soon.
 const FIRST_POLL: Duration = Duration::from_millis(2);
@@ -40,17 +42,34 @@ pub fn run(
     stop: &AtomicBool,
     timeout: Option<Duration>,
 ) -> io::Result<Ended> {
+    if stop.load(Ordering::Relaxed) {
+        return Ok(Ended::Stopped);
+    }
     #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(command, 0);
-    let mut child = command.spawn()?;
-    let known = group::Known::new(&child);
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid is safe to call between fork and exec.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            })
+        };
+    }
+    let (mut child, known) = group::start(command)?;
+    let Some(known) = known else {
+        end(&mut child);
+        let _ = child.wait();
+        return Err(io::Error::other("too many programs running at once"));
+    };
     let start = Instant::now();
     let mut poll = FIRST_POLL;
     let ended = loop {
-        match state(&mut child) {
-            Ok(State::Running) => {}
-            Ok(State::Exited) => break None,
-            Ok(State::Paused) => break Some(Ended::Paused),
+        match exited(&mut child) {
+            Ok(true) => break None,
+            Ok(false) => {}
             Err(e) => {
                 end(&mut child);
                 drop(known);
@@ -70,41 +89,30 @@ pub fn run(
     end(&mut child);
     // No longer killed by `kill_all` once reaped: its group's id is free.
     drop(known);
-    let status = child.wait()?;
-    Ok(ended.unwrap_or(Ended::Exited(status)))
+    let status = child.wait();
+    // Ended by ohp, it is so however its reaping went.
+    match ended {
+        Some(ended) => Ok(ended),
+        None => status.map(Ended::Exited),
+    }
 }
 
 /// Kill every group running, as ohp ends in a hurry. Safe in a signal
-/// handler: it only reads atomics and sends signals.
+/// handler: it only reads atomics, sleeps and sends signals.
 #[cfg(unix)]
 pub fn kill_all() {
     group::kill_all();
 }
 
-enum State {
-    Running,
-    Exited,
-    Paused,
-}
-
-/// Whether the program has exited or been paused, leaving it unreaped.
+/// Whether the program has exited, leaving it unreaped.
 #[cfg(unix)]
-fn state(child: &mut Child) -> io::Result<State> {
-    let flags = libc::WEXITED | libc::WSTOPPED | libc::WNOHANG | libc::WNOWAIT;
-    Ok(match wait(child, flags)? {
-        None => State::Running,
-        Some(code) if exited(code) => State::Exited,
-        Some(libc::CLD_STOPPED | libc::CLD_TRAPPED) => State::Paused,
-        Some(_) => State::Running,
-    })
+fn exited(child: &mut Child) -> io::Result<bool> {
+    Ok(wait(child, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)?.is_some_and(is_exit))
 }
 
 #[cfg(not(unix))]
-fn state(child: &mut Child) -> io::Result<State> {
-    Ok(match child.try_wait()? {
-        Some(_) => State::Exited,
-        None => State::Running,
-    })
+fn exited(child: &mut Child) -> io::Result<bool> {
+    Ok(child.try_wait()?.is_some())
 }
 
 /// End the program and its group, leaving it to be reaped.
@@ -133,7 +141,7 @@ fn wait_until_exited(child: &mut Child) -> io::Result<()> {
     loop {
         // macOS reports a pause too, though only an exit is asked for.
         match wait(child, libc::WEXITED | libc::WNOWAIT)? {
-            Some(code) if exited(code) => return Ok(()),
+            Some(code) if is_exit(code) => return Ok(()),
             _ => std::thread::sleep(FIRST_POLL),
         }
     }
@@ -162,40 +170,62 @@ fn wait(child: &Child, flags: libc::c_int) -> io::Result<Option<libc::c_int>> {
 }
 
 #[cfg(unix)]
-fn exited(code: libc::c_int) -> bool {
+fn is_exit(code: libc::c_int) -> bool {
     matches!(code, libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED)
 }
 
 /// The process groups running, for `kill_all`.
 #[cfg(unix)]
 mod group {
-    use std::process::Child;
-    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::io;
+    use std::process::{Child, Command};
+    use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
-    /// Slots for groups running: more than ohp runs at once.
-    static GROUPS: [AtomicI32; 64] = [const { AtomicI32::new(0) }; 64];
+    pub const SLOTS: usize = 64;
+
+    /// Groups running, by id; 0 where a slot is free.
+    static GROUPS: [AtomicI32; SLOTS] = [const { AtomicI32::new(0) }; SLOTS];
+
+    /// Programs being started, not yet known: `kill_all` waits for them.
+    static STARTING: AtomicUsize = AtomicUsize::new(0);
+
+    /// Longest `kill_all` waits for programs being started, in steps of
+    /// 10ms: it may run on the very thread starting one.
+    const STARTING_WAIT: u32 = 20;
 
     /// A group known while it runs.
-    pub struct Known(Option<&'static AtomicI32>);
+    pub struct Known(&'static AtomicI32);
 
-    impl Known {
-        pub fn new(child: &Child) -> Self {
+    impl Drop for Known {
+        fn drop(&mut self) {
+            self.0.store(0, Ordering::SeqCst);
+        }
+    }
+
+    /// Start `command` and know its group; `None` if no slot is free.
+    pub fn start(command: &mut Command) -> io::Result<(Child, Option<Known>)> {
+        STARTING.fetch_add(1, Ordering::SeqCst);
+        let started = command.spawn().map(|child| {
             let id = i32::try_from(child.id()).unwrap_or(0);
             let slot = GROUPS.iter().find(|s| {
                 id != 0
                     && s.compare_exchange(0, id, Ordering::SeqCst, Ordering::SeqCst)
                         .is_ok()
             });
-            Known(slot)
-        }
+            (child, slot.map(Known))
+        });
+        STARTING.fetch_sub(1, Ordering::SeqCst);
+        started
     }
 
-    impl Drop for Known {
-        fn drop(&mut self) {
-            if let Some(slot) = self.0 {
-                slot.store(0, Ordering::SeqCst);
-            }
-        }
+    /// The groups running, by id.
+    #[cfg(test)]
+    pub fn running() -> Vec<i32> {
+        GROUPS
+            .iter()
+            .map(|s| s.load(Ordering::SeqCst))
+            .filter(|&id| id != 0)
+            .collect()
     }
 
     pub fn kill(id: libc::pid_t) {
@@ -204,6 +234,17 @@ mod group {
     }
 
     pub fn kill_all() {
+        let step = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 10_000_000,
+        };
+        for _ in 0..STARTING_WAIT {
+            if STARTING.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+            // SAFETY: nanosleep is safe in a signal handler.
+            unsafe { libc::nanosleep(&step, std::ptr::null_mut()) };
+        }
         for slot in &GROUPS {
             match slot.load(Ordering::SeqCst) {
                 0 => {}
@@ -215,12 +256,13 @@ mod group {
 
 #[cfg(not(unix))]
 mod group {
+    use std::io;
+    use std::process::{Child, Command};
+
     pub struct Known;
 
-    impl Known {
-        pub fn new(_: &std::process::Child) -> Self {
-            Known
-        }
+    pub fn start(command: &mut Command) -> io::Result<(Child, Option<Known>)> {
+        Ok((command.spawn()?, Some(Known)))
     }
 }
 

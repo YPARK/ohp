@@ -105,7 +105,7 @@ fn a_run_that_never_ends_times_out_or_stops() {
     let go = AtomicBool::new(false);
     let start = std::time::Instant::now();
     let ran = run(looping, false, "", &go, Duration::from_secs(1));
-    assert!(matches!(ran, Run::TimedOut));
+    assert!(matches!(ran, Some(Kept::TimedOut)));
     assert!(start.elapsed() < Duration::from_secs(5));
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -115,7 +115,7 @@ fn a_run_that_never_ends_times_out_or_stops() {
         stopping.store(true, Ordering::Relaxed);
     });
     let ran = run(looping, false, "", &stop, Duration::from_secs(60));
-    assert!(matches!(ran, Run::Stopped));
+    assert!(ran.is_none());
 }
 
 #[test]
