@@ -39,6 +39,11 @@ fn due(app: &mut App) {
 fn watch(app: &mut App) {
     due(app);
     app.watch();
+    finish(app);
+}
+
+/// Wait for a reload under way to finish.
+fn finish(app: &mut App) {
     let start = Instant::now();
     while app.loading.is_some() {
         assert!(start.elapsed() < Duration::from_secs(30), "the reload hung");
@@ -428,6 +433,21 @@ fn a_change_while_reloading_reloads_again() {
     assert!(app.loading.is_some(), "read once more");
     app.stop();
     assert!(app.loading.is_none());
+}
+
+#[test]
+fn r_reloads_a_file_the_watch_has_already_seen() {
+    let (dir, mut app) = app(3);
+    fixture::write(dir.path(), 5);
+    // As after a reload that failed: the change is taken, the old deck kept.
+    app.stamp = render::stamp(&app.deck.path);
+    watch(&mut app);
+    assert_eq!(app.deck.pages, 3);
+
+    press(&mut app, &[KeyCode::Char('r')]);
+    finish(&mut app);
+    assert_eq!(app.deck.pages, 5);
+    assert_eq!(app.notice.as_deref(), Some("reloaded"));
 }
 
 #[test]

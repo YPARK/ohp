@@ -7,7 +7,8 @@
 //! The PDF is reloaded when it changes on disk, as after a LaTeX run. It is
 //! read, or typeset, off the UI thread, so a knitr run that takes a minute
 //! does not freeze the slides. The slides already on screen stay until their
-//! new renders arrive, so a reload does not flash the screen empty.
+//! new renders arrive, so a reload does not flash the screen empty. `r`
+//! reloads at once, as after fixing what made a reload fail.
 //!
 //! Where the terminal has no graphics protocol, slides are shown as their
 //! text over a coarse image instead; `t` switches between the two anywhere.
@@ -396,6 +397,8 @@ impl App {
             KeyCode::Char('+' | '=') => self.zoom_slide(1),
             KeyCode::Char('-' | '_') => self.zoom_slide(-1),
             KeyCode::Char('0') if self.view == View::Present => self.zoom = Zoom::FIT,
+            // Even unchanged: a chunk may read files ohp does not watch.
+            KeyCode::Char('r') => self.reload(),
             _ => return,
         }
         self.dirty = true;
@@ -690,15 +693,15 @@ impl App {
         let (view, keys) = match self.view {
             View::Present if self.zoomed() => (
                 zoom.as_str(),
-                "arrows pan · +/- zoom · 0 fit · n/p next/prev · t text · q quit",
+                "arrows pan · +/- zoom · 0 fit · n/p next/prev · t text · r reload · q quit",
             ),
             View::Present => (
                 "present",
-                "n/p ←/→ next/prev · +/- zoom · g grid · t text · q quit",
+                "n/p ←/→ next/prev · +/- zoom · g grid · t text · r reload · q quit",
             ),
             View::Grid => (
                 "grid",
-                "n/p arrows move · +/- zoom · g/enter present · t text · q quit",
+                "n/p arrows move · +/- zoom · g/enter present · t text · r reload · q quit",
             ),
         };
         let look = match self.look {

@@ -56,7 +56,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// fits it back to the screen.
 ///
 /// The file is reloaded whenever it changes on disk, so recompiling or
-/// saving it updates the slides in place.
+/// saving it updates the slides in place; r reloads it at once.
 #[derive(Parser)]
 #[command(version)]
 struct Args {

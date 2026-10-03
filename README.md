@@ -48,6 +48,7 @@ ohp --paper a4 notes.md              # a markdown document, on A4 pages
 | arrows, zoomed in | pan the slide |
 | `0` | fit the slide back to the screen |
 | `t` | switch between images and text |
+| `r` | reload the file now, as after fixing what made a reload fail |
 | `q` | quit |
 
 ## Terminals
