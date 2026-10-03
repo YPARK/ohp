@@ -5,18 +5,52 @@ edition = "2024"
 rust-version = "1.92"
 license = "MIT"
 authors = ["Yongjin Park <yongjin.park@ubc.ca>"]
-description = "Present beamer PDF slides in the terminal over the kitty graphics protocol, in pure Rust"
+description = "Present beamer PDF slides, and markdown, in the terminal over the kitty graphics protocol"
 repository = "https://github.com/YPARK/ohp"
-keywords = ["pdf", "beamer", "slides", "tui", "kitty"]
+keywords = ["pdf", "beamer", "slides", "tui", "markdown"]
 categories = ["command-line-utilities", "visualization"]
+
+[features]
+default = ["markdown"]
+# Markdown and R Markdown, typeset by typst. Typst's evaluator grows its
+# stack through `psm`, which assembles one small file with the C toolchain.
+# Citations are read with typst's own bibliography crates.
+markdown = [
+    "dep:hayagriva",
+    "dep:libc",
+    "dep:signal-hook",
+    "dep:percent-encoding",
+    "dep:pulldown-cmark",
+    "dep:serde_json",
+    "dep:serde_yaml",
+    "dep:typst",
+    "dep:typst-assets",
+    "dep:typst-layout",
+    "dep:typst-pdf",
+]
 
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
+hayagriva = { version = "0.10.1", optional = true }
 hayro = "0.7.1"
 image = { version = "0.25", default-features = false }
+percent-encoding = { version = "2.3", optional = true }
+pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 ratatui = "0.30"
 # Without default features: `chafa-dyn` links a C library.
 ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
+serde_json = { version = "1", optional = true }
+serde_yaml = { version = "0.9", optional = true }
 tempfile = "3.27.0"
+typst = { version = "0.15.1", optional = true }
+typst-assets = { version = "0.15.1", features = ["fonts"], optional = true }
+typst-layout = { version = "0.15.1", optional = true }
+typst-pdf = { version = "0.15.1", optional = true }
 unicode-width = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+# To stop knitr's chunks with R, as their process group.
+libc = { version = "0.2", optional = true }
+# To stop knitr on Ctrl-C, which no longer reaches its process group.
+signal-hook = { version = "0.4", optional = true }

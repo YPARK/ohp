@@ -15,7 +15,7 @@ fn app_with(pdf: &[u8], look: Look) -> (tempfile::TempDir, App) {
     let deck = Deck::open(&fixture::write_pdf(dir.path(), pdf)).unwrap();
     let picker = Picker::halfblocks();
     let renderer = Renderer::spawn(&deck, &picker, 1).unwrap();
-    let mut app = App::new(deck, picker, renderer, 1, look);
+    let mut app = App::new(deck, picker, renderer, 1, look, Arc::default());
     app.main = MAIN;
     (dir, app)
 }
@@ -33,6 +33,25 @@ fn press(app: &mut App, keys: &[KeyCode]) {
 /// Let the next `watch` look at the file now.
 fn due(app: &mut App) {
     app.checked = Instant::now() - WATCH_EVERY;
+}
+
+/// Look at the file now, and wait for any reload that starts.
+fn watch(app: &mut App) {
+    due(app);
+    app.watch();
+    let start = Instant::now();
+    while app.loading.is_some() {
+        assert!(start.elapsed() < Duration::from_secs(30), "the reload hung");
+        std::thread::sleep(Duration::from_millis(5));
+        app.loaded();
+    }
+}
+
+/// A reload under way that sends `deck` once done.
+fn loading(deck: anyhow::Result<Deck>) -> (Receiver<anyhow::Result<Deck>>, JoinHandle<()>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(deck).unwrap();
+    (rx, std::thread::spawn(|| {}))
 }
 
 #[test]
@@ -336,13 +355,11 @@ fn a_rewritten_pdf_reloads_once_it_settles() {
     let (dir, mut app) = app(3);
     fixture::write(dir.path(), 5);
 
-    due(&mut app);
-    app.watch();
+    watch(&mut app);
     assert_eq!(app.deck.pages, 3, "reloaded before the file settled");
     assert_eq!(app.notice.as_deref(), Some("PDF changing…"));
 
-    due(&mut app);
-    app.watch();
+    watch(&mut app);
     assert_eq!(app.deck.pages, 5);
     assert_eq!(app.notice.as_deref(), Some("reloaded"));
 }
@@ -353,8 +370,7 @@ fn a_half_written_pdf_is_not_reloaded() {
     let whole = fixture::pdf(5);
     std::fs::write(dir.path().join("deck.pdf"), &whole[..whole.len() / 2]).unwrap();
     for _ in 0..3 {
-        due(&mut app);
-        app.watch();
+        watch(&mut app);
     }
     assert_eq!(app.deck.pages, 3);
     assert_eq!(app.notice.as_deref(), Some("PDF changing…"));
@@ -365,8 +381,7 @@ fn a_broken_pdf_keeps_the_old_slides() {
     let (dir, mut app) = app(3);
     std::fs::write(dir.path().join("deck.pdf"), b"%PDF-1.5\ngarbage\n%%EOF\n").unwrap();
     for _ in 0..2 {
-        due(&mut app);
-        app.watch();
+        watch(&mut app);
     }
     assert_eq!(app.deck.pages, 3);
     assert!(
@@ -382,8 +397,7 @@ fn a_shorter_deck_moves_the_current_slide_back() {
     app.cur = 8;
     fixture::write(dir.path(), 4);
     for _ in 0..2 {
-        due(&mut app);
-        app.watch();
+        watch(&mut app);
     }
     assert_eq!(app.deck.pages, 4);
     assert_eq!(app.cur, 3);
@@ -396,11 +410,24 @@ fn a_reload_keeps_old_slides_on_screen_until_replaced() {
     app.slides.insert(key, None);
     fixture::write(dir.path(), 4);
     for _ in 0..2 {
-        due(&mut app);
-        app.watch();
+        watch(&mut app);
     }
     assert!(app.slides.is_empty());
     assert!(app.stale.contains_key(&key));
+}
+
+#[test]
+fn a_change_while_reloading_reloads_again() {
+    let (dir, mut app) = app(3);
+    fixture::write(dir.path(), 6);
+    app.loading = Some(loading(Deck::open(&dir.path().join("deck.pdf"))));
+    app.reload();
+    assert!(app.again);
+    app.loaded();
+    assert_eq!(app.deck.pages, 6);
+    assert!(app.loading.is_some(), "read once more");
+    app.stop();
+    assert!(app.loading.is_none());
 }
 
 #[test]
@@ -416,4 +443,25 @@ fn centred_keeps_the_image_inside_its_area() {
     let area = Rect::new(10, 5, 100, 30);
     assert_eq!(centred(area, Size::new(60, 30)), Rect::new(30, 5, 60, 30));
     assert_eq!(centred(area, Size::new(200, 50)), area);
+}
+
+#[test]
+fn dropping_the_app_stops_a_reload_and_waits_for_it() {
+    let (_dir, mut app) = app(3);
+    let stop = app.deck.options.stop.clone();
+    let heard = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let told = heard.clone();
+    let reader = std::thread::spawn(move || {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(10) {
+            if stop.load(Ordering::Relaxed) {
+                told.store(true, Ordering::Relaxed);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    });
+    app.loading = Some((std::sync::mpsc::channel().1, reader));
+    drop(app);
+    assert!(heard.load(Ordering::Relaxed));
 }

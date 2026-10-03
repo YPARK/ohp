@@ -1,4 +1,5 @@
-//! Small PDFs written for tests.
+//! What tests write and look for: small PDFs and other files, and the
+//! programs here.
 
 use crate::render::{Done, Renderer};
 use std::path::{Path, PathBuf};
@@ -88,4 +89,48 @@ pub fn next(renderer: &Renderer) -> Done {
         .done
         .recv_timeout(Duration::from_secs(10))
         .expect("a render")
+}
+
+#[cfg(feature = "markdown")]
+/// `text` written to `name` in `dir`.
+pub fn write_text(dir: &Path, name: &str, text: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+#[cfg(feature = "markdown")]
+/// Whether R is here, with knitr.
+pub fn r_here() -> bool {
+    std::process::Command::new("Rscript")
+        .args(["-e", "stopifnot(requireNamespace('knitr', quietly = TRUE))"])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+#[cfg(feature = "markdown")]
+/// A `sleep` this test run alone starts, so no other run's is taken for
+/// it: a time with the run's id in it.
+pub fn marked_sleep(whole: u32) -> String {
+    format!("sleep {whole}.{}", std::process::id())
+}
+
+#[cfg(feature = "markdown")]
+/// Whether, within a few seconds, no process is left whose command ends in
+/// `command`: one killed takes a moment to go.
+pub fn gone(command: &str) -> bool {
+    // A dot is any character to pgrep, and the end is anchored, so no
+    // longer time, as another run's, matches.
+    let pattern = format!("{}$", command.replace('.', "\\."));
+    let running = || {
+        std::process::Command::new("pgrep")
+            .args(["-f", &pattern])
+            .output()
+            .is_ok_and(|o| !o.stdout.is_empty())
+    };
+    let start = std::time::Instant::now();
+    while running() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    !running()
 }

@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked
+      - run: cargo test
 
   lint:
     runs-on: ubuntu-latest
@@ -31,7 +31,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings
 
   # The oldest Rust that Cargo.toml says ohp builds with.
   msrv:
@@ -40,4 +40,4 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.92
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --locked --all-targets
+      - run: cargo check --all-targets
