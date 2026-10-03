@@ -110,6 +110,9 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
                 doc = convert(&rendered);
             }
         }
+        if stopped() {
+            anyhow::bail!("stopped");
+        }
         let world = Doc::new(doc.source, &doc.images, &doc.files, &mut loaded);
         match compile(&world) {
             Ok(pdf) => {
@@ -179,6 +182,9 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
                 }
             }
         }
+    }
+    if stopped() {
+        anyhow::bail!("stopped");
     }
     let source = format!(
         "#set page(paper: {})\n#raw(block: true, {})",
@@ -276,6 +282,8 @@ fn knit(rmd: &Path, stop: &AtomicBool) -> Result<(TempDir, String), String> {
             }
         }
     };
+    // What its chunks left running would outlive the directory they use.
+    end(&mut child);
     if !status.success() {
         let stderr = std::fs::read_to_string(&log).unwrap_or_default();
         let why = stderr
@@ -292,15 +300,24 @@ fn knit(rmd: &Path, stop: &AtomicBool) -> Result<(TempDir, String), String> {
     Ok((dir, md))
 }
 
-/// Kill R and what its chunks started, its process group, and reap it.
+/// Kill R, if it still runs, and what its chunks started, its process
+/// group, and reap it.
 fn end(child: &mut Child) {
-    #[cfg(unix)]
-    if let Ok(group) = libc::pid_t::try_from(child.id()) {
-        // SAFETY: killpg only sends a signal; the group is R's own.
-        unsafe { libc::killpg(group, libc::SIGKILL) };
-    }
     let _ = child.kill();
     let _ = child.wait();
+    // A process forked as the group was killed can miss the signal: the
+    // group is killed until none is left in it.
+    #[cfg(unix)]
+    if let Ok(group) = libc::pid_t::try_from(child.id()) {
+        for _ in 0..100 {
+            // SAFETY: killpg only sends a signal; the group is R's own, and
+            // R, reaped, leaves it to those its chunks started.
+            if unsafe { libc::killpg(group, libc::SIGKILL) } != 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 }
 
 static LIBRARY: LazyLock<LazyHash<Library>> = LazyLock::new(|| LazyHash::new(Library::default()));

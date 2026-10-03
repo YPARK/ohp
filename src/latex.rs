@@ -59,25 +59,28 @@ pub fn render(
 ) -> HashMap<Formula, Rendered> {
     let key = |f: &Formula| (preamble.to_string(), f.clone());
     // What this call returns is taken as it goes, not read back, so
-    // another call evicting meanwhile takes nothing from it.
+    // another call evicting meanwhile takes nothing from it. All it asks
+    // for is stamped alike, and so kept or evicted together.
     let mut found = HashMap::new();
-    let fresh: Vec<&Formula> = {
+    let mut fresh: Vec<&Formula> = Vec::new();
+    let mut seen = HashSet::new();
+    let now = {
         let (done, asked) = &mut *RENDERED.lock().expect("rendered formulas");
         *asked += 1;
-        let mut seen = HashSet::new();
-        formulas
-            .iter()
-            .filter(|f| match done.get_mut(&key(f)) {
+        for f in formulas {
+            match done.get_mut(&key(f)) {
                 Some((used, rendered)) => {
                     *used = *asked;
-                    found.extend(rendered.clone().map(|r| ((*f).clone(), r)));
-                    false
+                    found.extend(rendered.clone().map(|r| (f.clone(), r)));
                 }
-                None => seen.insert(*f),
-            })
-            .collect()
+                None if seen.insert(f) => fresh.push(f),
+                None => {}
+            }
+        }
+        *asked
     };
     let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let mut made = Vec::new();
     for batch in fresh.chunks(workers) {
         if stop.load(Ordering::Relaxed) {
             break;
@@ -89,14 +92,14 @@ pub fn render(
                 .collect();
             runs.into_iter().map(|r| r.join().ok().flatten()).collect()
         });
-        let (done, asked) = &mut *RENDERED.lock().expect("rendered formulas");
-        *asked += 1;
-        for (f, result) in batch.iter().zip(results) {
-            found.extend(result.clone().map(|r| ((*f).clone(), r)));
-            done.insert(key(f), (*asked, result));
-        }
-        evict(done, KEPT);
+        made.extend(batch.iter().zip(results));
     }
+    let (done, _) = &mut *RENDERED.lock().expect("rendered formulas");
+    for (f, result) in made {
+        found.extend(result.clone().map(|r| ((*f).clone(), r)));
+        done.insert(key(f), (now, result));
+    }
+    evict(done, KEPT);
     found
 }
 

@@ -259,11 +259,35 @@ fn a_stopped_knit_ends_r() {
     let why = knit(&path, &stop).unwrap_err();
     assert_eq!(why, "knitting stopped");
     assert!(start.elapsed().as_secs() < 10);
-    let left = Command::new("pgrep")
-        .args(["-f", "sleep 61.25"])
-        .output()
-        .unwrap();
-    assert!(left.stdout.is_empty(), "what the chunk started outlived it");
+    // Killed, it takes a moment to go.
+    let running = || {
+        Command::new("pgrep")
+            .args(["-xf", "sleep 61.25"])
+            .output()
+            .is_ok_and(|o| !o.stdout.is_empty())
+    };
+    let start = std::time::Instant::now();
+    while running() && start.elapsed().as_secs() < 5 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(!running(), "what the chunk started outlived it");
+}
+
+#[test]
+fn a_bibliography_typst_cannot_set_from_leaves_citations_as_written() {
+    let dir = tempfile::tempdir().unwrap();
+    // Each file reads, but typst takes no key twice.
+    let entry = "@book{doe, author = {Doe, J.}, title = {A Book}, year = {1999}}\n";
+    write(dir.path(), "a.bib", entry);
+    write(dir.path(), "b.bib", entry);
+    let path = write(
+        dir.path(),
+        "cites.md",
+        "---\nbibliography: [a.bib, b.bib]\n---\nAs @doe says, $x^2$.\n",
+    );
+    let note = typeset(&path, &options(false)).unwrap().note.unwrap();
+    assert!(note.starts_with("citations left as written"), "{note}");
+    assert!(!note.contains("shown as source"), "{note}");
 }
 
 #[test]

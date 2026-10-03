@@ -872,10 +872,12 @@ impl Writer<'_, '_> {
             None => url,
         };
         // As written, or with its `%` escapes read, as pandoc reads a path.
-        let unescaped = percent_decode_str(path).decode_utf8().ok();
-        [Some(Cow::Borrowed(path)), unescaped]
-            .into_iter()
-            .flatten()
+        let unescaped = percent_decode_str(path)
+            .decode_utf8()
+            .ok()
+            .filter(|u| u != path);
+        std::iter::once(Cow::Borrowed(path))
+            .chain(unescaped)
             .map(|p| self.setting.base.join(p.as_ref()))
             .find(|p| p.is_file())
     }
@@ -999,6 +1001,7 @@ impl Writer<'_, '_> {
         let (title, suppress) = (bib.title.clone(), bib.suppress);
 
         self.block();
+        let start = self.out.len();
         if suppress {
             // Typst sets no citation without a bibliography.
             self.raw("#[#show bibliography: none\n");
@@ -1021,13 +1024,12 @@ impl Writer<'_, '_> {
                 "#[\n"
             });
         }
-        let start = self.out.len();
         for cite in nocite {
             self.raw(&cite);
         }
         self.raw(&list);
-        self.citing.push(start..self.out.len());
         self.raw("]\n");
+        self.citing.push(start..self.out.len());
     }
 
     /// Whether a slide's title, or a section's, is the last written: a

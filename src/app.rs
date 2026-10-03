@@ -219,6 +219,10 @@ impl App {
             }
             self.watch();
             self.loaded();
+            // A signal asked ohp to stop.
+            if self.deck.options.stop.load(Ordering::Relaxed) {
+                self.quit = true;
+            }
         }
         Ok(())
     }

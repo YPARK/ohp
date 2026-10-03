@@ -87,8 +87,25 @@ fn main() -> anyhow::Result<()> {
         None => None,
     };
     let path = remote.as_ref().map_or(args.file.as_path(), |r| r.path());
-    let deck = render::Deck::open_with(path, options(&args, remote.is_some()))?;
+    let options = options(&args, remote.is_some());
+    #[cfg(all(unix, feature = "markdown"))]
+    stop_on_signals(&options.stop)?;
+    let deck = render::Deck::open_with(path, options)?;
     app::run(deck, args.text, remote.as_ref().map(remote::Remote::link))
+}
+
+/// Ask ohp to stop on the first Ctrl-C, hang-up or termination, so a knitr
+/// run, in a process group of its own that the signal does not reach, is
+/// stopped with it; end it on the second.
+#[cfg(all(unix, feature = "markdown"))]
+fn stop_on_signals(stop: &std::sync::Arc<std::sync::atomic::AtomicBool>) -> std::io::Result<()> {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    use signal_hook::flag;
+    for signal in [SIGINT, SIGTERM, SIGHUP] {
+        flag::register_conditional_shutdown(signal, 1, stop.clone())?;
+        flag::register(signal, stop.clone())?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "markdown")]

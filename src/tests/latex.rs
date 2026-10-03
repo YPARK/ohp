@@ -44,6 +44,16 @@ fn only_the_formulas_asked_for_most_recently_are_kept() {
 }
 
 #[test]
+fn formulas_asked_for_at_once_are_kept_however_many() {
+    let formula = |n: u64| (String::new(), (format!("x_{n}"), false));
+    let mut done: Done = (0..10)
+        .map(|n| (formula(n), (u64::from(n > 0), None)))
+        .collect();
+    evict(&mut done, 3);
+    assert_eq!(done.len(), 9, "all of the latest document");
+}
+
+#[test]
 fn a_stopped_render_renders_nothing_new() {
     let stop = AtomicBool::new(true);
     // One LaTeX would render, and no other test asks for.
