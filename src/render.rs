@@ -44,6 +44,18 @@ pub struct Deck {
     pub note: Option<String>,
 }
 
+/// Making a deck stopped, as ohp quits: not worth saying as an error.
+#[derive(Debug)]
+pub struct Stopped;
+
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("stopped")
+    }
+}
+
+impl std::error::Error for Stopped {}
+
 /// How a deck that is not a PDF is made into one.
 #[derive(Clone, Debug)]
 #[cfg_attr(not(feature = "markdown"), allow(dead_code))]

@@ -4,20 +4,20 @@
 //! depth are read from LaTeX's log, so it can sit on the baseline of the
 //! text around it. Formulas are rendered at once, a LaTeX run each, and
 //! kept, the most recently asked for of them, so a reload renders only those
-//! that changed.
+//! that changed. A run that takes too long, as a macro that expands for
+//! ever, is ended; tried again once, as LaTeX making a font may be slow the
+//! first time, it has failed.
 
 use std::collections::{HashMap, HashSet};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// Longest a formula's LaTeX run may take: past it, as for a macro that
-/// expands for ever, the formula has failed.
+use crate::process::child::{self, Ended};
+
+/// Longest a formula's LaTeX run may take.
 const LATEX_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How often a LaTeX run is checked on, for whether it is done or to stop.
-const LATEX_POLL: Duration = Duration::from_millis(20);
 
 /// LaTeX's own size, which the rendered height and depth are measured in.
 const LATEX_PT: f32 = 10.;
@@ -47,9 +47,26 @@ static AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
 /// Every edit of a formula, or of the preamble, renders another.
 const KEPT: usize = 512;
 
+/// What a formula's LaTeX run came to.
+enum Run {
+    Set(Rendered),
+    Failed,
+    TimedOut,
+    /// Stopped, as ohp quits: neither set nor failed.
+    Stopped,
+}
+
+/// A formula as kept: set, failed, or timed out once, to be tried again.
+#[derive(Clone, Debug)]
+enum Kept {
+    Set(Rendered),
+    Failed,
+    TimedOut,
+}
+
 /// Each formula LaTeX rendered before, or failed to, by preamble and
 /// formula, with when it was last asked for.
-type Done = HashMap<(String, Formula), (u64, Option<Rendered>)>;
+type Done = HashMap<(String, Formula), (u64, Kept)>;
 
 /// What was rendered, and how many times `render` has been asked.
 static RENDERED: LazyLock<Mutex<(Done, u64)>> = LazyLock::new(Mutex::default);
@@ -81,19 +98,24 @@ fn render_on(
     // another call evicting meanwhile takes nothing from it. All it asks
     // for is stamped alike, and so kept or evicted together.
     let mut found = HashMap::new();
-    let mut fresh: Vec<&Formula> = Vec::new();
+    // To be run, and whether each timed out before.
+    let mut fresh: Vec<(&Formula, bool)> = Vec::new();
     let mut seen = HashSet::new();
     let now = {
         let (done, asked) = &mut *RENDERED.lock().expect("rendered formulas");
         *asked += 1;
         for f in formulas {
+            if !seen.insert(f) {
+                continue;
+            }
             match done.get_mut(&key(f)) {
-                Some((used, rendered)) => {
+                Some((used, Kept::Set(rendered))) => {
                     *used = *asked;
-                    found.extend(rendered.clone().map(|r| (f.clone(), r)));
+                    found.insert(f.clone(), rendered.clone());
                 }
-                None if seen.insert(f) => fresh.push(f),
-                None => {}
+                Some((used, Kept::Failed)) => *used = *asked,
+                Some((_, Kept::TimedOut)) => fresh.push((f, true)),
+                None => fresh.push((f, false)),
             }
         }
         *asked
@@ -103,27 +125,33 @@ fn render_on(
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        // A run stopped is not kept, as one LaTeX failed on would be.
-        let results: Vec<Option<Option<Rendered>>> = std::thread::scope(|s| {
+        let runs: Vec<Run> = std::thread::scope(|s| {
             let runs: Vec<_> = batch
                 .iter()
-                .map(|f| s.spawn(|| run(&f.0, f.1, preamble, stop)))
+                .map(|(f, _)| s.spawn(|| run(&f.0, f.1, preamble, stop, LATEX_TIMEOUT)))
                 .collect();
             runs.into_iter()
-                .map(|r| r.join().unwrap_or(Some(None)))
+                .map(|r| r.join().unwrap_or(Run::Failed))
                 .collect()
         });
-        made.extend(
-            batch
-                .iter()
-                .zip(results)
-                .filter_map(|(f, result)| Some((f, result?))),
-        );
+        for (&(f, timed_out_before), ran) in batch.iter().zip(runs) {
+            let kept = match ran {
+                Run::Set(rendered) => Kept::Set(rendered),
+                Run::Failed => Kept::Failed,
+                Run::TimedOut if timed_out_before => Kept::Failed,
+                Run::TimedOut => Kept::TimedOut,
+                // Neither set nor failed, it is not kept.
+                Run::Stopped => continue,
+            };
+            made.push((f, kept));
+        }
     }
     let (done, _) = &mut *RENDERED.lock().expect("rendered formulas");
-    for (f, result) in made {
-        found.extend(result.clone().map(|r| ((*f).clone(), r)));
-        done.insert(key(f), (now, result));
+    for (f, kept) in made {
+        if let Kept::Set(rendered) = &kept {
+            found.insert(f.clone(), rendered.clone());
+        }
+        done.insert(key(f), (now, kept));
     }
     evict(done, KEPT);
     found
@@ -142,31 +170,12 @@ fn evict(done: &mut Done, kept: usize) {
 }
 
 /// `formula` rendered by one LaTeX run, in a directory of its own.
-/// `None` if it was stopped, not to be kept as a formula LaTeX failed on.
-fn run(
-    formula: &str,
-    display: bool,
-    preamble: &str,
-    stop: &AtomicBool,
-) -> Option<Option<Rendered>> {
-    let dir = match tempfile::tempdir() {
-        Ok(dir) => dir,
-        Err(_) => return Some(None),
+/// `formula` rendered by one LaTeX run, in a directory of its own, unless it
+/// runs past `timeout` or `stop` is set.
+fn run(formula: &str, display: bool, preamble: &str, stop: &AtomicBool, timeout: Duration) -> Run {
+    let Ok(dir) = tempfile::tempdir() else {
+        return Run::Failed;
     };
-    let ran = latex(&dir, formula, display, preamble, stop, LATEX_TIMEOUT)?;
-    Some(ran.then(|| read(&dir)).flatten())
-}
-
-/// Whether pdflatex set `formula` in `dir`; `None` if it was stopped. One
-/// that runs past `timeout`, as a macro that expands for ever, has failed.
-fn latex(
-    dir: &tempfile::TempDir,
-    formula: &str,
-    display: bool,
-    preamble: &str,
-    stop: &AtomicBool,
-    timeout: Duration,
-) -> Option<bool> {
     let style = if display { "\\displaystyle" } else { "" };
     let tex = format!(
         "\\documentclass{{article}}\n\
@@ -182,9 +191,10 @@ fn latex(
          \\end{{document}}\n"
     );
     if std::fs::write(dir.path().join("f.tex"), tex).is_err() {
-        return Some(false);
+        return Run::Failed;
     }
-    let child = Command::new("pdflatex")
+    let mut command = Command::new("pdflatex");
+    command
         .args([
             "-interaction=nonstopmode",
             "-halt-on-error",
@@ -194,25 +204,12 @@ fn latex(
         .current_dir(dir.path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    let Ok(mut child) = child else {
-        return Some(false);
-    };
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status.success()),
-            Ok(None) => {}
-            Err(_) => return Some(false),
-        }
-        let stopped = stop.load(Ordering::Relaxed);
-        if stopped || start.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return (!stopped).then_some(false);
-        }
-        std::thread::sleep(LATEX_POLL);
+        .stderr(Stdio::null());
+    match child::run(&mut command, stop, Some(timeout)) {
+        Ok(Ended::Exited(status)) if status.success() => read(&dir).map_or(Run::Failed, Run::Set),
+        Ok(Ended::Stopped) => Run::Stopped,
+        Ok(Ended::TimedOut) => Run::TimedOut,
+        Ok(Ended::Exited(_) | Ended::Paused) | Err(_) => Run::Failed,
     }
 }
 

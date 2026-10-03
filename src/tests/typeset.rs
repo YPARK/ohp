@@ -1,35 +1,13 @@
 use super::*;
 use crate::render::Deck;
 
-fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
-    let path = dir.join(name);
-    std::fs::write(&path, text).unwrap();
-    path
-}
+use crate::fixture::{r_here, write_text as write};
 
 fn options(knit: bool) -> Options {
     Options {
         knit,
         ..Options::default()
     }
-}
-
-fn r_here() -> bool {
-    Command::new("Rscript")
-        .args(["-e", "stopifnot(requireNamespace('knitr', quietly = TRUE))"])
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
-#[test]
-fn chunks_of_any_engine_are_run_and_plain_blocks_are_not() {
-    assert!(has_chunks("```{python}\nprint(1)\n```\n", false));
-    assert!(has_chunks("``` {bash, echo=FALSE}\nls\n```\n", false));
-    assert!(has_chunks("```{r}\n1\n```\n", true));
-    assert!(!has_chunks("```python\nprint(1)\n```\n", false));
-    assert!(!has_chunks("```{.python}\nprint(1)\n```\n", false));
-    assert!(!has_chunks("Inline `r 1 + 1` in markdown.\n", false));
-    assert!(has_chunks("Inline `r 1 + 1` in R Markdown.\n", true));
 }
 
 #[test]
@@ -98,40 +76,15 @@ fn chunks_not_knitted_show_as_code() {
 }
 
 #[test]
-fn knitr_runs_chunks_beside_the_file_and_keeps_plots_apart() {
+fn a_knitted_file_shows_its_output() {
     if !r_here() {
         eprintln!("skipped: no R with knitr");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("data.csv"), "x\n1\n2\n").unwrap();
-    let path = write(
-        dir.path(),
-        "a.Rmd",
-        "```{r}\nsum(read.csv('data.csv')$x) * 7\n```\n\n```{r p}\nplot(1:3)\n```\n",
-    );
-    let (out, md) = knit(&path, &AtomicBool::new(false)).unwrap();
-    assert!(md.contains("## [1] 21"), "{md}");
-    let figures = out.path().join("figure");
-    assert!(std::fs::read_dir(&figures).unwrap().count() > 0);
-    assert!(md.contains(&*figures.to_string_lossy()), "{md}");
-    assert!(!dir.path().join("figure").exists());
-
+    let path = write(dir.path(), "a.Rmd", "```{r p}\n6 * 7\nplot(1:3)\n```\n");
     let done = typeset(&path, &options(true)).unwrap();
     assert!(done.note.is_none(), "{:?}", done.note);
-}
-
-#[test]
-fn knitr_runs_bash_chunks_in_plain_markdown() {
-    if !r_here() {
-        eprintln!("skipped: no R with knitr");
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("here.txt"), "").unwrap();
-    let path = write(dir.path(), "a.md", "```{bash}\nls *.txt\n```\n");
-    let (_, md) = knit(&path, &AtomicBool::new(false)).unwrap();
-    assert!(md.contains("## here.txt"), "{md}");
 }
 
 /// The text typst sets for a markdown file, page by page.
@@ -237,47 +190,6 @@ fn groups_typeset_as_bases() {
 }
 
 #[test]
-fn a_stopped_knit_ends_r() {
-    if !r_here() {
-        eprintln!("skipped: no R with knitr");
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    // A process the chunk starts, told apart by how long it sleeps: a
-    // time this run alone gives, so no other run's is taken for it.
-    let sleep = format!("sleep 61.{}", std::process::id());
-    let path = write(
-        dir.path(),
-        "slow.Rmd",
-        &format!("```{{r}}\nsystem(\"{sleep}\")\n```\n"),
-    );
-    let stop = Arc::new(AtomicBool::new(false));
-    let stopping = stop.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        stopping.store(true, Ordering::Relaxed);
-    });
-    let start = std::time::Instant::now();
-    let why = knit(&path, &stop).unwrap_err();
-    assert_eq!(why, "knitting stopped");
-    assert!(start.elapsed().as_secs() < 10);
-    // Killed, it takes a moment to go.
-    let running = || {
-        Command::new("pgrep")
-            // The time's dot is any character to pgrep, and the end is
-            // anchored, so no longer time, as another run's, matches.
-            .args(["-f", &format!("{}$", sleep.replace('.', "\\."))])
-            .output()
-            .is_ok_and(|o| !o.stdout.is_empty())
-    };
-    let start = std::time::Instant::now();
-    while running() && start.elapsed().as_secs() < 5 {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    assert!(!running(), "what the chunk started outlived it");
-}
-
-#[test]
 fn a_bibliography_typst_cannot_set_from_leaves_citations_as_written() {
     let dir = tempfile::tempdir().unwrap();
     // Each file reads, but typst takes no key twice.
@@ -301,34 +213,5 @@ fn a_stopped_typeset_ends_without_a_pdf() {
     let stopped = options(false);
     stopped.stop.store(true, Ordering::Relaxed);
     let why = typeset(&path, &stopped).err().unwrap();
-    assert_eq!(why.to_string(), "stopped");
-}
-
-#[cfg(unix)]
-#[test]
-fn a_stopped_process_has_not_exited() {
-    /// Killed however the test ends, so a failure leaves no stopped child.
-    struct Killed(libc::pid_t);
-    impl Drop for Killed {
-        fn drop(&mut self) {
-            // SAFETY: a signal to our own child.
-            unsafe { libc::kill(self.0, libc::SIGKILL) };
-        }
-    }
-    let mut child = Command::new("sleep")
-        .arg("30")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let pid = libc::pid_t::try_from(child.id()).unwrap();
-    let killed = Killed(pid);
-    // SAFETY: a signal to our own child.
-    unsafe { libc::kill(pid, libc::SIGSTOP) };
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    assert!(!exited(&mut child, false).unwrap(), "stopped is not ended");
-    drop(killed);
-    assert!(exited(&mut child, true).unwrap());
-    // Left unreaped until now.
-    assert!(!child.wait().unwrap().success());
+    assert!(why.is::<Stopped>(), "{why}");
 }

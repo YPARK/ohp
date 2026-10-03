@@ -33,7 +33,9 @@ fn latex_renders_what_it_knows_and_keeps_it() {
 #[test]
 fn only_the_formulas_asked_for_most_recently_are_kept() {
     let formula = |n: u64| (String::new(), (format!("x_{n}"), false));
-    let mut done: Done = (0..6).map(|n| (formula(n), (n / 2, None))).collect();
+    let mut done: Done = (0..6)
+        .map(|n| (formula(n), (n / 2, Kept::Failed)))
+        .collect();
     evict(&mut done, 3);
     let mut left: Vec<_> = done.keys().map(|k| k.1.0.clone()).collect();
     left.sort();
@@ -47,7 +49,7 @@ fn only_the_formulas_asked_for_most_recently_are_kept() {
 fn formulas_asked_for_at_once_are_kept_however_many() {
     let formula = |n: u64| (String::new(), (format!("x_{n}"), false));
     let mut done: Done = (0..10)
-        .map(|n| (formula(n), (u64::from(n > 0), None)))
+        .map(|n| (formula(n), (u64::from(n > 0), Kept::Failed)))
         .collect();
     evict(&mut done, 3);
     assert_eq!(done.len(), 9, "all of the latest document");
@@ -94,19 +96,16 @@ fn a_stopped_render_renders_nothing_new() {
 }
 
 #[test]
-fn a_run_that_never_ends_fails_or_stops() {
+fn a_run_that_never_ends_times_out_or_stops() {
     if !available() {
         eprintln!("skipped: no pdflatex");
         return;
     }
     let looping = "\\def\\a{\\a}\\a";
-    let dir = tempfile::tempdir().unwrap();
     let go = AtomicBool::new(false);
     let start = std::time::Instant::now();
-    assert_eq!(
-        latex(&dir, looping, false, "", &go, Duration::from_secs(1)),
-        Some(false)
-    );
+    let ran = run(looping, false, "", &go, Duration::from_secs(1));
+    assert!(matches!(ran, Run::TimedOut));
     assert!(start.elapsed() < Duration::from_secs(5));
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -115,9 +114,26 @@ fn a_run_that_never_ends_fails_or_stops() {
         std::thread::sleep(Duration::from_millis(300));
         stopping.store(true, Ordering::Relaxed);
     });
-    let dir = tempfile::tempdir().unwrap();
-    assert_eq!(
-        latex(&dir, looping, false, "", &stop, Duration::from_secs(60)),
-        None
-    );
+    let ran = run(looping, false, "", &stop, Duration::from_secs(60));
+    assert!(matches!(ran, Run::Stopped));
+}
+
+#[test]
+fn a_formula_timed_out_is_tried_once_more() {
+    if !available() {
+        eprintln!("skipped: no pdflatex");
+        return;
+    }
+    // As if it had timed out once: it renders now, and is kept as set.
+    let formula = ("z_{9300}".to_string(), false);
+    let key = (String::new(), formula.clone());
+    RENDERED
+        .lock()
+        .unwrap()
+        .0
+        .insert(key.clone(), (0, Kept::TimedOut));
+    let done = render(std::slice::from_ref(&formula), "", &AtomicBool::new(false));
+    assert!(done.contains_key(&formula));
+    let kept = RENDERED.lock().unwrap().0.get(&key).map(|e| e.1.clone());
+    assert!(matches!(kept, Some(Kept::Set(_))), "{kept:?}");
 }

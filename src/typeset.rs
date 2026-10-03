@@ -11,18 +11,17 @@
 //! description. If the document still does not compile, its citations are
 //! left as written, and then its source is shown as it is.
 
+use crate::knit::{Knitted, has_chunks, knit};
 use crate::latex;
 use crate::markdown::{self, Picture, Setting};
-use crate::render::Options;
+use crate::render::{Options, Stopped};
 use anyhow::Context;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
-use tempfile::TempDir;
 use typst::diag::{FileError, FileResult, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Duration};
 use typst::layout::Paper;
@@ -36,9 +35,6 @@ use typst_pdf::PdfOptions;
 /// Times typst is tried again with the formulas it failed on shown as LaTeX,
 /// the images it failed on left out, or citations left as written.
 const RETRIES: usize = 5;
-
-/// How often a knitr run is checked on, for whether it is done or to stop.
-const KNIT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// The PDF, and anything the status line should say about it.
 pub struct Typeset {
@@ -65,11 +61,12 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
     // The directory is kept until typeset: knitted plots are in it.
     let (text, _knitted) = if options.knit && has_chunks(&text, rmd) {
         match knit(path, &options.stop) {
-            Ok((dir, md)) => (md, Some(dir)),
-            Err(why) => {
+            Knitted::Done(dir, md) => (md, Some(dir)),
+            Knitted::Failed(why) => {
                 knitting = Some(why);
                 (text, None)
             }
+            Knitted::Stopped => return Err(Stopped.into()),
         }
     } else {
         (text, None)
@@ -85,9 +82,9 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
     let mut citations = true;
     let mut failure = String::new();
     // Typesetting for a deck no longer wanted, as when ohp is quitting.
-    let stopped = || {
+    let stopped = || -> anyhow::Result<()> {
         if options.stop.load(Ordering::Relaxed) {
-            anyhow::bail!("stopped");
+            return Err(Stopped.into());
         }
         Ok(())
     };
@@ -212,156 +209,6 @@ fn compile(world: &Doc) -> Result<Vec<u8>, Vec<SourceDiagnostic>> {
         ..PdfOptions::default()
     };
     typst_pdf::pdf(&compiled.map_err(|e| e.to_vec())?, &options).map_err(|e| e.to_vec())
-}
-
-/// Whether a file has anything for knitr to run: a chunk in any of its
-/// engines, as ```` ```{python} ````, or in R Markdown, inline R. A plain
-/// ```` ```python ```` block only shows code.
-fn has_chunks(text: &str, rmd: bool) -> bool {
-    let chunk = |line: &str| {
-        line.trim_start()
-            .strip_prefix("```")
-            .and_then(|rest| rest.trim_start().strip_prefix('{'))
-            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_alphabetic()))
-    };
-    text.lines().any(chunk) || (rmd && text.contains("`r "))
-}
-
-/// Run `rmd`'s chunks with knitr, into a markdown file in a directory of its
-/// own, with the plots beside it. Chunks run in `rmd`'s directory, as
-/// knitting there would run them, R's and those of knitr's other engines:
-/// python, through reticulate, bash and the rest.
-fn knit(rmd: &Path, stop: &AtomicBool) -> Result<(TempDir, String), String> {
-    let rmd = std::path::absolute(rmd).map_err(|e| e.to_string())?;
-    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let out = dir.path().join("knitted.md");
-    let figures = format!("{}/figure/", dir.path().display());
-    const SCRIPT: &str = "a <- commandArgs(TRUE); \
-        knitr::opts_chunk$set(fig.path = a[3]); \
-        invisible(knitr::knit(a[1], a[2], quiet = TRUE, envir = new.env()))";
-    // To a file, not a pipe, so R is waited on without reading it.
-    let log = dir.path().join("stderr.txt");
-    let stderr = std::fs::File::create(&log).map_err(|e| e.to_string())?;
-    // R's own temporary files, and its chunks', go with the directory.
-    let tmp = dir.path().join("tmp");
-    std::fs::create_dir(&tmp).map_err(|e| e.to_string())?;
-    let mut command = Command::new("Rscript");
-    command
-        .args(["-e", SCRIPT])
-        .arg(&rmd)
-        .arg(&out)
-        .arg(&figures)
-        .current_dir(dir.path())
-        .env("TMPDIR", &tmp)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(stderr);
-    // A group of its own, so what its chunks start can be stopped with it.
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let child = command.spawn();
-    let mut child = match child {
-        Ok(child) => child,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err("R not found: chunks shown as code".into());
-        }
-        Err(e) => return Err(format!("cannot run R: {e}")),
-    };
-    let status = loop {
-        if stop.load(Ordering::Relaxed) {
-            let _ = end(&mut child);
-            return Err("knitting stopped".into());
-        }
-        match exited(&mut child, false) {
-            Ok(true) => break end(&mut child),
-            Ok(false) => std::thread::sleep(KNIT_POLL),
-            Err(e) => {
-                let _ = end(&mut child);
-                return Err(format!("cannot run R: {e}"));
-            }
-        }
-    };
-    let status = status.map_err(|e| format!("cannot run R: {e}"))?;
-    if !status.success() {
-        let stderr = std::fs::read_to_string(&log).unwrap_or_default();
-        let why = stderr
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty() && !l.starts_with("Execution halted"))
-            .unwrap_or("knitr failed");
-        return Err(format!(
-            "knitting failed, chunks shown as code: {}",
-            why.trim()
-        ));
-    }
-    let md = std::fs::read_to_string(&out).map_err(|e| format!("knitr wrote nothing: {e}"))?;
-    Ok((dir, md))
-}
-
-/// Whether R has exited, waiting for it if `block`. On unix it is left
-/// unreaped, so its process group's id stays its own, and no other group
-/// can be given it, until `end`.
-fn exited(child: &mut Child, block: bool) -> std::io::Result<bool> {
-    #[cfg(unix)]
-    loop {
-        let pid = libc::id_t::from(child.id());
-        // SAFETY: a zeroed siginfo_t is valid, and waitid only fills it in.
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let mut flags = libc::WEXITED | libc::WNOWAIT;
-        if !block {
-            flags |= libc::WNOHANG;
-        }
-        // SAFETY: `info` is a valid siginfo_t to write to.
-        if unsafe { libc::waitid(libc::P_PID, pid, &mut info, flags) } != 0 {
-            let e = std::io::Error::last_os_error();
-            if e.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(e);
-        }
-        // SAFETY: waitid filled in a child's pid, or left it zero.
-        if unsafe { info.si_pid() } == 0 {
-            return Ok(false);
-        }
-        // macOS reports a child stopped, as by SIGTTIN, though only its
-        // exit was asked for: that is not an end.
-        if matches!(
-            info.si_code,
-            libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
-        ) {
-            return Ok(true);
-        }
-        if !block {
-            return Ok(false);
-        }
-        std::thread::sleep(KNIT_POLL);
-    }
-    #[cfg(not(unix))]
-    if block {
-        child.wait().map(|_| true)
-    } else {
-        child.try_wait().map(|s| s.is_some())
-    }
-}
-
-/// Kill R, if it still runs, and what its chunks started, its process
-/// group, and reap it. The group is killed while R, unreaped, holds its id,
-/// and again once R is gone, for a process forked as it was first killed.
-fn end(child: &mut Child) -> std::io::Result<ExitStatus> {
-    #[cfg(unix)]
-    if let Ok(group) = libc::pid_t::try_from(child.id()) {
-        let kill = || {
-            // SAFETY: killpg only sends a signal, to R's own group.
-            unsafe { libc::killpg(group, libc::SIGKILL) };
-        };
-        kill();
-        // Failing to wait, R is killed again and reaped all the same.
-        let _ = exited(child, true);
-        kill();
-    }
-    #[cfg(not(unix))]
-    let _ = child.kill();
-    child.wait()
 }
 
 static LIBRARY: LazyLock<LazyHash<Library>> = LazyLock::new(|| LazyHash::new(Library::default()));

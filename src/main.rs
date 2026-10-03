@@ -13,11 +13,15 @@ mod cite;
 #[cfg(feature = "markdown")]
 mod csl;
 #[cfg(feature = "markdown")]
+mod knit;
+#[cfg(feature = "markdown")]
 mod latex;
 #[cfg(feature = "markdown")]
 mod markdown;
 #[cfg(feature = "markdown")]
 mod math;
+#[cfg(feature = "markdown")]
+mod process;
 mod remote;
 mod render;
 mod text;
@@ -32,8 +36,6 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
-#[cfg(all(unix, feature = "markdown"))]
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg_attr(
@@ -95,7 +97,7 @@ fn main() -> anyhow::Result<ExitCode> {
         // worth saying; another is.
         signal => {
             if let Err(e) = ran
-                && e.to_string() != "stopped"
+                && !e.chain().any(|c| c.is::<render::Stopped>())
             {
                 eprintln!("Error: {e:?}");
             }
@@ -105,7 +107,7 @@ fn main() -> anyhow::Result<ExitCode> {
 }
 
 /// The status a shell gives a process a signal ended.
-fn shell_status(signal: usize) -> u8 {
+pub fn shell_status(signal: usize) -> u8 {
     u8::try_from(128 + signal).unwrap_or(u8::MAX)
 }
 
@@ -118,7 +120,7 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
     let path = remote.as_ref().map_or(args.file.as_path(), |r| r.path());
     let options = options(&args, remote.is_some());
     #[cfg(all(unix, feature = "markdown"))]
-    stop_on_signals(&options.stop, signaled)?;
+    process::signals::install(&options.stop, signaled)?;
     let deck = render::Deck::open_with(path, options);
     // Stopped while the deck was read: no screen to show.
     if signaled.load(Ordering::Relaxed) != 0 {
@@ -126,35 +128,6 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
     }
     let link = remote.as_ref().map(remote::Remote::link);
     app::run(deck?, args.text, link, signaled.clone())
-}
-
-/// Ask ohp to stop on Ctrl-C, hang-up or termination: `signaled` says which,
-/// for the app to quit, and `stop` stops typesetting under way, as a knitr
-/// run in a process group of its own that the signal does not reach.
-/// A second signal asks again, rather than ending ohp before it has stopped
-/// R and restored the terminal; a third, for a stop that does not come,
-/// ends it at once.
-#[cfg(all(unix, feature = "markdown"))]
-fn stop_on_signals(stop: &Arc<AtomicBool>, signaled: &Arc<AtomicUsize>) -> std::io::Result<()> {
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
-    use signal_hook::{flag, low_level};
-    let seen = Arc::new(AtomicUsize::new(0));
-    for signal in [SIGINT, SIGTERM, SIGHUP] {
-        flag::register(signal, stop.clone())?;
-        flag::register_usize(signal, signaled.clone(), signal as usize)?;
-        let seen = seen.clone();
-        let status = i32::from(shell_status(signal as usize));
-        // SAFETY: the action only adds to an atomic and calls _exit, both
-        // safe in a signal handler.
-        unsafe {
-            low_level::register(signal, move || {
-                if seen.fetch_add(1, Ordering::SeqCst) >= 2 {
-                    low_level::exit(status);
-                }
-            })
-        }?;
-    }
-    Ok(())
 }
 
 #[cfg(feature = "markdown")]
