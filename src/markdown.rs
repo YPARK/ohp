@@ -35,6 +35,9 @@ pub struct Converted {
     pub source: String,
     /// Images, by the name `source` gives each.
     pub images: Vec<(String, PathBuf)>,
+    /// Where each image found is in `source`, in the order they appear,
+    /// with the file it shows.
+    pub pictures: Vec<(Range<usize>, PathBuf)>,
     /// Files made here, by the name `source` gives each: formulas LaTeX
     /// rendered, bibliographies and a citation style.
     pub files: Vec<(String, Arc<[u8]>)>,
@@ -66,6 +69,8 @@ pub struct Setting<'a> {
     pub source_only: &'a HashSet<usize>,
     /// Formulas typst cannot set, as LaTeX rendered them.
     pub latex: &'a HashMap<Formula, Rendered>,
+    /// Images found, by index, typst could not show.
+    pub broken: &'a HashSet<usize>,
 }
 
 /// Slides set on paper as wide as a beamer 16:9 frame.
@@ -111,6 +116,7 @@ pub fn convert(text: &str, setting: &Setting) -> Converted {
         layout,
         setting,
         images: Vec::new(),
+        pictures: Vec::new(),
         files: Vec::new(),
         formulas: Vec::new(),
         unset: Vec::new(),
@@ -145,6 +151,7 @@ pub fn convert(text: &str, setting: &Setting) -> Converted {
     Converted {
         source: w.out,
         images: w.images,
+        pictures: w.pictures,
         files: w.files,
         formulas: w.formulas,
         unset: w.unset,
@@ -321,7 +328,8 @@ fn strip_divs(body: &str) -> (String, Vec<String>) {
     let mut macros = Vec::new();
     // A definition whose braces are not yet closed.
     let mut open: Option<(String, i32)> = None;
-    let mut fence: Option<&str> = None;
+    // The open code fence: its character and length.
+    let mut fence: Option<(char, usize)> = None;
     // Depth of the notes div being skipped, counting divs within it.
     let mut notes = 0usize;
     for line in body.split_inclusive('\n') {
@@ -344,8 +352,9 @@ fn strip_divs(body: &str) -> (String, Vec<String>) {
             }
             continue;
         }
-        if let Some(f) = fence {
-            if t.starts_with(f) {
+        if let Some((c, len)) = fence {
+            // Closed by a run of its character as long, and nothing else.
+            if t.len() >= len && t.chars().all(|x| x == c) {
                 fence = None;
             }
             if notes == 0 {
@@ -354,7 +363,8 @@ fn strip_divs(body: &str) -> (String, Vec<String>) {
             continue;
         }
         if t.starts_with("```") || t.starts_with("~~~") {
-            fence = Some(&t[..3]);
+            let c = t.chars().next().expect("a fence");
+            fence = Some((c, t.chars().take_while(|&x| x == c).count()));
         } else if t.starts_with(":::") {
             let attrs = t.trim_start_matches(':').trim();
             if notes > 0 {
@@ -431,6 +441,7 @@ struct Writer<'a, 'e> {
     layout: Layout,
     setting: &'a Setting<'a>,
     images: Vec<(String, PathBuf)>,
+    pictures: Vec<(Range<usize>, PathBuf)>,
     files: Vec<(String, Arc<[u8]>)>,
     formulas: Vec<Range<usize>>,
     unset: Vec<Formula>,
@@ -650,6 +661,8 @@ impl Writer<'_, '_> {
             Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough) => {
                 self.raw("];");
             }
+            // typst has no link to nowhere: a placeholder shows its text.
+            Event::Start(Tag::Link { dest_url, .. }) if dest_url.is_empty() => self.raw("#["),
             Event::Start(Tag::Link { dest_url, .. }) => {
                 self.raw(&format!("#link({})[", string(dest_url)));
             }
@@ -691,13 +704,16 @@ impl Writer<'_, '_> {
                     "#line(length: 100%, stroke: 0.5pt + luma(170))\n"
                 });
             }
-            Event::FootnoteReference(label) => match self.notes.get(label.as_ref()).cloned() {
+            // Taken out while it is written, so a note that refers to
+            // itself shows the reference as written.
+            Event::FootnoteReference(label) => match self.notes.remove(label.as_ref()) {
                 Some(note) => {
                     self.raw("#footnote[");
                     self.events(&note);
                     let end = self.out.trim_end().len();
                     self.out.truncate(end);
                     self.raw("];");
+                    self.notes.insert(label.to_string(), note);
                 }
                 None => self.text(&format!("[^{label}]")),
             },
@@ -778,13 +794,17 @@ impl Writer<'_, '_> {
             i.checked_sub(1).map(|p| &events[p]),
             Some(Event::Start(Tag::Paragraph))
         ) && matches!(events.get(end + 1), Some(Event::End(TagEnd::Paragraph)));
-        match self.find(url) {
-            Some(path) => {
+        let found = self.find(url);
+        // One typst could not read is shown as if it were not found.
+        let broken = self.setting.broken.contains(&self.pictures.len());
+        let start = self.out.len();
+        match &found {
+            Some(path) if !broken => {
                 let ext = path
                     .extension()
                     .map_or(String::new(), |e| e.to_string_lossy().to_lowercase());
                 let name = format!("/img/{}.{ext}", self.images.len());
-                self.images.push((name.clone(), path));
+                self.images.push((name.clone(), path.clone()));
                 let name = string(&name);
                 if alone && self.slides() {
                     // What is left of the slide, so a plot never spills
@@ -798,22 +818,28 @@ impl Writer<'_, '_> {
                     self.raw(&format!("#box(image({name}, height: 1.2em));"));
                 }
             }
-            None => {
+            _ => {
                 let shown = if alt.is_empty() { url } else { &alt };
                 self.raw("#text(fill: luma(120))[");
                 self.text(&format!("[image: {shown}]"));
                 self.raw("];");
             }
         }
+        if let Some(path) = found {
+            self.pictures.push((start..self.out.len(), path));
+        }
         end - i + 1
     }
 
     /// The file an image's URL names, if it is here: never fetched.
     fn find(&self, url: &str) -> Option<PathBuf> {
+        let url = url
+            .strip_prefix("file://")
+            .or_else(|| url.strip_prefix("file:"))
+            .unwrap_or(url);
         if url.contains("://") {
             return None;
         }
-        let url = url.strip_prefix("file:").unwrap_or(url);
         let path = Path::new(url);
         let path = if path.is_absolute() {
             path.to_path_buf()
@@ -839,7 +865,7 @@ impl Writer<'_, '_> {
                 _ => {
                     let source = string(&formula.0);
                     self.raw(&if display {
-                        format!("#align(center, raw(block: true, {source}))")
+                        format!("#align(center, raw(block: true, {source}));")
                     } else {
                         format!("#raw({source});")
                     });
@@ -859,7 +885,7 @@ impl Writer<'_, '_> {
         let name = string(&name);
         let image = format!("image({name}, height: {:.4}em)", r.height + r.depth);
         self.raw(&if display {
-            format!("#align(center, {image})")
+            format!("#align(center, {image});")
         } else {
             format!("#box(baseline: {:.4}em, {image});", r.depth)
         });

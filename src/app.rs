@@ -4,9 +4,10 @@
 //! size is its own cache entry. Input is drained before each redraw, so a
 //! burst of key presses costs one frame.
 //!
-//! The PDF is reloaded when it changes on disk, as after a LaTeX run. The
-//! slides already on screen stay until their new renders arrive, so a reload
-//! does not flash the screen empty.
+//! The PDF is reloaded when it changes on disk, as after a LaTeX run. It is
+//! read, or typeset, off the UI thread, so a knitr run that takes a minute
+//! does not freeze the slides. The slides already on screen stay until their
+//! new renders arrive, so a reload does not flash the screen empty.
 //!
 //! Where the terminal has no graphics protocol, slides are shown as their
 //! text over a coarse image instead; `t` switches between the two anywhere.
@@ -26,6 +27,7 @@ use ratatui_image::picker::{Picker, ProtocolType};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 /// Slides the grid tries to show at once.
@@ -143,6 +145,10 @@ struct App {
     /// A change seen on disk, waiting for the file to stop changing.
     settling: Option<Stamp>,
     checked: Instant,
+    /// The deck being read again, off this thread.
+    loading: Option<Receiver<anyhow::Result<Deck>>>,
+    /// The file changed again while it was being read: read it once more.
+    again: bool,
     /// Shown in the status line until the next key press.
     notice: Option<String>,
     link: Option<Link>,
@@ -173,6 +179,8 @@ impl App {
             requested: HashSet::new(),
             settling: None,
             checked: Instant::now(),
+            loading: None,
+            again: false,
             notice: None,
             link: None,
             trouble: None,
@@ -208,6 +216,7 @@ impl App {
                 self.receive(done);
             }
             self.watch();
+            self.loaded();
         }
         Ok(())
     }
@@ -264,8 +273,34 @@ impl App {
         }
     }
 
+    /// Read the deck again on a thread of its own.
     fn reload(&mut self) {
-        let fresh = self.deck.reopen().and_then(|deck| {
+        if self.loading.is_some() {
+            self.again = true;
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (path, options) = (self.deck.path.clone(), self.deck.options.clone());
+        // Nothing to do if the app is gone.
+        std::thread::spawn(move || {
+            let _ = tx.send(Deck::open_with(&path, options));
+        });
+        self.loading = Some(rx);
+        self.dirty = true;
+    }
+
+    /// Show the deck read again, once it is.
+    fn loaded(&mut self) {
+        let Some(rx) = &self.loading else {
+            return;
+        };
+        let fresh = match rx.try_recv() {
+            Ok(fresh) => fresh,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(anyhow::anyhow!("the reader stopped")),
+        };
+        self.loading = None;
+        let fresh = fresh.and_then(|deck| {
             let renderer = Renderer::spawn(&deck, &self.picker, self.workers)?;
             Ok((deck, renderer))
         });
@@ -284,6 +319,9 @@ impl App {
             Err(e) => self.notice = Some(format!("reload failed: {e:#}")),
         }
         self.dirty = true;
+        if std::mem::take(&mut self.again) {
+            self.reload();
+        }
     }
 
     // ── input ───────────────────────────────────────────────────────────
@@ -651,6 +689,14 @@ impl App {
             .count();
         if waiting > 0 {
             spans.push(Span::styled(format!("  rendering {waiting}"), dim));
+        }
+        if self.loading.is_some() {
+            let what = if render::markdown(&self.deck.path) {
+                "typesetting…"
+            } else {
+                "reloading…"
+            };
+            spans.push(Span::styled(format!("  {what}"), dim));
         }
         if let Some(trouble) = &self.trouble {
             spans.push(Span::styled(

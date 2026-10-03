@@ -22,6 +22,13 @@ fn attachments_take_one_argument_or_a_group() {
 }
 
 #[test]
+fn an_empty_group_is_a_base_to_attach_to() {
+    assert_eq!(ok("a {}^{14}C"), "a \"\"^(14) C");
+    assert_eq!(ok("{}_{n}C_{k}"), "\"\"_(n) C_(k)");
+    assert_eq!(ok("a{}b"), "a b");
+}
+
+#[test]
 fn commands_with_arguments_become_calls() {
     assert_eq!(ok(r"\frac{a}{b}"), "frac(a, b)");
     assert_eq!(ok(r"\sqrt[3]{x}"), "root(3, x)");

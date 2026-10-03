@@ -91,7 +91,14 @@ impl Parser<'_> {
                 }
                 '{' => {
                     let (inner, _) = self.seq(Context::Group)?;
-                    push(&mut out, &inner);
+                    // An empty group is the base of what is attached to
+                    // it, as in `{}^{14}C`.
+                    let rest = self.s[self.i..].iter().find(|c| !c.is_whitespace());
+                    if inner.is_empty() && matches!(rest, Some('^' | '_')) {
+                        push(&mut out, "\"\"");
+                    } else {
+                        push(&mut out, &inner);
+                    }
                 }
                 '%' => {
                     while self.peek().is_some_and(|c| c != '\n') {

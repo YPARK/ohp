@@ -28,3 +28,16 @@ fn latex_renders_what_it_knows_and_keeps_it() {
     let again = render(std::slice::from_ref(&good), preamble);
     assert!(Arc::ptr_eq(&again[&good].pdf, &g.pdf));
 }
+
+#[test]
+fn only_the_formulas_asked_for_most_recently_are_kept() {
+    let formula = |n: u64| (String::new(), (format!("x_{n}"), false));
+    let mut done: Done = (0..6).map(|n| (formula(n), (n / 2, None))).collect();
+    evict(&mut done, 3);
+    let mut left: Vec<_> = done.keys().map(|k| k.1.0.clone()).collect();
+    left.sort();
+    // Those asked for together, at 1, are kept or dropped together.
+    assert_eq!(left, ["x_2", "x_3", "x_4", "x_5"]);
+    evict(&mut done, 4);
+    assert_eq!(done.len(), 4);
+}

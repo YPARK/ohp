@@ -3,7 +3,8 @@
 //! Each formula is set alone on a page cropped to it, and its height and
 //! depth are read from LaTeX's log, so it can sit on the baseline of the
 //! text around it. Formulas are rendered at once, a LaTeX run each, and
-//! kept, so a reload renders only those that changed.
+//! kept, the most recently asked for of them, so a reload renders only those
+//! that changed.
 
 use std::collections::{HashMap, HashSet};
 use std::process::{Command, Stdio};
@@ -33,10 +34,16 @@ static AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
         .is_ok_and(|s| s.success())
 });
 
-/// Each formula LaTeX rendered before, or failed to, by preamble and formula.
-type Done = HashMap<(String, Formula), Option<Rendered>>;
+/// Formulas kept rendered: past this, those asked for least recently go.
+/// Every edit of a formula, or of the preamble, renders another.
+const KEPT: usize = 512;
 
-static RENDERED: LazyLock<Mutex<Done>> = LazyLock::new(Mutex::default);
+/// Each formula LaTeX rendered before, or failed to, by preamble and
+/// formula, with when it was last asked for.
+type Done = HashMap<(String, Formula), (u64, Option<Rendered>)>;
+
+/// What was rendered, and how many times `render` has been asked.
+static RENDERED: LazyLock<Mutex<(Done, u64)>> = LazyLock::new(Mutex::default);
 
 pub fn available() -> bool {
     *AVAILABLE
@@ -46,7 +53,7 @@ pub fn available() -> bool {
 pub fn render(formulas: &[Formula], preamble: &str) -> HashMap<Formula, Rendered> {
     let key = |f: &Formula| (preamble.to_string(), f.clone());
     let fresh: Vec<&Formula> = {
-        let done = RENDERED.lock().expect("rendered formulas");
+        let (done, _) = &*RENDERED.lock().expect("rendered formulas");
         let mut seen = HashSet::new();
         formulas
             .iter()
@@ -62,16 +69,36 @@ pub fn render(formulas: &[Formula], preamble: &str) -> HashMap<Formula, Rendered
                 .collect();
             runs.into_iter().map(|r| r.join().ok().flatten()).collect()
         });
-        let mut done = RENDERED.lock().expect("rendered formulas");
+        let (done, _) = &mut *RENDERED.lock().expect("rendered formulas");
         for (f, result) in batch.iter().zip(results) {
-            done.insert(key(f), result);
+            done.insert(key(f), (0, result));
         }
     }
-    let done = RENDERED.lock().expect("rendered formulas");
-    formulas
+    let (done, asked) = &mut *RENDERED.lock().expect("rendered formulas");
+    *asked += 1;
+    let now = *asked;
+    let found = formulas
         .iter()
-        .filter_map(|f| Some((f.clone(), done.get(&key(f))?.clone()?)))
-        .collect()
+        .filter_map(|f| {
+            let (used, rendered) = done.get_mut(&key(f))?;
+            *used = now;
+            Some((f.clone(), rendered.clone()?))
+        })
+        .collect();
+    evict(done, KEPT);
+    found
+}
+
+/// Leave about `kept` formulas, those asked for most recently: those asked
+/// for at once go together.
+fn evict(done: &mut Done, kept: usize) {
+    if done.len() <= kept {
+        return;
+    }
+    let mut used: Vec<u64> = done.values().map(|(used, _)| *used).collect();
+    used.sort_unstable();
+    let oldest = used[done.len() - kept];
+    done.retain(|_, (used, _)| *used >= oldest);
 }
 
 /// `formula` rendered by one LaTeX run, in a directory of its own.

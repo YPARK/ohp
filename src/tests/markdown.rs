@@ -13,6 +13,7 @@ fn setting(base: &Path) -> Setting<'_> {
         raw_math: &NONE,
         source_only: &NONE,
         latex: &NOT_RENDERED,
+        broken: &NONE,
     }
 }
 
@@ -321,4 +322,55 @@ fn a_suppressed_bibliography_still_sets_citations_and_nocite_lists_works() {
         doc.source
     );
     assert_eq!(lang("x-1"), None);
+}
+
+#[test]
+fn a_footnote_that_refers_to_itself_shows_the_reference() {
+    let out = typst("x[^a]\n\n[^a]: see[^b]\n\n[^b]: and[^a]\n");
+    assert!(out.contains("#footnote[see#footnote[and"), "{out}");
+}
+
+#[test]
+fn a_link_to_nowhere_shows_its_text() {
+    let out = typst("see [x]() here\n");
+    assert!(out.contains("see #[x]; here"), "{out}");
+    assert!(!out.contains("#link"), "{out}");
+}
+
+#[test]
+fn a_fence_is_closed_only_by_one_as_long_with_nothing_after() {
+    let inner = "```{r}\n:::\n. . .\n\\newcommand{\\x}{y}\n```\n";
+    let text = format!("````markdown\n{inner}````\n");
+    assert_eq!(strip_divs(&text), (text.clone(), Vec::new()));
+    let text = "```\na\n```r\n:::\n```\n";
+    assert_eq!(strip_divs(text).0, text);
+}
+
+#[test]
+fn a_file_url_names_a_file_here() {
+    let dir = tempfile::tempdir().unwrap();
+    let plot = dir.path().join("plot.png");
+    std::fs::write(&plot, b"png").unwrap();
+    let text = format!("![a](file://{}) ![b](file:plot.png)\n", plot.display());
+    let doc = convert(&text, &setting(dir.path()));
+    assert_eq!(doc.images.len(), 2, "{}", doc.source);
+}
+
+#[test]
+fn an_image_typst_could_not_read_is_described() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.png"), b"png").unwrap();
+    std::fs::write(dir.path().join("b.png"), b"png").unwrap();
+    let broken = HashSet::from([0]);
+    let doc = convert(
+        "![first](a.png) ![second](b.png)\n",
+        &Setting {
+            broken: &broken,
+            ..setting(dir.path())
+        },
+    );
+    assert_eq!(doc.images.len(), 1);
+    assert!(doc.source.contains("\\[image: first\\]"), "{}", doc.source);
+    assert_eq!(doc.pictures.len(), 2, "both keep their index");
+    assert_eq!(doc.pictures[1].1, dir.path().join("b.png"));
 }

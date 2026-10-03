@@ -7,9 +7,9 @@
 //! the same on every machine.
 //!
 //! A formula typst cannot set is rendered by LaTeX where it is installed,
-//! or else shown as its source. If the document still does not compile,
-//! its citations are left as written, and then its source is shown as it
-//! is.
+//! or else shown as its source, and an image it cannot read is shown as its
+//! description. If the document still does not compile, its citations are
+//! left as written, and then its source is shown as it is.
 
 use crate::latex;
 use crate::markdown::{self, Setting};
@@ -31,7 +31,8 @@ use typst::{Library, LibraryExt, World, WorldExt};
 use typst_layout::PagedDocument;
 use typst_pdf::PdfOptions;
 
-/// Times typst is tried again with the formulas it failed on shown as LaTeX.
+/// Times typst is tried again with the formulas it failed on shown as LaTeX,
+/// and the images it failed on left out.
 const RETRIES: usize = 3;
 
 /// The PDF, and anything the status line should say about it.
@@ -70,6 +71,8 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
 
     let mut raw_math = HashSet::new();
     let mut source_only = HashSet::new();
+    let mut broken = HashSet::new();
+    let mut warnings = Vec::new();
     let mut rendered = HashMap::new();
     let mut loaded = HashMap::new();
     let mut citations = true;
@@ -83,6 +86,7 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
                 raw_math: &raw_math,
                 source_only: &source_only,
                 latex: rendered,
+                broken: &broken,
             };
             markdown::convert(&text, &setting)
         };
@@ -94,26 +98,50 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
                 doc = convert(&rendered);
             }
         }
+        warnings = doc.warnings;
         let world = Doc::new(doc.source, &doc.images, &doc.files, &mut loaded);
         match compile(&world) {
             Ok(pdf) => {
-                let notes: Vec<String> = note.into_iter().chain(doc.warnings).collect();
+                let notes: Vec<String> = note.into_iter().chain(warnings).collect();
                 let note = (!notes.is_empty()).then(|| notes.join("; "));
                 return Ok(Typeset { pdf, note });
             }
             Err(errors) => {
                 failure = errors[0].message.to_string();
-                let spans: Vec<_> = errors.iter().filter_map(|e| world.range(e.span)).collect();
+                let spans: Vec<_> = errors
+                    .iter()
+                    .filter_map(|e| Some((world.range(e.span)?, e.message.as_str())))
+                    .collect();
+                // What typst said of `r`, if it failed there.
+                let hit = |r: &std::ops::Range<usize>| {
+                    spans
+                        .iter()
+                        .find(|(s, _)| s.start < r.end && r.start < s.end)
+                        .map(|(_, message)| *message)
+                };
                 let bad: Vec<usize> = doc
                     .formulas
                     .iter()
                     .enumerate()
-                    .filter(|(i, f)| {
-                        !source_only.contains(i)
-                            && spans.iter().any(|s| s.start < f.end && f.start < s.end)
-                    })
+                    .filter(|(i, f)| !source_only.contains(i) && hit(f).is_some())
                     .map(|(i, _)| i)
                     .collect();
+                let unread: Vec<(usize, &str)> = doc
+                    .pictures
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !broken.contains(i))
+                    .filter_map(|(i, (r, _))| Some((i, hit(r)?)))
+                    .collect();
+                for &(i, message) in &unread {
+                    let name = doc.pictures[i].1.file_name().unwrap_or_default();
+                    let why = format!("cannot show {}: {message}", name.to_string_lossy());
+                    note = Some(note.map_or(why.clone(), |n| format!("{n}; {why}")));
+                    broken.insert(i);
+                }
+                if bad.is_empty() && !unread.is_empty() {
+                    continue;
+                }
                 if bad.is_empty() {
                     if !doc.listed {
                         break;
@@ -141,9 +169,11 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
     );
     let pdf = compile(&Doc::new(source, &[], &[], &mut loaded))
         .map_err(|e| anyhow::anyhow!("cannot typeset {}: {}", path.display(), e[0].message))?;
+    let why = format!("shown as source: {failure}");
+    let notes: Vec<String> = note.into_iter().chain(warnings).chain([why]).collect();
     Ok(Typeset {
         pdf,
-        note: Some(format!("shown as source: {failure}")),
+        note: Some(notes.join("; ")),
     })
 }
 

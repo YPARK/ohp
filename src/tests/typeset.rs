@@ -142,6 +142,7 @@ fn set_text(path: &Path) -> Vec<String> {
         raw_math: &none,
         source_only: &none,
         latex: &HashMap::new(),
+        broken: &none,
     };
     let doc = markdown::convert(&text, &setting);
     let world = Doc::new(doc.source, &doc.images, &doc.files, &mut HashMap::new());
@@ -191,6 +192,39 @@ fn citations_are_set_in_the_style_and_the_works_cited_listed() {
     assert!(squeezed.contains("Doe,Jane,andRichardRoe.1999."), "{pages}");
     assert!(squeezed.contains("Lee,Kim.2018.Wide."), "{pages}");
 
+    let done = typeset(&path, &options(false)).unwrap();
+    assert!(done.note.is_none(), "{:?}", done.note);
+}
+
+#[test]
+fn text_right_after_a_formula_shown_as_source_is_not_read_as_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "eq.md", "$$\\undefinedmacro{x}$$(1)\n");
+    let done = typeset(&path, &options(false)).unwrap();
+    assert!(
+        !done
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("shown as source")),
+        "{:?}",
+        done.note
+    );
+}
+
+#[test]
+fn an_image_typst_cannot_read_is_left_out_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("fig.png"), b"not a png").unwrap();
+    let path = write(dir.path(), "fig.md", "Text.\n\n![a figure](fig.png)\n");
+    let note = typeset(&path, &options(false)).unwrap().note.unwrap();
+    assert!(note.starts_with("cannot show fig.png"), "{note}");
+    assert!(!note.contains("shown as source"), "{note}");
+}
+
+#[test]
+fn an_empty_group_typesets_as_a_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "iso.md", "Carbon $a {}^{14}C$.\n");
     let done = typeset(&path, &options(false)).unwrap();
     assert!(done.note.is_none(), "{:?}", done.note);
 }

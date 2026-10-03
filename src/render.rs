@@ -145,11 +145,6 @@ impl Deck {
             note,
         })
     }
-
-    /// The deck read again from its file, made as it was before.
-    pub fn reopen(&self) -> anyhow::Result<Self> {
-        Self::open_with(&self.path, self.options.clone())
-    }
 }
 
 /// Most pixels a zoomed page is rendered with: hayro renders whole pages,

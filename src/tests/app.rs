@@ -35,6 +35,16 @@ fn due(app: &mut App) {
     app.checked = Instant::now() - WATCH_EVERY;
 }
 
+/// Look at the file now, and wait for any reload that starts.
+fn watch(app: &mut App) {
+    due(app);
+    app.watch();
+    while app.loading.is_some() {
+        std::thread::sleep(Duration::from_millis(5));
+        app.loaded();
+    }
+}
+
 #[test]
 fn auto_grid_takes_the_fewest_columns_that_show_a_dozen() {
     let (_dir, app) = app(40);
@@ -336,13 +346,11 @@ fn a_rewritten_pdf_reloads_once_it_settles() {
     let (dir, mut app) = app(3);
     fixture::write(dir.path(), 5);
 
-    due(&mut app);
-    app.watch();
+    watch(&mut app);
     assert_eq!(app.deck.pages, 3, "reloaded before the file settled");
     assert_eq!(app.notice.as_deref(), Some("PDF changing…"));
 
-    due(&mut app);
-    app.watch();
+    watch(&mut app);
     assert_eq!(app.deck.pages, 5);
     assert_eq!(app.notice.as_deref(), Some("reloaded"));
 }
@@ -353,8 +361,7 @@ fn a_half_written_pdf_is_not_reloaded() {
     let whole = fixture::pdf(5);
     std::fs::write(dir.path().join("deck.pdf"), &whole[..whole.len() / 2]).unwrap();
     for _ in 0..3 {
-        due(&mut app);
-        app.watch();
+        watch(&mut app);
     }
     assert_eq!(app.deck.pages, 3);
     assert_eq!(app.notice.as_deref(), Some("PDF changing…"));
@@ -365,8 +372,7 @@ fn a_broken_pdf_keeps_the_old_slides() {
     let (dir, mut app) = app(3);
     std::fs::write(dir.path().join("deck.pdf"), b"%PDF-1.5\ngarbage\n%%EOF\n").unwrap();
     for _ in 0..2 {
-        due(&mut app);
-        app.watch();
+        watch(&mut app);
     }
     assert_eq!(app.deck.pages, 3);
     assert!(
@@ -382,8 +388,7 @@ fn a_shorter_deck_moves_the_current_slide_back() {
     app.cur = 8;
     fixture::write(dir.path(), 4);
     for _ in 0..2 {
-        due(&mut app);
-        app.watch();
+        watch(&mut app);
     }
     assert_eq!(app.deck.pages, 4);
     assert_eq!(app.cur, 3);
@@ -396,11 +401,28 @@ fn a_reload_keeps_old_slides_on_screen_until_replaced() {
     app.slides.insert(key, None);
     fixture::write(dir.path(), 4);
     for _ in 0..2 {
-        due(&mut app);
-        app.watch();
+        watch(&mut app);
     }
     assert!(app.slides.is_empty());
     assert!(app.stale.contains_key(&key));
+}
+
+#[test]
+fn a_change_while_reloading_reloads_again() {
+    let (dir, mut app) = app(3);
+    app.loading = Some(std::sync::mpsc::channel().1);
+    app.reload();
+    assert!(app.again);
+    app.loading = None;
+    fixture::write(dir.path(), 6);
+    app.again = false;
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(Deck::open(&dir.path().join("deck.pdf"))).unwrap();
+    app.loading = Some(rx);
+    app.again = true;
+    app.loaded();
+    assert_eq!(app.deck.pages, 6);
+    assert!(app.loading.is_some(), "read once more");
 }
 
 #[test]
