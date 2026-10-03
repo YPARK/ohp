@@ -18,7 +18,7 @@ use anyhow::Context;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -270,20 +270,19 @@ fn knit(rmd: &Path, stop: &AtomicBool) -> Result<(TempDir, String), String> {
     };
     let status = loop {
         if stop.load(Ordering::Relaxed) {
-            end(&mut child);
+            let _ = end(&mut child);
             return Err("knitting stopped".into());
         }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(KNIT_POLL),
+        match exited(&mut child, false) {
+            Ok(true) => break end(&mut child),
+            Ok(false) => std::thread::sleep(KNIT_POLL),
             Err(e) => {
-                end(&mut child);
+                let _ = end(&mut child);
                 return Err(format!("cannot run R: {e}"));
             }
         }
     };
-    // What its chunks left running would outlive the directory they use.
-    end(&mut child);
+    let status = status.map_err(|e| format!("cannot run R: {e}"))?;
     if !status.success() {
         let stderr = std::fs::read_to_string(&log).unwrap_or_default();
         let why = stderr
@@ -300,24 +299,51 @@ fn knit(rmd: &Path, stop: &AtomicBool) -> Result<(TempDir, String), String> {
     Ok((dir, md))
 }
 
+/// Whether R has exited, waiting for it if `block`. On unix it is left
+/// unreaped, so its process group's id stays its own, and no other group
+/// can be given it, until `end`.
+fn exited(child: &mut Child, block: bool) -> std::io::Result<bool> {
+    #[cfg(unix)]
+    {
+        let pid = libc::id_t::from(child.id());
+        // SAFETY: a zeroed siginfo_t is valid, and waitid only fills it in.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let mut flags = libc::WEXITED | libc::WNOWAIT;
+        if !block {
+            flags |= libc::WNOHANG;
+        }
+        // SAFETY: `info` is a valid siginfo_t to write to.
+        if unsafe { libc::waitid(libc::P_PID, pid, &mut info, flags) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: waitid filled in a child's pid, or left it zero.
+        Ok(unsafe { info.si_pid() } != 0)
+    }
+    #[cfg(not(unix))]
+    if block {
+        child.wait().map(|_| true)
+    } else {
+        child.try_wait().map(|s| s.is_some())
+    }
+}
+
 /// Kill R, if it still runs, and what its chunks started, its process
-/// group, and reap it.
-fn end(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-    // A process forked as the group was killed can miss the signal: the
-    // group is killed until none is left in it.
+/// group, and reap it. The group is killed while R, unreaped, holds its id,
+/// and again once R is gone, for a process forked as it was first killed.
+fn end(child: &mut Child) -> std::io::Result<ExitStatus> {
     #[cfg(unix)]
     if let Ok(group) = libc::pid_t::try_from(child.id()) {
-        for _ in 0..100 {
-            // SAFETY: killpg only sends a signal; the group is R's own, and
-            // R, reaped, leaves it to those its chunks started.
-            if unsafe { libc::killpg(group, libc::SIGKILL) } != 0 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        let kill = || {
+            // SAFETY: killpg only sends a signal, to R's own group.
+            unsafe { libc::killpg(group, libc::SIGKILL) };
+        };
+        kill();
+        exited(child, true)?;
+        kill();
     }
+    #[cfg(not(unix))]
+    let _ = child.kill();
+    child.wait()
 }
 
 static LIBRARY: LazyLock<LazyHash<Library>> = LazyLock::new(|| LazyHash::new(Library::default()));
