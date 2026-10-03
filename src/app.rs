@@ -27,7 +27,8 @@ use ratatui_image::picker::{Picker, ProtocolType};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -48,7 +49,13 @@ const WATCH_EVERY: Duration = Duration::from_millis(250);
 /// `text` starts with slides as text even where images can be shown.
 /// `link` is the connection the slides come over, for slides on another
 /// machine.
-pub fn run(deck: Deck, text: bool, link: Option<Link>) -> anyhow::Result<()> {
+/// `signaled` is set when a signal asks ohp to stop.
+pub fn run(
+    deck: Deck,
+    text: bool,
+    link: Option<Link>,
+    signaled: Arc<AtomicUsize>,
+) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
     let result = (|| {
         let picker = pick();
@@ -63,6 +70,7 @@ pub fn run(deck: Deck, text: bool, link: Option<Link>) -> anyhow::Result<()> {
         let mut app = App::new(deck, picker, renderer, workers, look);
         app.notice = app.deck.note.clone();
         app.link = link;
+        app.signaled = signaled;
         app.run(&mut terminal)?;
         app.clear_images()
     })();
@@ -151,6 +159,8 @@ struct App {
     loading: Option<(Receiver<anyhow::Result<Deck>>, JoinHandle<()>)>,
     /// The file changed again while it was being read: read it once more.
     again: bool,
+    /// Set when a signal asks ohp to stop.
+    signaled: Arc<AtomicUsize>,
     /// Shown in the status line until the next key press.
     notice: Option<String>,
     link: Option<Link>,
@@ -183,6 +193,7 @@ impl App {
             checked: Instant::now(),
             loading: None,
             again: false,
+            signaled: Arc::default(),
             notice: None,
             link: None,
             trouble: None,
@@ -219,8 +230,7 @@ impl App {
             }
             self.watch();
             self.loaded();
-            // A signal asked ohp to stop.
-            if self.deck.options.stop.load(Ordering::Relaxed) {
+            if self.signaled.load(Ordering::Relaxed) != 0 {
                 self.quit = true;
             }
         }

@@ -57,6 +57,17 @@ pub fn render(
     preamble: &str,
     stop: &AtomicBool,
 ) -> HashMap<Formula, Rendered> {
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
+    render_on(formulas, preamble, stop, workers)
+}
+
+/// As `render`, with `workers` LaTeX runs at once.
+fn render_on(
+    formulas: &[Formula],
+    preamble: &str,
+    stop: &AtomicBool,
+    workers: usize,
+) -> HashMap<Formula, Rendered> {
     let key = |f: &Formula| (preamble.to_string(), f.clone());
     // What this call returns is taken as it goes, not read back, so
     // another call evicting meanwhile takes nothing from it. All it asks
@@ -79,7 +90,6 @@ pub fn render(
         }
         *asked
     };
-    let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut made = Vec::new();
     for batch in fresh.chunks(workers) {
         if stop.load(Ordering::Relaxed) {

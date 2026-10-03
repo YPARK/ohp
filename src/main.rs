@@ -30,6 +30,11 @@ mod fixture;
 
 use clap::Parser;
 use std::path::PathBuf;
+use std::process::ExitCode;
+use std::sync::Arc;
+#[cfg(all(unix, feature = "markdown"))]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg_attr(
     feature = "markdown",
@@ -80,7 +85,18 @@ struct Args {
     no_knit: bool,
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<ExitCode> {
+    // The signal that stopped ohp, if one did.
+    let signaled = Arc::new(AtomicUsize::new(0));
+    let ran = run(&signaled);
+    match signaled.load(Ordering::Relaxed) {
+        0 => ran.map(|()| ExitCode::SUCCESS),
+        // As a shell reports a signal, without the error stopping made.
+        signal => Ok(ExitCode::from(128 + u8::try_from(signal).unwrap_or(0))),
+    }
+}
+
+fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
     let args = Args::parse();
     let remote = match remote::split(&args.file) {
         Some((host, path)) => Some(remote::Remote::open("ssh".as_ref(), host, path)?),
@@ -89,21 +105,28 @@ fn main() -> anyhow::Result<()> {
     let path = remote.as_ref().map_or(args.file.as_path(), |r| r.path());
     let options = options(&args, remote.is_some());
     #[cfg(all(unix, feature = "markdown"))]
-    stop_on_signals(&options.stop)?;
-    let deck = render::Deck::open_with(path, options)?;
-    app::run(deck, args.text, remote.as_ref().map(remote::Remote::link))
+    stop_on_signals(&options.stop, signaled)?;
+    let deck = render::Deck::open_with(path, options);
+    // Stopped while the deck was read: no screen to show.
+    if signaled.load(Ordering::Relaxed) != 0 {
+        return Ok(());
+    }
+    let link = remote.as_ref().map(remote::Remote::link);
+    app::run(deck?, args.text, link, signaled.clone())
 }
 
-/// Ask ohp to stop on Ctrl-C, hang-up or termination, so a knitr run, in a
-/// process group of its own that the signal does not reach, is stopped with
-/// it. Another signal asks again, rather than ending ohp before it has
-/// stopped R and restored the terminal.
+/// Ask ohp to stop on Ctrl-C, hang-up or termination: `signaled` says which,
+/// for the app to quit, and `stop` stops typesetting under way, as a knitr
+/// run in a process group of its own that the signal does not reach.
+/// Another signal asks again, rather than ending ohp before it has stopped
+/// R and restored the terminal.
 #[cfg(all(unix, feature = "markdown"))]
-fn stop_on_signals(stop: &std::sync::Arc<std::sync::atomic::AtomicBool>) -> std::io::Result<()> {
+fn stop_on_signals(stop: &Arc<AtomicBool>, signaled: &Arc<AtomicUsize>) -> std::io::Result<()> {
     use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
     use signal_hook::flag;
     for signal in [SIGINT, SIGTERM, SIGHUP] {
         flag::register(signal, stop.clone())?;
+        flag::register_usize(signal, signaled.clone(), signal as usize)?;
     }
     Ok(())
 }

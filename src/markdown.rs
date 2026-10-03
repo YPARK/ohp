@@ -1001,7 +1001,9 @@ impl Writer<'_, '_> {
         let (title, suppress) = (bib.title.clone(), bib.suppress);
 
         self.block();
-        let start = self.out.len();
+        // The works cited and what wraps them, not the heading: an error
+        // there is not the bibliography's.
+        let mut start = self.out.len();
         if suppress {
             // Typst sets no citation without a bibliography.
             self.raw("#[#show bibliography: none\n");
@@ -1018,6 +1020,7 @@ impl Writer<'_, '_> {
                 self.text(&title);
                 self.raw("]\n");
             }
+            start = self.out.len();
             self.raw(if self.slides() {
                 "#[#set text(size: 0.8em)\n"
             } else {

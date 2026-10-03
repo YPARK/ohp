@@ -243,11 +243,13 @@ fn a_stopped_knit_ends_r() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    // A process the chunk starts, told apart by how long it sleeps.
+    // A process the chunk starts, told apart by how long it sleeps: a
+    // time this run alone gives, so no other run's is taken for it.
+    let sleep = format!("sleep 61.{}", std::process::id());
     let path = write(
         dir.path(),
         "slow.Rmd",
-        "```{r}\nsystem(\"sleep 61.25\")\n```\n",
+        &format!("```{{r}}\nsystem(\"{sleep}\")\n```\n"),
     );
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = stop.clone();
@@ -262,7 +264,7 @@ fn a_stopped_knit_ends_r() {
     // Killed, it takes a moment to go.
     let running = || {
         Command::new("pgrep")
-            .args(["-xf", "sleep 61.25"])
+            .args(["-f", &sleep])
             .output()
             .is_ok_and(|o| !o.stdout.is_empty())
     };

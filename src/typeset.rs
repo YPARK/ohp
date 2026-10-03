@@ -84,12 +84,15 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
     let mut loaded = HashMap::new();
     let mut citations = true;
     let mut failure = String::new();
-    let stopped = || options.stop.load(Ordering::Relaxed);
-    for _ in 0..=RETRIES {
-        // Typesetting for a deck no longer wanted: ohp is quitting.
-        if stopped() {
+    // Typesetting for a deck no longer wanted, as when ohp is quitting.
+    let stopped = || {
+        if options.stop.load(Ordering::Relaxed) {
             anyhow::bail!("stopped");
         }
+        Ok(())
+    };
+    for _ in 0..=RETRIES {
+        stopped()?;
         let convert = |rendered: &HashMap<latex::Formula, latex::Rendered>| {
             let setting = Setting {
                 base,
@@ -110,9 +113,7 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
                 doc = convert(&rendered);
             }
         }
-        if stopped() {
-            anyhow::bail!("stopped");
-        }
+        stopped()?;
         let world = Doc::new(doc.source, &doc.images, &doc.files, &mut loaded);
         match compile(&world) {
             Ok(pdf) => {
@@ -183,9 +184,7 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
             }
         }
     }
-    if stopped() {
-        anyhow::bail!("stopped");
-    }
+    stopped()?;
     let source = format!(
         "#set page(paper: {})\n#raw(block: true, {})",
         markdown::string(options.paper.as_deref().unwrap_or(markdown::PAGE_PAPER)),

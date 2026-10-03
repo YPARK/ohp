@@ -54,9 +54,34 @@ fn formulas_asked_for_at_once_are_kept_however_many() {
 }
 
 #[test]
+fn what_one_render_asks_for_is_stamped_alike() {
+    if !available() {
+        eprintln!("skipped: no pdflatex");
+        return;
+    }
+    // Ones no other test asks for, rendered a batch each.
+    let formulas: Vec<Formula> = (0..3)
+        .map(|n| (format!("y_{{{}}}", 9100 + n), false))
+        .collect();
+    let preamble = "% stamped alike";
+    let done = render_on(&formulas, preamble, &AtomicBool::new(false), 1);
+    assert_eq!(done.len(), 3);
+    let (cache, _) = &*RENDERED.lock().unwrap();
+    let stamps: HashSet<u64> = formulas
+        .iter()
+        .map(|f| cache[&(preamble.to_string(), f.clone())].0)
+        .collect();
+    assert_eq!(stamps.len(), 1, "{stamps:?}");
+}
+
+#[test]
 fn a_stopped_render_renders_nothing_new() {
     let stop = AtomicBool::new(true);
     // One LaTeX would render, and no other test asks for.
-    let formula = ("x + 1 % stopped".to_string(), false);
-    assert!(render(&[formula], "", &stop).is_empty());
+    let formula = ("x + 9200".to_string(), false);
+    assert!(render(std::slice::from_ref(&formula), "", &stop).is_empty());
+    if available() {
+        let go = AtomicBool::new(false);
+        assert!(render(&[formula], "", &go).len() == 1, "renders once going");
+    }
 }
