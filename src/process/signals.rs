@@ -75,7 +75,7 @@ fn save_terminal() {
 
 /// The terminal as it was, without what ratatui would do on its way out:
 /// its settings, where they were saved, and the screen it showed, through
-/// the terminal or, without one, the output.
+/// the terminal or, without one, the output where it is a terminal.
 fn restore_terminal() {
     let fd = match TERMINAL.get() {
         Some((fd, settings)) => {
@@ -84,7 +84,10 @@ fn restore_terminal() {
             unsafe { libc::tcsetattr(*fd, libc::TCSANOW, settings) };
             *fd
         }
-        None => libc::STDOUT_FILENO,
+        // SAFETY: isatty only asks of a file.
+        None if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1 => libc::STDOUT_FILENO,
+        // Output to a file or a pipe has no screen to leave.
+        None => return,
     };
     // SAFETY: writes a static buffer of its own length.
     unsafe { libc::write(fd, LEAVE_SCREEN.as_ptr().cast(), LEAVE_SCREEN.len()) };

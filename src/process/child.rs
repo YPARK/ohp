@@ -29,8 +29,8 @@ pub enum Ended {
     Paused,
 }
 
-/// Most programs that may run at once: past it, one is refused, with an
-/// error of kind `ResourceBusy`, to be tried again.
+/// Most programs that may run at once: past it, one waits for another to
+/// end before it is started.
 pub const MOST: usize = 64;
 
 /// First wait between looks at a program, so a quick one is seen done soon.
@@ -39,25 +39,25 @@ const FIRST_POLL: Duration = Duration::from_millis(2);
 const LAST_POLL: Duration = Duration::from_millis(50);
 
 /// Run `command` until it ends, as it does itself or as `stop` or `timeout`
-/// ends it, and with it all it started.
+/// ends it, and with it all it started. It is taken, to be run once: each
+/// run sets it up to lead a session.
 pub fn run(
-    command: &mut Command,
+    mut command: Command,
     stop: &AtomicBool,
     timeout: Option<Duration>,
 ) -> io::Result<Ended> {
-    if stop.load(Ordering::Relaxed) {
+    // Known before it is started, waiting while too many run.
+    let Some(known) = group::reserve(stop) else {
         return Ok(Ended::Stopped);
-    }
+    };
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // SAFETY: between fork and exec, only calls safe there: setsid,
-        // getsid, getpid and sigprocmask.
+        // SAFETY: between fork and exec, only calls safe there: setsid and
+        // sigprocmask.
         unsafe {
             command.pre_exec(|| {
-                // A command run before has this hook already: a leader, it
-                // is one still.
-                if libc::setsid() == -1 && libc::getsid(0) != libc::getpid() {
+                if libc::setsid() == -1 {
                     return Err(io::Error::last_os_error());
                 }
                 group::unblock_signals();
@@ -65,18 +65,14 @@ pub fn run(
             })
         };
     }
-    let (mut child, known) = group::start(command)?;
-    let known = match known {
-        Ok(known) => known,
-        Err(e) => {
-            end(&mut child);
-            let _ = child.wait();
-            return Err(e);
-        }
-    };
+    let mut child = group::start(&mut command, &known)?;
     let start = Instant::now();
     let mut poll = FIRST_POLL;
     let ended = loop {
+        // Asked to stop, it is stopped, whatever else it is.
+        if stop.load(Ordering::Relaxed) {
+            break Some(Ended::Stopped);
+        }
         match state(&mut child) {
             Ok(State::Running) => {}
             Ok(State::Exited) => break None,
@@ -87,9 +83,6 @@ pub fn run(
                 let _ = child.wait();
                 return Err(e);
             }
-        }
-        if stop.load(Ordering::Relaxed) {
-            break Some(Ended::Stopped);
         }
         if timeout.is_some_and(|t| start.elapsed() > t) {
             break Some(Ended::TimedOut);
@@ -206,10 +199,17 @@ mod group {
     use super::MOST;
     use std::io;
     use std::process::{Child, Command};
-    use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+    use std::time::Duration;
 
-    /// Groups running, by id; 0 where a slot is free.
+    /// Groups running, by id; 0 where a slot is free, and `RESERVED` where
+    /// a program is about to be started.
     static GROUPS: [AtomicI32; MOST] = [const { AtomicI32::new(0) }; MOST];
+
+    const RESERVED: i32 = -1;
+
+    /// How long one waits for a slot before looking again.
+    const SLOT_WAIT: Duration = Duration::from_millis(10);
 
     /// Programs being started, not yet known: `kill_all` waits for them.
     static STARTING: AtomicUsize = AtomicUsize::new(0);
@@ -222,7 +222,8 @@ mod group {
     /// program, so `kill_all` runs on another and waits for it to be known.
     const HURRY: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
 
-    /// A group known while it runs.
+    /// A slot, reserved for a program and then knowing its group, until it
+    /// is freed.
     pub struct Known(&'static AtomicI32);
 
     impl Drop for Known {
@@ -231,35 +232,46 @@ mod group {
         }
     }
 
-    /// Start `command` and know its group: an error where it cannot be, as
-    /// no slot is free.
-    pub fn start(command: &mut Command) -> io::Result<(Child, io::Result<Known>)> {
-        STARTING.fetch_add(1, Ordering::SeqCst);
-        let held = hold_signals();
-        let started = command.spawn().map(|child| {
-            let known = know(&child);
-            (child, known)
-        });
-        release_signals(held);
-        STARTING.fetch_sub(1, Ordering::SeqCst);
-        started
+    /// A slot for a program, waited for while all are taken; `None` once
+    /// `stop` is set.
+    pub fn reserve(stop: &AtomicBool) -> Option<Known> {
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return None;
+            }
+            let free = GROUPS.iter().find(|s| {
+                s.compare_exchange(0, RESERVED, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            });
+            if let Some(slot) = free {
+                return Some(Known(slot));
+            }
+            std::thread::sleep(SLOT_WAIT);
+        }
     }
 
-    fn know(child: &Child) -> io::Result<Known> {
-        let id = i32::try_from(child.id()).map_err(io::Error::other)?;
-        GROUPS
-            .iter()
-            .find(|s| {
-                s.compare_exchange(0, id, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-            })
-            .map(Known)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::ResourceBusy,
-                    "too many programs running at once",
-                )
-            })
+    /// Start `command`, its group known in `known`'s slot.
+    pub fn start(command: &mut Command, known: &Known) -> io::Result<Child> {
+        STARTING.fetch_add(1, Ordering::SeqCst);
+        let held = hold_signals();
+        let started = command
+            .spawn()
+            .and_then(|mut child| match i32::try_from(child.id()) {
+                Ok(id) => {
+                    known.0.store(id, Ordering::SeqCst);
+                    Ok(child)
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    Err(io::Error::other(e))
+                }
+            });
+        // Known, or not to be, before a signal held off comes: a handler
+        // run here then waits for no program.
+        STARTING.fetch_sub(1, Ordering::SeqCst);
+        release_signals(held);
+        started
     }
 
     fn hurry_set() -> libc::sigset_t {
@@ -316,9 +328,10 @@ mod group {
             unsafe { libc::nanosleep(&step, std::ptr::null_mut()) };
         }
         for slot in &GROUPS {
-            match slot.load(Ordering::SeqCst) {
-                0 => {}
-                id => kill(id),
+            let id = slot.load(Ordering::SeqCst);
+            // Not free, nor reserved for a program not started.
+            if id > 0 {
+                kill(id);
             }
         }
     }
@@ -328,11 +341,16 @@ mod group {
 mod group {
     use std::io;
     use std::process::{Child, Command};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     pub struct Known;
 
-    pub fn start(command: &mut Command) -> io::Result<(Child, io::Result<Known>)> {
-        Ok((command.spawn()?, Ok(Known)))
+    pub fn reserve(stop: &AtomicBool) -> Option<Known> {
+        (!stop.load(Ordering::Relaxed)).then_some(Known)
+    }
+
+    pub fn start(command: &mut Command, _: &Known) -> io::Result<Child> {
+        command.spawn()
     }
 }
 

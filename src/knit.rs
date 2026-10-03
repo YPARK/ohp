@@ -64,11 +64,13 @@ fn run(rmd: &Path, stop: &AtomicBool) -> Result<Knitted, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr);
-    let status = match child::run(&mut command, stop, None) {
+    let status = match child::run(command, stop, None) {
         Ok(Ended::Exited(status)) => status,
         Ok(Ended::Stopped) => return Ok(Knitted::Stopped),
         Ok(Ended::Paused) => return Err("knitting paused, chunks shown as code".into()),
-        Ok(Ended::TimedOut) => unreachable!("knitting is given no time limit"),
+        // Given no time limit, it cannot run past one; were it, the chunks
+        // still show.
+        Ok(Ended::TimedOut) => return Err("knitting timed out, chunks shown as code".into()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err("R not found: chunks shown as code".into());
         }

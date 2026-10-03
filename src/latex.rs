@@ -164,8 +164,8 @@ fn evict(done: &mut Done, kept: usize) {
 }
 
 /// `formula` rendered by one LaTeX run, in a directory of its own, unless it
-/// runs past `timeout`; `None` where it was stopped, or refused for too many
-/// running, as it is neither set nor failed and is not kept.
+/// runs past `timeout`; `None` where it was stopped or paused, as it is
+/// neither set nor failed and is not kept.
 fn run(
     formula: &str,
     display: bool,
@@ -205,15 +205,14 @@ fn run(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    match child::run(&mut command, stop, Some(timeout)) {
+    match child::run(command, stop, Some(timeout)) {
         Ok(Ended::Exited(status)) if status.success() => {
             Some(read(&dir).map_or(Kept::Failed, Kept::Set))
         }
-        Ok(Ended::Stopped) => None,
-        // Refused, with too many running, it is to be tried again.
-        Err(e) if e.kind() == std::io::ErrorKind::ResourceBusy => None,
+        // Paused from outside, as stopped, it is no fault of the formula.
+        Ok(Ended::Stopped | Ended::Paused) => None,
         Ok(Ended::TimedOut) => Some(Kept::TimedOut),
-        Ok(Ended::Exited(_) | Ended::Paused) | Err(_) => Some(Kept::Failed),
+        Ok(Ended::Exited(_)) | Err(_) => Some(Kept::Failed),
     }
 }
 
