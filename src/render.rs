@@ -38,6 +38,28 @@ pub struct Deck {
     pub pages: usize,
     /// Width and height of the first page, in points.
     pub page_size: (f32, f32),
+    pub options: Options,
+    /// What the status line should say about how the deck was made.
+    pub note: Option<String>,
+}
+
+/// How a deck that is not a PDF is made into one.
+#[derive(Clone, Debug)]
+#[cfg_attr(not(feature = "markdown"), allow(dead_code))]
+pub struct Options {
+    /// A typst paper size for markdown; its own default if `None`.
+    pub paper: Option<String>,
+    /// Run code chunks with knitr, where R is here.
+    pub knit: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            paper: None,
+            knit: true,
+        }
+    }
 }
 
 /// When a file last changed, and its length: enough to notice a rewrite.
@@ -50,7 +72,11 @@ pub fn stamp(path: &Path) -> Stamp {
 
 /// Whether the file ends the way a finished PDF does. LaTeX may pause while
 /// writing one, so a file that stopped changing is not necessarily done.
+/// Markdown is written by an editor, all at once.
 pub fn finished(path: &Path) -> bool {
+    if markdown(path) {
+        return path.is_file();
+    }
     let Ok(mut file) = std::fs::File::open(path) else {
         return false;
     };
@@ -61,9 +87,42 @@ pub fn finished(path: &Path) -> bool {
         && tail.windows(5).any(|w| w == b"%%EOF")
 }
 
+/// Whether `path` names markdown or R Markdown, typeset rather than read.
+pub fn markdown(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "md" | "markdown" | "rmd"))
+}
+
+#[cfg(feature = "markdown")]
+fn typeset(path: &Path, options: &Options) -> anyhow::Result<(Vec<u8>, Option<String>)> {
+    let done = crate::typeset::typeset(path, options)?;
+    Ok((done.pdf, done.note))
+}
+
+#[cfg(not(feature = "markdown"))]
+fn typeset(path: &Path, _: &Options) -> anyhow::Result<(Vec<u8>, Option<String>)> {
+    anyhow::bail!(
+        "{} is markdown, and ohp was built without its `markdown` feature",
+        path.display()
+    )
+}
+
 impl Deck {
+    #[cfg(test)]
     pub fn open(path: &Path) -> anyhow::Result<Self> {
-        let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        Self::open_with(path, Options::default())
+    }
+
+    /// The deck in `path`: a PDF, or markdown typeset into one.
+    pub fn open_with(path: &Path, options: Options) -> anyhow::Result<Self> {
+        let (data, note) = if markdown(path) {
+            typeset(path, &options)?
+        } else {
+            let data =
+                std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            (data, None)
+        };
         let data = Arc::new(data);
         let pdf =
             Pdf::new(data.clone()).map_err(|e| anyhow!("cannot open {}: {e:?}", path.display()))?;
@@ -82,7 +141,14 @@ impl Deck {
             pages: pages.len(),
             page_size,
             data,
+            options,
+            note,
         })
+    }
+
+    /// The deck read again from its file, made as it was before.
+    pub fn reopen(&self) -> anyhow::Result<Self> {
+        Self::open_with(&self.path, self.options.clone())
     }
 }
 

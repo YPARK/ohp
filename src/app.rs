@@ -57,6 +57,7 @@ pub fn run(deck: Deck, text: bool, link: Option<Link>) -> anyhow::Result<()> {
             Look::Image
         };
         let mut app = App::new(deck, picker, renderer, workers, look);
+        app.notice = app.deck.note.clone();
         app.link = link;
         app.run(&mut terminal)?;
         app.clear_images()
@@ -253,13 +254,18 @@ impl App {
             self.reload();
         } else if self.settling != Some(now) {
             self.settling = Some(now);
-            self.notice = Some("PDF changing…".into());
+            let what = if render::markdown(&self.deck.path) {
+                "file"
+            } else {
+                "PDF"
+            };
+            self.notice = Some(format!("{what} changing…"));
             self.dirty = true;
         }
     }
 
     fn reload(&mut self) {
-        let fresh = Deck::open(&self.deck.path).and_then(|deck| {
+        let fresh = self.deck.reopen().and_then(|deck| {
             let renderer = Renderer::spawn(&deck, &self.picker, self.workers)?;
             Ok((deck, renderer))
         });
@@ -270,7 +276,10 @@ impl App {
                 self.renderer = renderer;
                 self.requested.clear();
                 self.stale = std::mem::take(&mut self.slides);
-                self.notice = Some("reloaded".into());
+                self.notice = Some(match &self.deck.note {
+                    Some(note) => format!("reloaded; {note}"),
+                    None => "reloaded".into(),
+                });
             }
             Err(e) => self.notice = Some(format!("reload failed: {e:#}")),
         }
