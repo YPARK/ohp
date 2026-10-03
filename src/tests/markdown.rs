@@ -369,8 +369,44 @@ fn an_image_typst_could_not_read_is_described() {
             ..setting(dir.path())
         },
     );
-    assert_eq!(doc.images.len(), 1);
     assert!(doc.source.contains("\\[image: first\\]"), "{}", doc.source);
-    assert_eq!(doc.pictures.len(), 2, "both keep their index");
-    assert_eq!(doc.pictures[1].1, dir.path().join("b.png"));
+    assert!(!doc.source.contains("/img/0.png"), "{}", doc.source);
+    assert!(
+        doc.source.contains("image(\"/img/1.png\""),
+        "{}",
+        doc.source
+    );
+    // Both keep their index, and where each is in the source.
+    assert_eq!(doc.images.len(), 2);
+    assert_eq!(doc.pictures.len(), 2);
+    assert!(doc.source[doc.pictures[1].clone()].contains("/img/1.png"));
+}
+
+#[test]
+fn a_backtick_fence_has_no_backtick_after_it() {
+    assert_eq!(open_fence("````markdown"), Some(('`', 4)));
+    assert_eq!(open_fence("~~~ a`b"), Some(('~', 3)));
+    assert_eq!(open_fence("```x```"), None);
+    assert_eq!(open_fence("``x"), None);
+    // Inline code on a line of its own leaves the notes after it out.
+    let (out, _) = strip_divs(
+        "```x```
+\n::: notes\nsecret\n:::\n",
+    );
+    assert!(!out.contains("secret"), "{out}");
+}
+
+#[test]
+fn a_file_url_is_unescaped_and_only_for_this_machine() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("My Plots")).unwrap();
+    let plot = dir.path().join("My Plots/a.png");
+    std::fs::write(&plot, b"png").unwrap();
+    let at = dir.path().display().to_string().replace(' ', "%20");
+    let text = format!(
+        "![a](file://{at}/My%20Plots/a.png) ![b](file://localhost{at}/My%20Plots/a.png) ![c](file://elsewhere{at}/My%20Plots/a.png)\n"
+    );
+    let doc = convert(&text, &setting(dir.path()));
+    assert_eq!(doc.images.len(), 2, "{}", doc.source);
+    assert!(doc.images.iter().all(|(_, p)| p == &plot));
 }

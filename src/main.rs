@@ -97,6 +97,7 @@ fn options(args: &Args, remote: bool) -> render::Options {
         paper: args.paper.clone(),
         // The data a remote file's chunks read is on the other machine.
         knit: !args.no_knit && !remote,
+        ..render::Options::default()
     }
 }
 

@@ -52,13 +52,23 @@ pub fn available() -> bool {
 /// The `formulas` LaTeX can render after `preamble`.
 pub fn render(formulas: &[Formula], preamble: &str) -> HashMap<Formula, Rendered> {
     let key = |f: &Formula| (preamble.to_string(), f.clone());
-    let fresh: Vec<&Formula> = {
-        let (done, _) = &*RENDERED.lock().expect("rendered formulas");
+    // Stamped now, those rendered before are not evicted by another call
+    // while these render.
+    let (fresh, now): (Vec<&Formula>, u64) = {
+        let (done, asked) = &mut *RENDERED.lock().expect("rendered formulas");
+        *asked += 1;
         let mut seen = HashSet::new();
-        formulas
+        let fresh = formulas
             .iter()
-            .filter(|f| !done.contains_key(&key(f)) && seen.insert(*f))
-            .collect()
+            .filter(|f| match done.get_mut(&key(f)) {
+                Some((used, _)) => {
+                    *used = *asked;
+                    false
+                }
+                None => seen.insert(*f),
+            })
+            .collect();
+        (fresh, *asked)
     };
     let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
     for batch in fresh.chunks(workers) {
@@ -71,19 +81,13 @@ pub fn render(formulas: &[Formula], preamble: &str) -> HashMap<Formula, Rendered
         });
         let (done, _) = &mut *RENDERED.lock().expect("rendered formulas");
         for (f, result) in batch.iter().zip(results) {
-            done.insert(key(f), (0, result));
+            done.insert(key(f), (now, result));
         }
     }
-    let (done, asked) = &mut *RENDERED.lock().expect("rendered formulas");
-    *asked += 1;
-    let now = *asked;
+    let (done, _) = &mut *RENDERED.lock().expect("rendered formulas");
     let found = formulas
         .iter()
-        .filter_map(|f| {
-            let (used, rendered) = done.get_mut(&key(f))?;
-            *used = now;
-            Some((f.clone(), rendered.clone()?))
-        })
+        .filter_map(|f| Some((f.clone(), done.get(&key(f))?.1.clone()?)))
         .collect();
     evict(done, KEPT);
     found

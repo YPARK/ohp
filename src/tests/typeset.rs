@@ -8,7 +8,10 @@ fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
 }
 
 fn options(knit: bool) -> Options {
-    Options { paper: None, knit }
+    Options {
+        knit,
+        ..Options::default()
+    }
 }
 
 fn r_here() -> bool {
@@ -107,7 +110,7 @@ fn knitr_runs_chunks_beside_the_file_and_keeps_plots_apart() {
         "a.Rmd",
         "```{r}\nsum(read.csv('data.csv')$x) * 7\n```\n\n```{r p}\nplot(1:3)\n```\n",
     );
-    let (out, md) = knit(&path).unwrap();
+    let (out, md) = knit(&path, &AtomicBool::new(false)).unwrap();
     assert!(md.contains("## [1] 21"), "{md}");
     let figures = out.path().join("figure");
     assert!(std::fs::read_dir(&figures).unwrap().count() > 0);
@@ -127,7 +130,7 @@ fn knitr_runs_bash_chunks_in_plain_markdown() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("here.txt"), "").unwrap();
     let path = write(dir.path(), "a.md", "```{bash}\nls *.txt\n```\n");
-    let (_, md) = knit(&path).unwrap();
+    let (_, md) = knit(&path, &AtomicBool::new(false)).unwrap();
     assert!(md.contains("## here.txt"), "{md}");
 }
 
@@ -222,9 +225,33 @@ fn an_image_typst_cannot_read_is_left_out_alone() {
 }
 
 #[test]
-fn an_empty_group_typesets_as_a_base() {
+fn groups_typeset_as_bases() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write(dir.path(), "iso.md", "Carbon $a {}^{14}C$.\n");
+    let path = write(
+        dir.path(),
+        "iso.md",
+        "Carbon $a {}^{14}C$, $\\sum_{i} {x_1}^2 + {a,b}_n$.\n",
+    );
     let done = typeset(&path, &options(false)).unwrap();
     assert!(done.note.is_none(), "{:?}", done.note);
+}
+
+#[test]
+fn a_stopped_knit_ends_r() {
+    if !r_here() {
+        eprintln!("skipped: no R with knitr");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "slow.Rmd", "```{r}\nSys.sleep(60)\n```\n");
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = stop.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        stopping.store(true, Ordering::Relaxed);
+    });
+    let start = std::time::Instant::now();
+    let why = knit(&path, &stop).unwrap_err();
+    assert_eq!(why, "knitting stopped");
+    assert!(start.elapsed().as_secs() < 10);
 }

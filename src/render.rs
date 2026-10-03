@@ -24,6 +24,7 @@ use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::SystemTime;
@@ -51,6 +52,9 @@ pub struct Options {
     pub paper: Option<String>,
     /// Run code chunks with knitr, where R is here.
     pub knit: bool,
+    /// Set to stop typesetting under way, as a knitr run; shared by the
+    /// options' clones, so by every reload of a deck.
+    pub stop: Arc<AtomicBool>,
 }
 
 impl Default for Options {
@@ -58,6 +62,7 @@ impl Default for Options {
         Options {
             paper: None,
             knit: true,
+            stop: Arc::default(),
         }
     }
 }

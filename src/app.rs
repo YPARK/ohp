@@ -27,7 +27,9 @@ use ratatui_image::picker::{Picker, ProtocolType};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// Slides the grid tries to show at once.
@@ -61,7 +63,9 @@ pub fn run(deck: Deck, text: bool, link: Option<Link>) -> anyhow::Result<()> {
         let mut app = App::new(deck, picker, renderer, workers, look);
         app.notice = app.deck.note.clone();
         app.link = link;
-        app.run(&mut terminal)?;
+        let ran = app.run(&mut terminal);
+        app.stop();
+        ran?;
         app.clear_images()
     })();
     ratatui::restore();
@@ -145,8 +149,8 @@ struct App {
     /// A change seen on disk, waiting for the file to stop changing.
     settling: Option<Stamp>,
     checked: Instant,
-    /// The deck being read again, off this thread.
-    loading: Option<Receiver<anyhow::Result<Deck>>>,
+    /// The deck being read again, off this thread, and that thread.
+    loading: Option<(Receiver<anyhow::Result<Deck>>, JoinHandle<()>)>,
     /// The file changed again while it was being read: read it once more.
     again: bool,
     /// Shown in the status line until the next key press.
@@ -282,16 +286,16 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         let (path, options) = (self.deck.path.clone(), self.deck.options.clone());
         // Nothing to do if the app is gone.
-        std::thread::spawn(move || {
+        let reader = std::thread::spawn(move || {
             let _ = tx.send(Deck::open_with(&path, options));
         });
-        self.loading = Some(rx);
+        self.loading = Some((rx, reader));
         self.dirty = true;
     }
 
     /// Show the deck read again, once it is.
     fn loaded(&mut self) {
-        let Some(rx) = &self.loading else {
+        let Some((rx, _)) = &self.loading else {
             return;
         };
         let fresh = match rx.try_recv() {
@@ -321,6 +325,15 @@ impl App {
         self.dirty = true;
         if std::mem::take(&mut self.again) {
             self.reload();
+        }
+    }
+
+    /// Stop a reload under way and wait for it, so a knitr run it started
+    /// does not outlive ohp, nor leave its files.
+    fn stop(&mut self) {
+        if let Some((_, reader)) = self.loading.take() {
+            self.deck.options.stop.store(true, Ordering::Relaxed);
+            let _ = reader.join();
         }
     }
 

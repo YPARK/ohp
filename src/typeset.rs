@@ -16,9 +16,11 @@ use crate::markdown::{self, Setting};
 use crate::render::Options;
 use anyhow::Context;
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use tempfile::TempDir;
 use typst::diag::{FileError, FileResult, SourceDiagnostic};
@@ -32,8 +34,11 @@ use typst_layout::PagedDocument;
 use typst_pdf::PdfOptions;
 
 /// Times typst is tried again with the formulas it failed on shown as LaTeX,
-/// and the images it failed on left out.
-const RETRIES: usize = 3;
+/// the images it failed on left out, or citations left as written.
+const RETRIES: usize = 5;
+
+/// How often a knitr run is checked on, for whether it is done or to stop.
+const KNIT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// The PDF, and anything the status line should say about it.
 pub struct Typeset {
@@ -52,16 +57,17 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let base = path.parent().unwrap_or(Path::new("."));
-    let mut note = None;
+    // Why chunks were not run, which holds however the text is shown.
+    let mut knitting = None;
     let rmd = path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("rmd"));
     // The directory is kept until typeset: knitted plots are in it.
     let (text, _knitted) = if options.knit && has_chunks(&text, rmd) {
-        match knit(path) {
+        match knit(path, &options.stop) {
             Ok((dir, md)) => (md, Some(dir)),
             Err(why) => {
-                note = Some(why);
+                knitting = Some(why);
                 (text, None)
             }
         }
@@ -72,7 +78,8 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
     let mut raw_math = HashSet::new();
     let mut source_only = HashSet::new();
     let mut broken = HashSet::new();
-    let mut warnings = Vec::new();
+    // What was left out to typeset the text.
+    let mut dropped: Vec<String> = Vec::new();
     let mut rendered = HashMap::new();
     let mut loaded = HashMap::new();
     let mut citations = true;
@@ -98,11 +105,14 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
                 doc = convert(&rendered);
             }
         }
-        warnings = doc.warnings;
         let world = Doc::new(doc.source, &doc.images, &doc.files, &mut loaded);
         match compile(&world) {
             Ok(pdf) => {
-                let notes: Vec<String> = note.into_iter().chain(warnings).collect();
+                let notes: Vec<String> = knitting
+                    .into_iter()
+                    .chain(dropped)
+                    .chain(doc.warnings)
+                    .collect();
                 let note = (!notes.is_empty()).then(|| notes.join("; "));
                 return Ok(Typeset { pdf, note });
             }
@@ -110,20 +120,25 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
                 failure = errors[0].message.to_string();
                 let spans: Vec<_> = errors
                     .iter()
-                    .filter_map(|e| Some((world.range(e.span)?, e.message.as_str())))
+                    .map(|e| (world.range(e.span), e.message.as_str()))
                     .collect();
-                // What typst said of `r`, if it failed there.
-                let hit = |r: &std::ops::Range<usize>| {
-                    spans
-                        .iter()
-                        .find(|(s, _)| s.start < r.end && r.start < s.end)
-                        .map(|(_, message)| *message)
-                };
+                // An error is a formula's where it overlaps it, and an
+                // image's only where it is within it: one over a link or
+                // emphasis around an image is not the image's.
+                let overlaps =
+                    |s: &Range<usize>, r: &Range<usize>| s.start < r.end && r.start < s.end;
+                let within =
+                    |s: &Range<usize>, r: &Range<usize>| r.start <= s.start && s.end <= r.end;
                 let bad: Vec<usize> = doc
                     .formulas
                     .iter()
                     .enumerate()
-                    .filter(|(i, f)| !source_only.contains(i) && hit(f).is_some())
+                    .filter(|(i, f)| {
+                        !source_only.contains(i)
+                            && spans
+                                .iter()
+                                .any(|(s, _)| s.as_ref().is_some_and(|s| overlaps(s, f)))
+                    })
                     .map(|(i, _)| i)
                     .collect();
                 let unread: Vec<(usize, &str)> = doc
@@ -131,33 +146,41 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| !broken.contains(i))
-                    .filter_map(|(i, (r, _))| Some((i, hit(r)?)))
+                    .filter_map(|(i, r)| {
+                        let (_, message) = spans
+                            .iter()
+                            .find(|(s, _)| s.as_ref().is_some_and(|s| within(s, r)))?;
+                        Some((i, *message))
+                    })
                     .collect();
-                for &(i, message) in &unread {
-                    let name = doc.pictures[i].1.file_name().unwrap_or_default();
-                    let why = format!("cannot show {}: {message}", name.to_string_lossy());
-                    note = Some(note.map_or(why.clone(), |n| format!("{n}; {why}")));
-                    broken.insert(i);
-                }
-                if bad.is_empty() && !unread.is_empty() {
-                    continue;
-                }
-                if bad.is_empty() {
-                    if !doc.listed {
-                        break;
+                // Errors no formula or image accounts for.
+                let other = spans.iter().find(|(s, _)| match s {
+                    None => true,
+                    Some(s) => {
+                        !doc.formulas.iter().any(|f| overlaps(s, f))
+                            && !doc.pictures.iter().any(|r| within(s, r))
                     }
-                    // A bibliography typst read but could not set from.
-                    citations = false;
-                    let why = format!("citations left as written: {failure}");
-                    note = Some(note.map_or(why.clone(), |n| format!("{n}; {why}")));
-                    continue;
+                });
+                for &(i, message) in &unread {
+                    let name = doc.images[i].1.file_name().unwrap_or_default();
+                    dropped.push(format!("cannot show {}: {message}", name.to_string_lossy()));
+                    broken.insert(i);
                 }
                 // Failing as typst's math, a formula is tried as LaTeX
                 // rendered it; failing as that, it is shown as its source.
-                for i in bad {
+                for &i in &bad {
                     if !raw_math.insert(i) {
                         source_only.insert(i);
                     }
+                }
+                // A bibliography typst read but could not set from.
+                let uncite = other.filter(|_| doc.listed);
+                if let Some((_, message)) = uncite {
+                    citations = false;
+                    dropped.push(format!("citations left as written: {message}"));
+                }
+                if bad.is_empty() && unread.is_empty() && uncite.is_none() {
+                    break;
                 }
             }
         }
@@ -169,8 +192,10 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
     );
     let pdf = compile(&Doc::new(source, &[], &[], &mut loaded))
         .map_err(|e| anyhow::anyhow!("cannot typeset {}: {}", path.display(), e[0].message))?;
+    // First, so the status line shows it however long the rest; what was
+    // left out of a typeset text is not on screen to say.
     let why = format!("shown as source: {failure}");
-    let notes: Vec<String> = note.into_iter().chain(warnings).chain([why]).collect();
+    let notes: Vec<String> = [why].into_iter().chain(knitting).collect();
     Ok(Typeset {
         pdf,
         note: Some(notes.join("; ")),
@@ -206,7 +231,7 @@ fn has_chunks(text: &str, rmd: bool) -> bool {
 /// own, with the plots beside it. Chunks run in `rmd`'s directory, as
 /// knitting there would run them, R's and those of knitr's other engines:
 /// python, through reticulate, bash and the rest.
-fn knit(rmd: &Path) -> Result<(TempDir, String), String> {
+fn knit(rmd: &Path, stop: &AtomicBool) -> Result<(TempDir, String), String> {
     let rmd = std::path::absolute(rmd).map_err(|e| e.to_string())?;
     let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let out = dir.path().join("knitted.md");
@@ -214,23 +239,40 @@ fn knit(rmd: &Path) -> Result<(TempDir, String), String> {
     const SCRIPT: &str = "a <- commandArgs(TRUE); \
         knitr::opts_chunk$set(fig.path = a[3]); \
         invisible(knitr::knit(a[1], a[2], quiet = TRUE, envir = new.env()))";
-    let run = Command::new("Rscript")
+    // To a file, not a pipe, so R is waited on without reading it.
+    let log = dir.path().join("stderr.txt");
+    let stderr = std::fs::File::create(&log).map_err(|e| e.to_string())?;
+    let child = Command::new("Rscript")
         .args(["-e", SCRIPT])
         .arg(&rmd)
         .arg(&out)
         .arg(&figures)
         .current_dir(dir.path())
         .stdin(Stdio::null())
-        .output();
-    let run = match run {
-        Ok(run) => run,
+        .stdout(Stdio::null())
+        .stderr(stderr)
+        .spawn();
+    let mut child = match child {
+        Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err("R not found: chunks shown as code".into());
         }
         Err(e) => return Err(format!("cannot run R: {e}")),
     };
-    if !run.status.success() {
-        let stderr = String::from_utf8_lossy(&run.stderr);
+    let status = loop {
+        if stop.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("knitting stopped".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(KNIT_POLL),
+            Err(e) => return Err(format!("cannot run R: {e}")),
+        }
+    };
+    if !status.success() {
+        let stderr = std::fs::read_to_string(&log).unwrap_or_default();
         let why = stderr
             .lines()
             .rev()

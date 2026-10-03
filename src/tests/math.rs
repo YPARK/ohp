@@ -29,6 +29,14 @@ fn an_empty_group_is_a_base_to_attach_to() {
 }
 
 #[test]
+fn what_is_attached_to_a_group_is_attached_to_all_of_it() {
+    assert_eq!(ok("{a+b}^2"), "scripts(a + b)^(2)");
+    assert_eq!(ok("{x_1}^2"), "scripts(x_(1))^(2)");
+    assert_eq!(ok("{\\sum}_i"), "scripts(∑)_(i)");
+    assert_eq!(ok("{a}b"), "a b");
+}
+
+#[test]
 fn commands_with_arguments_become_calls() {
     assert_eq!(ok(r"\frac{a}{b}"), "frac(a, b)");
     assert_eq!(ok(r"\sqrt[3]{x}"), "root(3, x)");

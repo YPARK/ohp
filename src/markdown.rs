@@ -33,11 +33,11 @@ const REFS: &str = "<!-- ohp: refs -->";
 /// The typst document a markdown file is set as.
 pub struct Converted {
     pub source: String,
-    /// Images, by the name `source` gives each.
+    /// Images found, by the name `source` gives each, in the order they
+    /// appear: those typst could not read are named but not shown.
     pub images: Vec<(String, PathBuf)>,
-    /// Where each image found is in `source`, in the order they appear,
-    /// with the file it shows.
-    pub pictures: Vec<(Range<usize>, PathBuf)>,
+    /// Where each of `images` is in `source`.
+    pub pictures: Vec<Range<usize>>,
     /// Files made here, by the name `source` gives each: formulas LaTeX
     /// rendered, bibliographies and a citation style.
     pub files: Vec<(String, Arc<[u8]>)>,
@@ -302,6 +302,32 @@ fn authors(value: &str, nested: &[&str]) -> Option<String> {
     (!names.is_empty()).then(|| names.join(", "))
 }
 
+/// The character and length of the code fence `line` opens, if it opens
+/// one: a backtick fence's info has no backtick, so ```` ```x``` ```` is
+/// inline code.
+fn open_fence(line: &str) -> Option<(char, usize)> {
+    let c = line.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let len = line.chars().take_while(|&x| x == c).count();
+    (len >= 3 && !(c == '`' && line[len..].contains('`'))).then_some((c, len))
+}
+
+/// A URL's `%`-escaped bytes as themselves.
+fn unescape(url: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(url.len());
+    let mut rest = url.as_bytes();
+    while let Some((&b, tail)) = rest.split_first() {
+        rest = tail;
+        if b == b'%' {
+            let hex = std::str::from_utf8(rest.get(..2)?).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            rest = &rest[2..];
+        } else {
+            bytes.push(b);
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
 fn unquote(s: &str) -> String {
     let s = s.trim();
     for q in ['"', '\''] {
@@ -362,9 +388,8 @@ fn strip_divs(body: &str) -> (String, Vec<String>) {
             }
             continue;
         }
-        if t.starts_with("```") || t.starts_with("~~~") {
-            let c = t.chars().next().expect("a fence");
-            fence = Some((c, t.chars().take_while(|&x| x == c).count()));
+        if let Some(f) = open_fence(t) {
+            fence = Some(f);
         } else if t.starts_with(":::") {
             let attrs = t.trim_start_matches(':').trim();
             if notes > 0 {
@@ -441,7 +466,7 @@ struct Writer<'a, 'e> {
     layout: Layout,
     setting: &'a Setting<'a>,
     images: Vec<(String, PathBuf)>,
-    pictures: Vec<(Range<usize>, PathBuf)>,
+    pictures: Vec<Range<usize>>,
     files: Vec<(String, Arc<[u8]>)>,
     formulas: Vec<Range<usize>>,
     unset: Vec<Formula>,
@@ -794,18 +819,20 @@ impl Writer<'_, '_> {
             i.checked_sub(1).map(|p| &events[p]),
             Some(Event::Start(Tag::Paragraph))
         ) && matches!(events.get(end + 1), Some(Event::End(TagEnd::Paragraph)));
-        let found = self.find(url);
+        let found = self.find(url).map(|path| {
+            let ext = path
+                .extension()
+                .map_or(String::new(), |e| e.to_string_lossy().to_lowercase());
+            let name = format!("/img/{}.{ext}", self.images.len());
+            self.images.push((name.clone(), path));
+            name
+        });
         // One typst could not read is shown as if it were not found.
-        let broken = self.setting.broken.contains(&self.pictures.len());
+        let broken = found.is_some() && self.setting.broken.contains(&(self.images.len() - 1));
         let start = self.out.len();
         match &found {
-            Some(path) if !broken => {
-                let ext = path
-                    .extension()
-                    .map_or(String::new(), |e| e.to_string_lossy().to_lowercase());
-                let name = format!("/img/{}.{ext}", self.images.len());
-                self.images.push((name.clone(), path.clone()));
-                let name = string(&name);
+            Some(name) if !broken => {
+                let name = string(name);
                 if alone && self.slides() {
                     // What is left of the slide, so a plot never spills
                     // onto a slide of its own.
@@ -825,22 +852,30 @@ impl Writer<'_, '_> {
                 self.raw("];");
             }
         }
-        if let Some(path) = found {
-            self.pictures.push((start..self.out.len(), path));
+        if found.is_some() {
+            self.pictures.push(start..self.out.len());
         }
         end - i + 1
     }
 
     /// The file an image's URL names, if it is here: never fetched.
     fn find(&self, url: &str) -> Option<PathBuf> {
-        let url = url
-            .strip_prefix("file://")
-            .or_else(|| url.strip_prefix("file:"))
-            .unwrap_or(url);
-        if url.contains("://") {
-            return None;
-        }
-        let path = Path::new(url);
+        let url = match url.strip_prefix("file:") {
+            // `file://host/path`: only this machine's.
+            Some(rest) => match rest.strip_prefix("//") {
+                Some(rest) => {
+                    let at = rest.find('/')?;
+                    if !matches!(&rest[..at], "" | "localhost") {
+                        return None;
+                    }
+                    unescape(&rest[at..])?
+                }
+                None => unescape(rest)?,
+            },
+            None if url.contains("://") => return None,
+            None => url.to_string(),
+        };
+        let path = Path::new(&url);
         let path = if path.is_absolute() {
             path.to_path_buf()
         } else {

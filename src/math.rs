@@ -91,13 +91,16 @@ impl Parser<'_> {
                 }
                 '{' => {
                     let (inner, _) = self.seq(Context::Group)?;
-                    // An empty group is the base of what is attached to
-                    // it, as in `{}^{14}C`.
+                    // A group is one atom, as TeX and MathJax have it:
+                    // what is attached to it is attached to all of it, at
+                    // its side, and an empty one is a base as in `{}^{14}C`.
                     let rest = self.s[self.i..].iter().find(|c| !c.is_whitespace());
-                    if inner.is_empty() && matches!(rest, Some('^' | '_')) {
+                    if !matches!(rest, Some('^' | '_')) {
+                        push(&mut out, &inner);
+                    } else if inner.is_empty() {
                         push(&mut out, "\"\"");
                     } else {
-                        push(&mut out, &inner);
+                        push(&mut out, &format!("scripts({})", quote_separators(&inner)));
                     }
                 }
                 '%' => {

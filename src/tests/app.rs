@@ -39,10 +39,19 @@ fn due(app: &mut App) {
 fn watch(app: &mut App) {
     due(app);
     app.watch();
+    let start = Instant::now();
     while app.loading.is_some() {
+        assert!(start.elapsed() < Duration::from_secs(30), "the reload hung");
         std::thread::sleep(Duration::from_millis(5));
         app.loaded();
     }
+}
+
+/// A reload under way that sends `deck` once done.
+fn loading(deck: anyhow::Result<Deck>) -> (Receiver<anyhow::Result<Deck>>, JoinHandle<()>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(deck).unwrap();
+    (rx, std::thread::spawn(|| {}))
 }
 
 #[test]
@@ -410,19 +419,15 @@ fn a_reload_keeps_old_slides_on_screen_until_replaced() {
 #[test]
 fn a_change_while_reloading_reloads_again() {
     let (dir, mut app) = app(3);
-    app.loading = Some(std::sync::mpsc::channel().1);
+    fixture::write(dir.path(), 6);
+    app.loading = Some(loading(Deck::open(&dir.path().join("deck.pdf"))));
     app.reload();
     assert!(app.again);
-    app.loading = None;
-    fixture::write(dir.path(), 6);
-    app.again = false;
-    let (tx, rx) = std::sync::mpsc::channel();
-    tx.send(Deck::open(&dir.path().join("deck.pdf"))).unwrap();
-    app.loading = Some(rx);
-    app.again = true;
     app.loaded();
     assert_eq!(app.deck.pages, 6);
     assert!(app.loading.is_some(), "read once more");
+    app.stop();
+    assert!(app.loading.is_none());
 }
 
 #[test]
