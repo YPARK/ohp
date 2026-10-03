@@ -63,9 +63,7 @@ pub fn run(deck: Deck, text: bool, link: Option<Link>) -> anyhow::Result<()> {
         let mut app = App::new(deck, picker, renderer, workers, look);
         app.notice = app.deck.note.clone();
         app.link = link;
-        let ran = app.run(&mut terminal);
-        app.stop();
-        ran?;
+        app.run(&mut terminal)?;
         app.clear_images()
     })();
     ratatui::restore();
@@ -737,6 +735,13 @@ impl App {
         write!(out, "{start}{esc}_Ga=d,d=A,q=2{esc}\\{end}")?;
         out.flush()?;
         Ok(())
+    }
+}
+
+/// However ohp ends, even by a panic, a reload under way stops with it.
+impl Drop for App {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 

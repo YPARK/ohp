@@ -17,6 +17,8 @@ default = ["markdown"]
 # Citations are read with typst's own bibliography crates.
 markdown = [
     "dep:hayagriva",
+    "dep:libc",
+    "dep:percent-encoding",
     "dep:pulldown-cmark",
     "dep:serde_json",
     "dep:serde_yaml",
@@ -32,6 +34,7 @@ clap = { version = "4.6", features = ["derive"] }
 hayagriva = { version = "0.10.1", optional = true }
 hayro = "0.7.1"
 image = { version = "0.25", default-features = false }
+percent-encoding = { version = "2.3", optional = true }
 pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 ratatui = "0.30"
 # Without default features: `chafa-dyn` links a C library.
@@ -44,3 +47,7 @@ typst-assets = { version = "0.15.1", features = ["fonts"], optional = true }
 typst-layout = { version = "0.15.1", optional = true }
 typst-pdf = { version = "0.15.1", optional = true }
 unicode-width = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+# To stop knitr's chunks with R, as their process group.
+libc = { version = "0.2", optional = true }

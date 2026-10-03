@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 /// LaTeX's own size, which the rendered height and depth are measured in.
@@ -49,29 +50,38 @@ pub fn available() -> bool {
     *AVAILABLE
 }
 
-/// The `formulas` LaTeX can render after `preamble`.
-pub fn render(formulas: &[Formula], preamble: &str) -> HashMap<Formula, Rendered> {
+/// The `formulas` LaTeX can render after `preamble`; those not yet rendered
+/// once `stop` is set are left out.
+pub fn render(
+    formulas: &[Formula],
+    preamble: &str,
+    stop: &AtomicBool,
+) -> HashMap<Formula, Rendered> {
     let key = |f: &Formula| (preamble.to_string(), f.clone());
-    // Stamped now, those rendered before are not evicted by another call
-    // while these render.
-    let (fresh, now): (Vec<&Formula>, u64) = {
+    // What this call returns is taken as it goes, not read back, so
+    // another call evicting meanwhile takes nothing from it.
+    let mut found = HashMap::new();
+    let fresh: Vec<&Formula> = {
         let (done, asked) = &mut *RENDERED.lock().expect("rendered formulas");
         *asked += 1;
         let mut seen = HashSet::new();
-        let fresh = formulas
+        formulas
             .iter()
             .filter(|f| match done.get_mut(&key(f)) {
-                Some((used, _)) => {
+                Some((used, rendered)) => {
                     *used = *asked;
+                    found.extend(rendered.clone().map(|r| ((*f).clone(), r)));
                     false
                 }
                 None => seen.insert(*f),
             })
-            .collect();
-        (fresh, *asked)
+            .collect()
     };
     let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
     for batch in fresh.chunks(workers) {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         let results: Vec<Option<Rendered>> = std::thread::scope(|s| {
             let runs: Vec<_> = batch
                 .iter()
@@ -79,17 +89,14 @@ pub fn render(formulas: &[Formula], preamble: &str) -> HashMap<Formula, Rendered
                 .collect();
             runs.into_iter().map(|r| r.join().ok().flatten()).collect()
         });
-        let (done, _) = &mut *RENDERED.lock().expect("rendered formulas");
+        let (done, asked) = &mut *RENDERED.lock().expect("rendered formulas");
+        *asked += 1;
         for (f, result) in batch.iter().zip(results) {
-            done.insert(key(f), (now, result));
+            found.extend(result.clone().map(|r| ((*f).clone(), r)));
+            done.insert(key(f), (*asked, result));
         }
+        evict(done, KEPT);
     }
-    let (done, _) = &mut *RENDERED.lock().expect("rendered formulas");
-    let found = formulas
-        .iter()
-        .filter_map(|f| Some((f.clone(), done.get(&key(f))?.1.clone()?)))
-        .collect();
-    evict(done, KEPT);
     found
 }
 

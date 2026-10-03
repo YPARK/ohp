@@ -20,8 +20,10 @@
 use crate::cite::{self, Bibliography, Item, Piece};
 use crate::latex::{Formula, Rendered};
 use crate::math;
+use percent_encoding::percent_decode_str;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -33,11 +35,11 @@ const REFS: &str = "<!-- ohp: refs -->";
 /// The typst document a markdown file is set as.
 pub struct Converted {
     pub source: String,
-    /// Images found, by the name `source` gives each, in the order they
-    /// appear: those typst could not read are named but not shown.
-    pub images: Vec<(String, PathBuf)>,
-    /// Where each of `images` is in `source`.
-    pub pictures: Vec<Range<usize>>,
+    /// Images found, in the order they appear: those typst could not read
+    /// are named but not shown.
+    pub images: Vec<Picture>,
+    /// Where citations and the works cited are in `source`.
+    pub citing: Vec<Range<usize>>,
     /// Files made here, by the name `source` gives each: formulas LaTeX
     /// rendered, bibliographies and a citation style.
     pub files: Vec<(String, Arc<[u8]>)>,
@@ -52,6 +54,16 @@ pub struct Converted {
     /// What is not shown as the file asks: a bibliography not read, a work
     /// cited that is not in it.
     pub warnings: Vec<String>,
+}
+
+/// An image file the document shows.
+#[derive(Debug, PartialEq)]
+pub struct Picture {
+    /// The name `source` gives it.
+    pub name: String,
+    pub path: PathBuf,
+    /// Where it is in `source`.
+    pub at: Range<usize>,
 }
 
 /// How a markdown file is set.
@@ -116,7 +128,7 @@ pub fn convert(text: &str, setting: &Setting) -> Converted {
         layout,
         setting,
         images: Vec::new(),
-        pictures: Vec::new(),
+        citing: Vec::new(),
         files: Vec::new(),
         formulas: Vec::new(),
         unset: Vec::new(),
@@ -151,7 +163,7 @@ pub fn convert(text: &str, setting: &Setting) -> Converted {
     Converted {
         source: w.out,
         images: w.images,
-        pictures: w.pictures,
+        citing: w.citing,
         files: w.files,
         formulas: w.formulas,
         unset: w.unset,
@@ -311,23 +323,6 @@ fn open_fence(line: &str) -> Option<(char, usize)> {
     (len >= 3 && !(c == '`' && line[len..].contains('`'))).then_some((c, len))
 }
 
-/// A URL's `%`-escaped bytes as themselves.
-fn unescape(url: &str) -> Option<String> {
-    let mut bytes = Vec::with_capacity(url.len());
-    let mut rest = url.as_bytes();
-    while let Some((&b, tail)) = rest.split_first() {
-        rest = tail;
-        if b == b'%' {
-            let hex = std::str::from_utf8(rest.get(..2)?).ok()?;
-            bytes.push(u8::from_str_radix(hex, 16).ok()?);
-            rest = &rest[2..];
-        } else {
-            bytes.push(b);
-        }
-    }
-    String::from_utf8(bytes).ok()
-}
-
 fn unquote(s: &str) -> String {
     let s = s.trim();
     for q in ['"', '\''] {
@@ -465,8 +460,8 @@ struct Writer<'a, 'e> {
     line_start: bool,
     layout: Layout,
     setting: &'a Setting<'a>,
-    images: Vec<(String, PathBuf)>,
-    pictures: Vec<Range<usize>>,
+    images: Vec<Picture>,
+    citing: Vec<Range<usize>>,
     files: Vec<(String, Arc<[u8]>)>,
     formulas: Vec<Range<usize>>,
     unset: Vec<Formula>,
@@ -824,14 +819,14 @@ impl Writer<'_, '_> {
                 .extension()
                 .map_or(String::new(), |e| e.to_string_lossy().to_lowercase());
             let name = format!("/img/{}.{ext}", self.images.len());
-            self.images.push((name.clone(), path));
-            name
+            (name, path)
         });
         // One typst could not read is shown as if it were not found.
-        let broken = found.is_some() && self.setting.broken.contains(&(self.images.len() - 1));
+        let index = self.images.len();
+        let broken = self.setting.broken.contains(&index);
         let start = self.out.len();
         match &found {
-            Some(name) if !broken => {
+            Some((name, _)) if !broken => {
                 let name = string(name);
                 if alone && self.slides() {
                     // What is left of the slide, so a plot never spills
@@ -852,15 +847,16 @@ impl Writer<'_, '_> {
                 self.raw("];");
             }
         }
-        if found.is_some() {
-            self.pictures.push(start..self.out.len());
+        if let Some((name, path)) = found {
+            let at = start..self.out.len();
+            self.images.push(Picture { name, path, at });
         }
         end - i + 1
     }
 
     /// The file an image's URL names, if it is here: never fetched.
     fn find(&self, url: &str) -> Option<PathBuf> {
-        let url = match url.strip_prefix("file:") {
+        let path = match url.strip_prefix("file:") {
             // `file://host/path`: only this machine's.
             Some(rest) => match rest.strip_prefix("//") {
                 Some(rest) => {
@@ -868,20 +864,20 @@ impl Writer<'_, '_> {
                     if !matches!(&rest[..at], "" | "localhost") {
                         return None;
                     }
-                    unescape(&rest[at..])?
+                    &rest[at..]
                 }
-                None => unescape(rest)?,
+                None => rest,
             },
             None if url.contains("://") => return None,
-            None => url.to_string(),
+            None => url,
         };
-        let path = Path::new(&url);
-        let path = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.setting.base.join(path)
-        };
-        path.is_file().then_some(path)
+        // As written, or with its `%` escapes read, as pandoc reads a path.
+        let unescaped = percent_decode_str(path).decode_utf8().ok();
+        [Some(Cow::Borrowed(path)), unescaped]
+            .into_iter()
+            .flatten()
+            .map(|p| self.setting.base.join(p.as_ref()))
+            .find(|p| p.is_file())
     }
 
     fn formula(&mut self, latex: &str, display: bool) {
@@ -962,6 +958,7 @@ impl Writer<'_, '_> {
             if year {
                 self.raw("(");
             }
+            let start = self.out.len();
             self.raw(&format!("#cite(label({}){form}", string(&item.key)));
             if !item.suffix.is_empty() {
                 self.raw(", supplement: [");
@@ -969,6 +966,7 @@ impl Writer<'_, '_> {
                 self.raw("]");
             }
             self.raw(");");
+            self.citing.push(start..self.out.len());
             if year {
                 self.raw(")");
             }
@@ -1023,10 +1021,12 @@ impl Writer<'_, '_> {
                 "#[\n"
             });
         }
+        let start = self.out.len();
         for cite in nocite {
             self.raw(&cite);
         }
         self.raw(&list);
+        self.citing.push(start..self.out.len());
         self.raw("]\n");
     }
 

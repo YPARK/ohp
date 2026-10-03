@@ -12,13 +12,13 @@
 //! left as written, and then its source is shown as it is.
 
 use crate::latex;
-use crate::markdown::{self, Setting};
+use crate::markdown::{self, Picture, Setting};
 use crate::render::Options;
 use anyhow::Context;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -84,7 +84,12 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
     let mut loaded = HashMap::new();
     let mut citations = true;
     let mut failure = String::new();
+    let stopped = || options.stop.load(Ordering::Relaxed);
     for _ in 0..=RETRIES {
+        // Typesetting for a deck no longer wanted: ohp is quitting.
+        if stopped() {
+            anyhow::bail!("stopped");
+        }
         let convert = |rendered: &HashMap<latex::Formula, latex::Rendered>| {
             let setting = Setting {
                 base,
@@ -99,7 +104,7 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
         };
         let mut doc = convert(&rendered);
         if !doc.unset.is_empty() && latex::available() {
-            let fresh = latex::render(&doc.unset, &doc.preamble);
+            let fresh = latex::render(&doc.unset, &doc.preamble, &options.stop);
             if !fresh.is_empty() {
                 rendered.extend(fresh);
                 doc = convert(&rendered);
@@ -122,47 +127,39 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
                     .iter()
                     .map(|e| (world.range(e.span), e.message.as_str()))
                     .collect();
-                // An error is a formula's where it overlaps it, and an
-                // image's only where it is within it: one over a link or
-                // emphasis around an image is not the image's.
-                let overlaps =
-                    |s: &Range<usize>, r: &Range<usize>| s.start < r.end && r.start < s.end;
-                let within =
-                    |s: &Range<usize>, r: &Range<usize>| r.start <= s.start && s.end <= r.end;
+                // An error is a formula's, an image's or a citation's where
+                // it starts within it: one over a link or emphasis around
+                // it starts before it, and is not its.
+                let starts_in = |s: &Option<Range<usize>>, r: &Range<usize>| {
+                    s.as_ref().is_some_and(|s| r.contains(&s.start))
+                };
                 let bad: Vec<usize> = doc
                     .formulas
                     .iter()
                     .enumerate()
                     .filter(|(i, f)| {
-                        !source_only.contains(i)
-                            && spans
-                                .iter()
-                                .any(|(s, _)| s.as_ref().is_some_and(|s| overlaps(s, f)))
+                        !source_only.contains(i) && spans.iter().any(|(s, _)| starts_in(s, f))
                     })
                     .map(|(i, _)| i)
                     .collect();
                 let unread: Vec<(usize, &str)> = doc
-                    .pictures
+                    .images
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| !broken.contains(i))
-                    .filter_map(|(i, r)| {
-                        let (_, message) = spans
-                            .iter()
-                            .find(|(s, _)| s.as_ref().is_some_and(|s| within(s, r)))?;
+                    .filter_map(|(i, p)| {
+                        let (_, message) = spans.iter().find(|(s, _)| starts_in(s, &p.at))?;
                         Some((i, *message))
                     })
                     .collect();
-                // Errors no formula or image accounts for.
-                let other = spans.iter().find(|(s, _)| match s {
-                    None => true,
-                    Some(s) => {
-                        !doc.formulas.iter().any(|f| overlaps(s, f))
-                            && !doc.pictures.iter().any(|r| within(s, r))
-                    }
+                // A bibliography typst read but could not set from: an
+                // error in a citation or the works cited, or in no place
+                // in the text, as a file typst read.
+                let uncite = spans.iter().find(|(s, _)| {
+                    doc.listed && (s.is_none() || doc.citing.iter().any(|c| starts_in(s, c)))
                 });
                 for &(i, message) in &unread {
-                    let name = doc.images[i].1.file_name().unwrap_or_default();
+                    let name = doc.images[i].path.file_name().unwrap_or_default();
                     dropped.push(format!("cannot show {}: {message}", name.to_string_lossy()));
                     broken.insert(i);
                 }
@@ -173,8 +170,6 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
                         source_only.insert(i);
                     }
                 }
-                // A bibliography typst read but could not set from.
-                let uncite = other.filter(|_| doc.listed);
                 if let Some((_, message)) = uncite {
                     citations = false;
                     dropped.push(format!("citations left as written: {message}"));
@@ -242,16 +237,24 @@ fn knit(rmd: &Path, stop: &AtomicBool) -> Result<(TempDir, String), String> {
     // To a file, not a pipe, so R is waited on without reading it.
     let log = dir.path().join("stderr.txt");
     let stderr = std::fs::File::create(&log).map_err(|e| e.to_string())?;
-    let child = Command::new("Rscript")
+    // R's own temporary files, and its chunks', go with the directory.
+    let tmp = dir.path().join("tmp");
+    std::fs::create_dir(&tmp).map_err(|e| e.to_string())?;
+    let mut command = Command::new("Rscript");
+    command
         .args(["-e", SCRIPT])
         .arg(&rmd)
         .arg(&out)
         .arg(&figures)
         .current_dir(dir.path())
+        .env("TMPDIR", &tmp)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(stderr)
-        .spawn();
+        .stderr(stderr);
+    // A group of its own, so what its chunks start can be stopped with it.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let child = command.spawn();
     let mut child = match child {
         Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -261,14 +264,16 @@ fn knit(rmd: &Path, stop: &AtomicBool) -> Result<(TempDir, String), String> {
     };
     let status = loop {
         if stop.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
+            end(&mut child);
             return Err("knitting stopped".into());
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => std::thread::sleep(KNIT_POLL),
-            Err(e) => return Err(format!("cannot run R: {e}")),
+            Err(e) => {
+                end(&mut child);
+                return Err(format!("cannot run R: {e}"));
+            }
         }
     };
     if !status.success() {
@@ -285,6 +290,17 @@ fn knit(rmd: &Path, stop: &AtomicBool) -> Result<(TempDir, String), String> {
     }
     let md = std::fs::read_to_string(&out).map_err(|e| format!("knitr wrote nothing: {e}"))?;
     Ok((dir, md))
+}
+
+/// Kill R and what its chunks started, its process group, and reap it.
+fn end(child: &mut Child) {
+    #[cfg(unix)]
+    if let Ok(group) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: killpg only sends a signal; the group is R's own.
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 static LIBRARY: LazyLock<LazyHash<Library>> = LazyLock::new(|| LazyHash::new(Library::default()));
@@ -307,7 +323,7 @@ impl Doc {
     /// `loaded` keeps the images read, for the next try at the document.
     fn new(
         source: String,
-        images: &[(String, PathBuf)],
+        images: &[Picture],
         rendered: &[(String, Arc<[u8]>)],
         loaded: &mut HashMap<PathBuf, FileResult<Bytes>>,
     ) -> Self {
@@ -317,7 +333,7 @@ impl Doc {
         };
         let mut files: HashMap<_, _> = images
             .iter()
-            .map(|(name, path)| {
+            .map(|Picture { name, path, .. }| {
                 let data = loaded.entry(path.clone()).or_insert_with(|| {
                     std::fs::read(path)
                         .map(Bytes::new)

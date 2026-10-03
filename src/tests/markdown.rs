@@ -110,10 +110,12 @@ fn images_here_are_shown_and_others_described() {
         "![a plot](plot.png)\n\n![gone](gone.png) ![web](https://x.org/a.png)\n",
         &setting(dir.path()),
     );
-    assert_eq!(
-        doc.images,
-        [("/img/0.png".to_string(), dir.path().join("plot.png"))]
-    );
+    let names: Vec<_> = doc
+        .images
+        .iter()
+        .map(|p| (p.name.as_str(), &p.path))
+        .collect();
+    assert_eq!(names, [("/img/0.png", &dir.path().join("plot.png"))]);
     assert!(
         doc.source.contains("image(\"/img/0.png\")"),
         "{}",
@@ -378,8 +380,7 @@ fn an_image_typst_could_not_read_is_described() {
     );
     // Both keep their index, and where each is in the source.
     assert_eq!(doc.images.len(), 2);
-    assert_eq!(doc.pictures.len(), 2);
-    assert!(doc.source[doc.pictures[1].clone()].contains("/img/1.png"));
+    assert!(doc.source[doc.images[1].at.clone()].contains("/img/1.png"));
 }
 
 #[test]
@@ -389,10 +390,7 @@ fn a_backtick_fence_has_no_backtick_after_it() {
     assert_eq!(open_fence("```x```"), None);
     assert_eq!(open_fence("``x"), None);
     // Inline code on a line of its own leaves the notes after it out.
-    let (out, _) = strip_divs(
-        "```x```
-\n::: notes\nsecret\n:::\n",
-    );
+    let (out, _) = strip_divs("```x```\n\n::: notes\nsecret\n:::\n");
     assert!(!out.contains("secret"), "{out}");
 }
 
@@ -408,5 +406,19 @@ fn a_file_url_is_unescaped_and_only_for_this_machine() {
     );
     let doc = convert(&text, &setting(dir.path()));
     assert_eq!(doc.images.len(), 2, "{}", doc.source);
-    assert!(doc.images.iter().all(|(_, p)| p == &plot));
+    assert!(doc.images.iter().all(|p| p.path == plot));
+}
+
+#[test]
+fn a_path_is_found_as_written_or_unescaped() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("My Plots")).unwrap();
+    std::fs::write(dir.path().join("My Plots/a.png"), b"png").unwrap();
+    std::fs::write(dir.path().join("100%.png"), b"png").unwrap();
+    let at = dir.path().display();
+    let text = format!(
+        "![a](My%20Plots/a.png) ![b](100%.png) ![c](file://{at}/100%.png) ![d](<My Plots/a.png>)\n"
+    );
+    let doc = convert(&text, &setting(dir.path()));
+    assert_eq!(doc.images.len(), 4, "{}", doc.source);
 }

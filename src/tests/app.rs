@@ -444,3 +444,24 @@ fn centred_keeps_the_image_inside_its_area() {
     assert_eq!(centred(area, Size::new(60, 30)), Rect::new(30, 5, 60, 30));
     assert_eq!(centred(area, Size::new(200, 50)), area);
 }
+
+#[test]
+fn dropping_the_app_stops_a_reload_and_waits_for_it() {
+    let (_dir, mut app) = app(3);
+    let stop = app.deck.options.stop.clone();
+    let heard = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let told = heard.clone();
+    let reader = std::thread::spawn(move || {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(10) {
+            if stop.load(Ordering::Relaxed) {
+                told.store(true, Ordering::Relaxed);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    });
+    app.loading = Some((std::sync::mpsc::channel().1, reader));
+    drop(app);
+    assert!(heard.load(Ordering::Relaxed));
+}

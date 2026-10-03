@@ -243,7 +243,12 @@ fn a_stopped_knit_ends_r() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let path = write(dir.path(), "slow.Rmd", "```{r}\nSys.sleep(60)\n```\n");
+    // A process the chunk starts, told apart by how long it sleeps.
+    let path = write(
+        dir.path(),
+        "slow.Rmd",
+        "```{r}\nsystem(\"sleep 61.25\")\n```\n",
+    );
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = stop.clone();
     std::thread::spawn(move || {
@@ -254,4 +259,19 @@ fn a_stopped_knit_ends_r() {
     let why = knit(&path, &stop).unwrap_err();
     assert_eq!(why, "knitting stopped");
     assert!(start.elapsed().as_secs() < 10);
+    let left = Command::new("pgrep")
+        .args(["-f", "sleep 61.25"])
+        .output()
+        .unwrap();
+    assert!(left.stdout.is_empty(), "what the chunk started outlived it");
+}
+
+#[test]
+fn a_stopped_typeset_ends_without_a_pdf() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "a.md", "Text.\n");
+    let stopped = options(false);
+    stopped.stop.store(true, Ordering::Relaxed);
+    let why = typeset(&path, &stopped).err().unwrap();
+    assert_eq!(why.to_string(), "stopped");
 }
