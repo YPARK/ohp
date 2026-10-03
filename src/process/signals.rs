@@ -73,17 +73,21 @@ fn save_terminal() {
     }
 }
 
-/// The terminal as it was, without what ratatui would do on its way out.
+/// The terminal as it was, without what ratatui would do on its way out:
+/// its settings, where they were saved, and the screen it showed, through
+/// the terminal or, without one, the output.
 fn restore_terminal() {
-    let Some((fd, settings)) = TERMINAL.get() else {
-        return;
+    let fd = match TERMINAL.get() {
+        Some((fd, settings)) => {
+            // SAFETY: restores settings tcgetattr gave, to the terminal
+            // they came from.
+            unsafe { libc::tcsetattr(*fd, libc::TCSANOW, settings) };
+            *fd
+        }
+        None => libc::STDOUT_FILENO,
     };
-    // SAFETY: restores settings tcgetattr gave, to the terminal they came
-    // from, and writes a static buffer of its own length to it.
-    unsafe {
-        libc::tcsetattr(*fd, libc::TCSANOW, settings);
-        libc::write(*fd, LEAVE_SCREEN.as_ptr().cast(), LEAVE_SCREEN.len());
-    }
+    // SAFETY: writes a static buffer of its own length.
+    unsafe { libc::write(fd, LEAVE_SCREEN.as_ptr().cast(), LEAVE_SCREEN.len()) };
 }
 
 #[cfg(test)]

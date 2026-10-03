@@ -59,29 +59,50 @@ fn a_program_past_its_time_is_ended() {
 #[test]
 fn a_program_leads_a_session_of_its_own() {
     // In a session of its own it has no terminal, to ask for a password on
-    // and wait there, as a chunk might.
+    // and wait there, as a chunk might. The shell says its pid, and becomes
+    // the sleep, which keeps it.
+    let dir = tempfile::tempdir().unwrap();
+    let said = dir.path().join("pid");
+    let script = format!("echo $$ > '{}'; exec sleep 30", said.display());
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = stop.clone();
-    let running = std::thread::spawn(move || run(&mut shell("sleep 30"), &stopping, None));
+    let running = std::thread::spawn(move || run(&mut shell(&script), &stopping, None));
     let start = Instant::now();
-    // Each program running, any test's, with its session, read while it
-    // runs: each is to lead its own.
-    let mut sessions = Vec::new();
-    while sessions.is_empty() && start.elapsed() < Duration::from_secs(5) {
-        std::thread::sleep(Duration::from_millis(20));
-        sessions = group::running()
-            .into_iter()
-            // SAFETY: getsid only reads a process's session.
-            .map(|id| (id, unsafe { libc::getsid(id) }))
-            // -1 for one that ended as it was read.
-            .filter(|&(_, session)| session != -1)
-            .collect();
-    }
+    let pid = loop {
+        let read = std::fs::read_to_string(&said).unwrap_or_default();
+        if let Ok(pid) = read.trim().parse::<libc::pid_t>() {
+            break pid;
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "no pid said");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    // SAFETY: getsid only reads a process's session; it runs until stopped.
+    let session = unsafe { libc::getsid(pid) };
     stop.store(true, Ordering::Relaxed);
     running.join().unwrap().unwrap();
-    assert!(!sessions.is_empty());
-    for (id, session) in sessions {
-        assert_eq!(session, id, "{id} does not lead its session");
+    assert_eq!(session, pid, "it does not lead its session");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_paused_program_is_ended() {
+    let go = AtomicBool::new(false);
+    let start = Instant::now();
+    let ended = run(&mut shell("kill -STOP $$; sleep 60"), &go, None).unwrap();
+    assert!(matches!(ended, Ended::Paused), "{ended:?}");
+    assert!(start.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn a_command_can_be_run_again() {
+    let go = AtomicBool::new(false);
+    let mut command = shell("exit 0");
+    for _ in 0..2 {
+        let ended = run(&mut command, &go, None).unwrap();
+        assert!(
+            matches!(ended, Ended::Exited(s) if s.success()),
+            "{ended:?}"
+        );
     }
 }
 

@@ -67,8 +67,8 @@ fn run(rmd: &Path, stop: &AtomicBool) -> Result<Knitted, String> {
     let status = match child::run(&mut command, stop, None) {
         Ok(Ended::Exited(status)) => status,
         Ok(Ended::Stopped) => return Ok(Knitted::Stopped),
-        // A chunk may take as long as it takes: knitting has no time limit.
-        Ok(Ended::TimedOut) => return Err("knitting timed out, chunks shown as code".into()),
+        Ok(Ended::Paused) => return Err("knitting paused, chunks shown as code".into()),
+        Ok(Ended::TimedOut) => unreachable!("knitting is given no time limit"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err("R not found: chunks shown as code".into());
         }

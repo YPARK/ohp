@@ -4,7 +4,8 @@
 //! as a chunk's processes or LaTeX's font makers, is in its process group,
 //! to be ended with it, and none can read the terminal, as to ask for a
 //! password, and wait there for ever, nor write over the slides. It is
-//! waited on until it exits, ohp stops it, or its time runs out.
+//! waited on until it exits, ohp stops it, or its time runs out. One paused,
+//! as by a SIGSTOP, would never go on, and is ended too.
 //!
 //! Ending kills the group twice: while the program, unreaped, holds the
 //! group's id, so no other group can have been given it, and once more
@@ -24,11 +25,13 @@ pub enum Ended {
     Stopped,
     /// Ended for running past its time.
     TimedOut,
+    /// Ended for being paused.
+    Paused,
 }
 
-/// Most programs that may run at once: more are refused.
-#[cfg(unix)]
-pub const MOST: usize = group::SLOTS;
+/// Most programs that may run at once: past it, one is refused, with an
+/// error of kind `ResourceBusy`, to be tried again.
+pub const MOST: usize = 64;
 
 /// First wait between looks at a program, so a quick one is seen done soon.
 const FIRST_POLL: Duration = Duration::from_millis(2);
@@ -48,28 +51,36 @@ pub fn run(
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // SAFETY: setsid is safe to call between fork and exec.
+        // SAFETY: between fork and exec, only calls safe there: setsid,
+        // getsid, getpid and sigprocmask.
         unsafe {
             command.pre_exec(|| {
-                if libc::setsid() == -1 {
+                // A command run before has this hook already: a leader, it
+                // is one still.
+                if libc::setsid() == -1 && libc::getsid(0) != libc::getpid() {
                     return Err(io::Error::last_os_error());
                 }
+                group::unblock_signals();
                 Ok(())
             })
         };
     }
     let (mut child, known) = group::start(command)?;
-    let Some(known) = known else {
-        end(&mut child);
-        let _ = child.wait();
-        return Err(io::Error::other("too many programs running at once"));
+    let known = match known {
+        Ok(known) => known,
+        Err(e) => {
+            end(&mut child);
+            let _ = child.wait();
+            return Err(e);
+        }
     };
     let start = Instant::now();
     let mut poll = FIRST_POLL;
     let ended = loop {
-        match exited(&mut child) {
-            Ok(true) => break None,
-            Ok(false) => {}
+        match state(&mut child) {
+            Ok(State::Running) => {}
+            Ok(State::Exited) => break None,
+            Ok(State::Paused) => break Some(Ended::Paused),
             Err(e) => {
                 end(&mut child);
                 drop(known);
@@ -104,15 +115,30 @@ pub fn kill_all() {
     group::kill_all();
 }
 
-/// Whether the program has exited, leaving it unreaped.
+enum State {
+    Running,
+    Exited,
+    Paused,
+}
+
+/// Whether the program has exited or been paused, leaving it unreaped.
 #[cfg(unix)]
-fn exited(child: &mut Child) -> io::Result<bool> {
-    Ok(wait(child, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)?.is_some_and(is_exit))
+fn state(child: &mut Child) -> io::Result<State> {
+    let flags = libc::WEXITED | libc::WSTOPPED | libc::WNOHANG | libc::WNOWAIT;
+    Ok(match wait(child, flags)? {
+        None => State::Running,
+        Some(code) if is_exit(code) => State::Exited,
+        Some(libc::CLD_STOPPED | libc::CLD_TRAPPED) => State::Paused,
+        Some(_) => State::Running,
+    })
 }
 
 #[cfg(not(unix))]
-fn exited(child: &mut Child) -> io::Result<bool> {
-    Ok(child.try_wait()?.is_some())
+fn state(child: &mut Child) -> io::Result<State> {
+    Ok(match child.try_wait()? {
+        Some(_) => State::Exited,
+        None => State::Running,
+    })
 }
 
 /// End the program and its group, leaving it to be reaped.
@@ -177,21 +203,24 @@ fn is_exit(code: libc::c_int) -> bool {
 /// The process groups running, for `kill_all`.
 #[cfg(unix)]
 mod group {
+    use super::MOST;
     use std::io;
     use std::process::{Child, Command};
     use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
-    pub const SLOTS: usize = 64;
-
     /// Groups running, by id; 0 where a slot is free.
-    static GROUPS: [AtomicI32; SLOTS] = [const { AtomicI32::new(0) }; SLOTS];
+    static GROUPS: [AtomicI32; MOST] = [const { AtomicI32::new(0) }; MOST];
 
     /// Programs being started, not yet known: `kill_all` waits for them.
     static STARTING: AtomicUsize = AtomicUsize::new(0);
 
     /// Longest `kill_all` waits for programs being started, in steps of
-    /// 10ms: it may run on the very thread starting one.
+    /// 10ms.
     const STARTING_WAIT: u32 = 20;
+
+    /// The signals that end ohp in a hurry, held off a thread starting a
+    /// program, so `kill_all` runs on another and waits for it to be known.
+    const HURRY: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
 
     /// A group known while it runs.
     pub struct Known(&'static AtomicI32);
@@ -202,30 +231,71 @@ mod group {
         }
     }
 
-    /// Start `command` and know its group; `None` if no slot is free.
-    pub fn start(command: &mut Command) -> io::Result<(Child, Option<Known>)> {
+    /// Start `command` and know its group: an error where it cannot be, as
+    /// no slot is free.
+    pub fn start(command: &mut Command) -> io::Result<(Child, io::Result<Known>)> {
         STARTING.fetch_add(1, Ordering::SeqCst);
+        let held = hold_signals();
         let started = command.spawn().map(|child| {
-            let id = i32::try_from(child.id()).unwrap_or(0);
-            let slot = GROUPS.iter().find(|s| {
-                id != 0
-                    && s.compare_exchange(0, id, Ordering::SeqCst, Ordering::SeqCst)
-                        .is_ok()
-            });
-            (child, slot.map(Known))
+            let known = know(&child);
+            (child, known)
         });
+        release_signals(held);
         STARTING.fetch_sub(1, Ordering::SeqCst);
         started
     }
 
-    /// The groups running, by id.
-    #[cfg(test)]
-    pub fn running() -> Vec<i32> {
+    fn know(child: &Child) -> io::Result<Known> {
+        let id = i32::try_from(child.id()).map_err(io::Error::other)?;
         GROUPS
             .iter()
-            .map(|s| s.load(Ordering::SeqCst))
-            .filter(|&id| id != 0)
-            .collect()
+            .find(|s| {
+                s.compare_exchange(0, id, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            })
+            .map(Known)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::ResourceBusy,
+                    "too many programs running at once",
+                )
+            })
+    }
+
+    fn hurry_set() -> libc::sigset_t {
+        // SAFETY: a zeroed sigset_t is emptied and filled by the calls.
+        let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `set` is a valid sigset_t.
+        unsafe {
+            libc::sigemptyset(&mut set);
+            for signal in HURRY {
+                libc::sigaddset(&mut set, signal);
+            }
+        }
+        set
+    }
+
+    /// Hold the hurry signals off this thread; what was held before.
+    fn hold_signals() -> libc::sigset_t {
+        let set = hurry_set();
+        // SAFETY: a zeroed sigset_t is valid for the old mask to be written.
+        let mut old: libc::sigset_t = unsafe { std::mem::zeroed() };
+        // SAFETY: both sets are valid.
+        unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut old) };
+        old
+    }
+
+    fn release_signals(old: libc::sigset_t) {
+        // SAFETY: restores the mask `hold_signals` saved.
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
+    }
+
+    /// In a program started, between fork and exec: the signals held off
+    /// the thread that started it are not to be held off the program.
+    pub fn unblock_signals() {
+        let set = hurry_set();
+        // SAFETY: sigprocmask is safe between fork and exec.
+        unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut()) };
     }
 
     pub fn kill(id: libc::pid_t) {
@@ -261,8 +331,8 @@ mod group {
 
     pub struct Known;
 
-    pub fn start(command: &mut Command) -> io::Result<(Child, Option<Known>)> {
-        Ok((command.spawn()?, Some(Known)))
+    pub fn start(command: &mut Command) -> io::Result<(Child, io::Result<Known>)> {
+        Ok((command.spawn()?, Ok(Known)))
     }
 }
 
