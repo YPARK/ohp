@@ -67,10 +67,9 @@ pub fn run(
         } else {
             Look::Image
         };
-        let mut app = App::new(deck, picker, renderer, workers, look);
+        let mut app = App::new(deck, picker, renderer, workers, look, signaled);
         app.notice = app.deck.note.clone();
         app.link = link;
-        app.signaled = signaled;
         app.run(&mut terminal)?;
         app.clear_images()
     })();
@@ -171,7 +170,14 @@ struct App {
 }
 
 impl App {
-    fn new(deck: Deck, picker: Picker, renderer: Renderer, workers: usize, look: Look) -> Self {
+    fn new(
+        deck: Deck,
+        picker: Picker,
+        renderer: Renderer,
+        workers: usize,
+        look: Look,
+        signaled: Arc<AtomicUsize>,
+    ) -> Self {
         App {
             stamp: render::stamp(&deck.path),
             deck,
@@ -193,7 +199,7 @@ impl App {
             checked: Instant::now(),
             loading: None,
             again: false,
-            signaled: Arc::default(),
+            signaled,
             notice: None,
             link: None,
             trouble: None,

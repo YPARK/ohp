@@ -303,7 +303,7 @@ fn knit(rmd: &Path, stop: &AtomicBool) -> Result<(TempDir, String), String> {
 /// can be given it, until `end`.
 fn exited(child: &mut Child, block: bool) -> std::io::Result<bool> {
     #[cfg(unix)]
-    {
+    loop {
         let pid = libc::id_t::from(child.id());
         // SAFETY: a zeroed siginfo_t is valid, and waitid only fills it in.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -313,10 +313,28 @@ fn exited(child: &mut Child, block: bool) -> std::io::Result<bool> {
         }
         // SAFETY: `info` is a valid siginfo_t to write to.
         if unsafe { libc::waitid(libc::P_PID, pid, &mut info, flags) } != 0 {
-            return Err(std::io::Error::last_os_error());
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(e);
         }
         // SAFETY: waitid filled in a child's pid, or left it zero.
-        Ok(unsafe { info.si_pid() } != 0)
+        if unsafe { info.si_pid() } == 0 {
+            return Ok(false);
+        }
+        // macOS reports a child stopped, as by SIGTTIN, though only its
+        // exit was asked for: that is not an end.
+        if matches!(
+            info.si_code,
+            libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
+        ) {
+            return Ok(true);
+        }
+        if !block {
+            return Ok(false);
+        }
+        std::thread::sleep(KNIT_POLL);
     }
     #[cfg(not(unix))]
     if block {
@@ -337,7 +355,8 @@ fn end(child: &mut Child) -> std::io::Result<ExitStatus> {
             unsafe { libc::killpg(group, libc::SIGKILL) };
         };
         kill();
-        exited(child, true)?;
+        // Failing to wait, R is killed again and reaped all the same.
+        let _ = exited(child, true);
         kill();
     }
     #[cfg(not(unix))]

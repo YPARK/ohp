@@ -15,7 +15,7 @@ fn app_with(pdf: &[u8], look: Look) -> (tempfile::TempDir, App) {
     let deck = Deck::open(&fixture::write_pdf(dir.path(), pdf)).unwrap();
     let picker = Picker::halfblocks();
     let renderer = Renderer::spawn(&deck, &picker, 1).unwrap();
-    let mut app = App::new(deck, picker, renderer, 1, look);
+    let mut app = App::new(deck, picker, renderer, 1, look, Arc::default());
     app.main = MAIN;
     (dir, app)
 }

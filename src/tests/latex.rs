@@ -66,12 +66,19 @@ fn what_one_render_asks_for_is_stamped_alike() {
     let preamble = "% stamped alike";
     let done = render_on(&formulas, preamble, &AtomicBool::new(false), 1);
     assert_eq!(done.len(), 3);
-    let (cache, _) = &*RENDERED.lock().unwrap();
-    let stamps: HashSet<u64> = formulas
-        .iter()
-        .map(|f| cache[&(preamble.to_string(), f.clone())].0)
-        .collect();
-    assert_eq!(stamps.len(), 1, "{stamps:?}");
+    // Read, then checked with the lock let go: a failure here must not
+    // poison it for the other tests.
+    let stamps: Vec<Option<u64>> = {
+        let (cache, _) = &*RENDERED.lock().unwrap();
+        formulas
+            .iter()
+            .map(|f| cache.get(&(preamble.to_string(), f.clone())).map(|e| e.0))
+            .collect()
+    };
+    assert!(
+        stamps.iter().all(|s| s.is_some() && *s == stamps[0]),
+        "{stamps:?}"
+    );
 }
 
 #[test]
@@ -84,4 +91,33 @@ fn a_stopped_render_renders_nothing_new() {
         let go = AtomicBool::new(false);
         assert!(render(&[formula], "", &go).len() == 1, "renders once going");
     }
+}
+
+#[test]
+fn a_run_that_never_ends_fails_or_stops() {
+    if !available() {
+        eprintln!("skipped: no pdflatex");
+        return;
+    }
+    let looping = "\\def\\a{\\a}\\a";
+    let dir = tempfile::tempdir().unwrap();
+    let go = AtomicBool::new(false);
+    let start = std::time::Instant::now();
+    assert_eq!(
+        latex(&dir, looping, false, "", &go, Duration::from_secs(1)),
+        Some(false)
+    );
+    assert!(start.elapsed() < Duration::from_secs(5));
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = stop.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        stopping.store(true, Ordering::Relaxed);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        latex(&dir, looping, false, "", &stop, Duration::from_secs(60)),
+        None
+    );
 }

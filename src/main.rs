@@ -91,9 +91,22 @@ fn main() -> anyhow::Result<ExitCode> {
     let ran = run(&signaled);
     match signaled.load(Ordering::Relaxed) {
         0 => ran.map(|()| ExitCode::SUCCESS),
-        // As a shell reports a signal, without the error stopping made.
-        signal => Ok(ExitCode::from(128 + u8::try_from(signal).unwrap_or(0))),
+        // As a shell reports a signal. The error stopping made is not
+        // worth saying; another is.
+        signal => {
+            if let Err(e) = ran
+                && e.to_string() != "stopped"
+            {
+                eprintln!("Error: {e:?}");
+            }
+            Ok(ExitCode::from(shell_status(signal)))
+        }
     }
+}
+
+/// The status a shell gives a process a signal ended.
+fn shell_status(signal: usize) -> u8 {
+    u8::try_from(128 + signal).unwrap_or(u8::MAX)
 }
 
 fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
@@ -118,15 +131,28 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
 /// Ask ohp to stop on Ctrl-C, hang-up or termination: `signaled` says which,
 /// for the app to quit, and `stop` stops typesetting under way, as a knitr
 /// run in a process group of its own that the signal does not reach.
-/// Another signal asks again, rather than ending ohp before it has stopped
-/// R and restored the terminal.
+/// A second signal asks again, rather than ending ohp before it has stopped
+/// R and restored the terminal; a third, for a stop that does not come,
+/// ends it at once.
 #[cfg(all(unix, feature = "markdown"))]
 fn stop_on_signals(stop: &Arc<AtomicBool>, signaled: &Arc<AtomicUsize>) -> std::io::Result<()> {
     use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
-    use signal_hook::flag;
+    use signal_hook::{flag, low_level};
+    let seen = Arc::new(AtomicUsize::new(0));
     for signal in [SIGINT, SIGTERM, SIGHUP] {
         flag::register(signal, stop.clone())?;
         flag::register_usize(signal, signaled.clone(), signal as usize)?;
+        let seen = seen.clone();
+        let status = i32::from(shell_status(signal as usize));
+        // SAFETY: the action only adds to an atomic and calls _exit, both
+        // safe in a signal handler.
+        unsafe {
+            low_level::register(signal, move || {
+                if seen.fetch_add(1, Ordering::SeqCst) >= 2 {
+                    low_level::exit(status);
+                }
+            })
+        }?;
     }
     Ok(())
 }

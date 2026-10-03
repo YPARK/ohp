@@ -10,6 +10,14 @@ use std::collections::{HashMap, HashSet};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+/// Longest a formula's LaTeX run may take: past it, as for a macro that
+/// expands for ever, the formula has failed.
+const LATEX_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often a LaTeX run is checked on, for whether it is done or to stop.
+const LATEX_POLL: Duration = Duration::from_millis(20);
 
 /// LaTeX's own size, which the rendered height and depth are measured in.
 const LATEX_PT: f32 = 10.;
@@ -95,14 +103,22 @@ fn render_on(
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        let results: Vec<Option<Rendered>> = std::thread::scope(|s| {
+        // A run stopped is not kept, as one LaTeX failed on would be.
+        let results: Vec<Option<Option<Rendered>>> = std::thread::scope(|s| {
             let runs: Vec<_> = batch
                 .iter()
-                .map(|f| s.spawn(|| run(&f.0, f.1, preamble)))
+                .map(|f| s.spawn(|| run(&f.0, f.1, preamble, stop)))
                 .collect();
-            runs.into_iter().map(|r| r.join().ok().flatten()).collect()
+            runs.into_iter()
+                .map(|r| r.join().unwrap_or(Some(None)))
+                .collect()
         });
-        made.extend(batch.iter().zip(results));
+        made.extend(
+            batch
+                .iter()
+                .zip(results)
+                .filter_map(|(f, result)| Some((f, result?))),
+        );
     }
     let (done, _) = &mut *RENDERED.lock().expect("rendered formulas");
     for (f, result) in made {
@@ -126,8 +142,31 @@ fn evict(done: &mut Done, kept: usize) {
 }
 
 /// `formula` rendered by one LaTeX run, in a directory of its own.
-fn run(formula: &str, display: bool, preamble: &str) -> Option<Rendered> {
-    let dir = tempfile::tempdir().ok()?;
+/// `None` if it was stopped, not to be kept as a formula LaTeX failed on.
+fn run(
+    formula: &str,
+    display: bool,
+    preamble: &str,
+    stop: &AtomicBool,
+) -> Option<Option<Rendered>> {
+    let dir = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(_) => return Some(None),
+    };
+    let ran = latex(&dir, formula, display, preamble, stop, LATEX_TIMEOUT)?;
+    Some(ran.then(|| read(&dir)).flatten())
+}
+
+/// Whether pdflatex set `formula` in `dir`; `None` if it was stopped. One
+/// that runs past `timeout`, as a macro that expands for ever, has failed.
+fn latex(
+    dir: &tempfile::TempDir,
+    formula: &str,
+    display: bool,
+    preamble: &str,
+    stop: &AtomicBool,
+    timeout: Duration,
+) -> Option<bool> {
     let style = if display { "\\displaystyle" } else { "" };
     let tex = format!(
         "\\documentclass{{article}}\n\
@@ -142,8 +181,10 @@ fn run(formula: &str, display: bool, preamble: &str) -> Option<Rendered> {
          \\begin{{preview}}\\usebox\\ohpbox\\end{{preview}}\n\
          \\end{{document}}\n"
     );
-    std::fs::write(dir.path().join("f.tex"), tex).ok()?;
-    let status = Command::new("pdflatex")
+    if std::fs::write(dir.path().join("f.tex"), tex).is_err() {
+        return Some(false);
+    }
+    let child = Command::new("pdflatex")
         .args([
             "-interaction=nonstopmode",
             "-halt-on-error",
@@ -154,11 +195,29 @@ fn run(formula: &str, display: bool, preamble: &str) -> Option<Rendered> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
+        .spawn();
+    let Ok(mut child) = child else {
+        return Some(false);
+    };
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) => {}
+            Err(_) => return Some(false),
+        }
+        let stopped = stop.load(Ordering::Relaxed);
+        if stopped || start.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return (!stopped).then_some(false);
+        }
+        std::thread::sleep(LATEX_POLL);
     }
+}
+
+/// The formula pdflatex set in `dir`, measured.
+fn read(dir: &tempfile::TempDir) -> Option<Rendered> {
     let (height, depth) = measure(&std::fs::read_to_string(dir.path().join("f.log")).ok()?)?;
     let pdf = std::fs::read(dir.path().join("f.pdf")).ok()?;
     Some(Rendered {

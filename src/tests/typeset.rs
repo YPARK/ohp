@@ -264,7 +264,9 @@ fn a_stopped_knit_ends_r() {
     // Killed, it takes a moment to go.
     let running = || {
         Command::new("pgrep")
-            .args(["-f", &sleep])
+            // The time's dot is any character to pgrep, and the end is
+            // anchored, so no longer time, as another run's, matches.
+            .args(["-f", &format!("{}$", sleep.replace('.', "\\."))])
             .output()
             .is_ok_and(|o| !o.stdout.is_empty())
     };
@@ -300,4 +302,33 @@ fn a_stopped_typeset_ends_without_a_pdf() {
     stopped.stop.store(true, Ordering::Relaxed);
     let why = typeset(&path, &stopped).err().unwrap();
     assert_eq!(why.to_string(), "stopped");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stopped_process_has_not_exited() {
+    /// Killed however the test ends, so a failure leaves no stopped child.
+    struct Killed(libc::pid_t);
+    impl Drop for Killed {
+        fn drop(&mut self) {
+            // SAFETY: a signal to our own child.
+            unsafe { libc::kill(self.0, libc::SIGKILL) };
+        }
+    }
+    let mut child = Command::new("sleep")
+        .arg("30")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = libc::pid_t::try_from(child.id()).unwrap();
+    let killed = Killed(pid);
+    // SAFETY: a signal to our own child.
+    unsafe { libc::kill(pid, libc::SIGSTOP) };
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(!exited(&mut child, false).unwrap(), "stopped is not ended");
+    drop(killed);
+    assert!(exited(&mut child, true).unwrap());
+    // Left unreaped until now.
+    assert!(!child.wait().unwrap().success());
 }
