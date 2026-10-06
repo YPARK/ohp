@@ -8,6 +8,7 @@
 //! Markdown and R Markdown are typeset into a PDF first, by typst.
 
 mod app;
+mod browse;
 #[cfg(feature = "markdown")]
 mod cite;
 #[cfg(feature = "markdown")]
@@ -56,7 +57,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// fits it back to the screen.
 ///
 /// The file is reloaded whenever it changes on disk, so recompiling or
-/// saving it updates the slides in place; r reloads it at once.
+/// saving it updates the slides in place; r reloads it at once. Ctrl-O
+/// picks another file to present.
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -69,8 +71,9 @@ struct Args {
         doc = "The slides: a PDF here, or on another machine"
     )]
     /// as `[user@]host:path`, copied over ssh and reloaded when it changes
-    /// there.
-    file: PathBuf,
+    /// there. Without one, or given a directory, the file is picked from a
+    /// list.
+    file: Option<PathBuf>,
     /// Start with slides as text, even where the terminal shows images.
     #[arg(long)]
     text: bool,
@@ -113,12 +116,25 @@ pub fn shell_status(signal: usize) -> u8 {
 
 fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
     let args = Args::parse();
-    let remote = match remote::split(&args.file) {
+    let file = match &args.file {
+        Some(file) if !file.is_dir() => file.clone(),
+        given => match browse::choose(given.as_deref().unwrap_or(".".as_ref()))? {
+            Some(file) => file,
+            None => return Ok(()),
+        },
+    };
+    let remote = match remote::split(&file) {
         Some((host, path)) => Some(remote::Remote::open("ssh".as_ref(), host, path)?),
         None => None,
     };
-    let path = remote.as_ref().map_or(args.file.as_path(), |r| r.path());
-    let options = options(&args, remote.is_some());
+    let path = remote.as_ref().map_or(file.as_path(), |r| r.path());
+    // Files picked later are here. Clones share one stop, which a signal sets.
+    let local = options(&args);
+    let options = render::Options {
+        // The data a remote file's chunks read is on the other machine.
+        knit: local.knit && remote.is_none(),
+        ..local.clone()
+    };
     #[cfg(all(unix, feature = "markdown"))]
     process::signals::install(&options.stop, signaled)?;
     let deck = render::Deck::open_with(path, options);
@@ -127,20 +143,19 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
         return Ok(());
     }
     let link = remote.as_ref().map(remote::Remote::link);
-    app::run(deck?, args.text, link, signaled.clone())
+    app::run(deck?, args.text, link, local, signaled.clone())
 }
 
 #[cfg(feature = "markdown")]
-fn options(args: &Args, remote: bool) -> render::Options {
+fn options(args: &Args) -> render::Options {
     render::Options {
         paper: args.paper.clone(),
-        // The data a remote file's chunks read is on the other machine.
-        knit: !args.no_knit && !remote,
+        knit: !args.no_knit,
         ..render::Options::default()
     }
 }
 
 #[cfg(not(feature = "markdown"))]
-fn options(_: &Args, _: bool) -> render::Options {
+fn options(_: &Args) -> render::Options {
     render::Options::default()
 }
