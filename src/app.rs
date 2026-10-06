@@ -12,15 +12,20 @@
 //!
 //! Where the terminal has no graphics protocol, slides are shown as their
 //! text over a coarse image instead; `t` switches between the two anywhere.
+//!
+//! Ctrl-O picks another file to present, in a list over the slides. It is
+//! read off the UI thread as a reload is, and the slides it replaces stay
+//! until it is.
 
+use crate::browse::{self, Browser};
 use crate::remote::Link;
-use crate::render::{self, Deck, Done, Job, Key, Look, Renderer, Slide, Stamp, Zoom};
+use crate::render::{self, Deck, Done, Job, Key, Look, Options, Renderer, Slide, Stamp, Zoom};
 use crate::text;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 use ratatui_image::Image;
 use ratatui_image::picker::cap_parser::{Parser, QueryStdioOptions};
@@ -28,6 +33,7 @@ use ratatui_image::picker::{Picker, ProtocolType};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -50,11 +56,13 @@ const WATCH_EVERY: Duration = Duration::from_millis(250);
 /// `text` starts with slides as text even where images can be shown.
 /// `link` is the connection the slides come over, for slides on another
 /// machine.
+/// `local` is how files picked with Ctrl-O, which are here, are read.
 /// `signaled` is set when a signal asks ohp to stop.
 pub fn run(
     deck: Deck,
     text: bool,
     link: Option<Link>,
+    local: Options,
     signaled: Arc<AtomicUsize>,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
@@ -71,6 +79,7 @@ pub fn run(
         let mut app = App::new(deck, picker, renderer, workers, look, signaled);
         app.notice = app.deck.note.clone();
         app.link = link;
+        app.local = local;
         app.run(&mut terminal)?;
         app.clear_images()
     })();
@@ -125,6 +134,14 @@ struct Grid {
     origin: (u16, u16),
 }
 
+#[derive(PartialEq)]
+enum Then {
+    /// The file changed again while it was being read: read it once more.
+    Reload,
+    /// A file picked while another was being read.
+    Open(PathBuf),
+}
+
 struct App {
     deck: Deck,
     picker: Picker,
@@ -157,8 +174,14 @@ struct App {
     checked: Instant,
     /// The deck being read again, off this thread, and that thread.
     loading: Option<(Receiver<anyhow::Result<Deck>>, JoinHandle<()>)>,
-    /// The file changed again while it was being read: read it once more.
-    again: bool,
+    /// The file being read in place of this one, if one is.
+    opening: Option<PathBuf>,
+    /// What to read once the read under way is done.
+    then: Option<Then>,
+    /// How files picked with Ctrl-O are read.
+    local: Options,
+    /// The list another file is picked from, open over the slides.
+    browser: Option<Browser>,
     /// Set when a signal asks ohp to stop.
     signaled: Arc<AtomicUsize>,
     /// Shown in the status line until the next key press.
@@ -181,6 +204,7 @@ impl App {
     ) -> Self {
         App {
             stamp: render::stamp(&deck.path),
+            local: deck.options.clone(),
             deck,
             picker,
             renderer,
@@ -199,7 +223,9 @@ impl App {
             settling: None,
             checked: Instant::now(),
             loading: None,
-            again: false,
+            opening: None,
+            then: None,
+            browser: None,
             signaled,
             notice: None,
             link: None,
@@ -299,17 +325,51 @@ impl App {
     /// Read the deck again on a thread of its own.
     fn reload(&mut self) {
         if self.loading.is_some() {
-            self.again = true;
+            // A file picked replaces this one: no need to read this one again.
+            self.then.get_or_insert(Then::Reload);
             return;
         }
+        self.read(self.deck.path.clone(), self.deck.options.clone());
+    }
+
+    /// Read `path` on a thread of its own, to present in place of the deck.
+    fn open(&mut self, path: PathBuf) {
+        if self.loading.is_some() {
+            self.then = Some(Then::Open(path));
+            return;
+        }
+        self.opening = Some(path.clone());
+        self.read(path, self.local.clone());
+    }
+
+    fn read(&mut self, path: PathBuf, options: Options) {
         let (tx, rx) = std::sync::mpsc::channel();
-        let (path, options) = (self.deck.path.clone(), self.deck.options.clone());
         // Nothing to do if the app is gone.
         let reader = std::thread::spawn(move || {
             let _ = tx.send(Deck::open_with(&path, options));
         });
         self.loading = Some((rx, reader));
         self.dirty = true;
+    }
+
+    /// Open the list to pick another file from, in the deck's directory.
+    fn browse(&mut self) {
+        let path = &self.deck.path;
+        // A file on another machine is copied to a temporary directory.
+        let here = self.link.is_none();
+        let dir = path
+            .parent()
+            .filter(|dir| here && !dir.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        match Browser::new(dir) {
+            Ok(mut browser) => {
+                if here && let Some(name) = path.file_name() {
+                    browser.select(&name.to_string_lossy());
+                }
+                self.browser = Some(browser);
+            }
+            Err(e) => self.notice = Some(format!("cannot list {}: {e}", dir.display())),
+        }
     }
 
     /// Show the deck read again, once it is.
@@ -327,23 +387,47 @@ impl App {
             let renderer = Renderer::spawn(&deck, &self.picker, self.workers)?;
             Ok((deck, renderer))
         });
+        let opening = self.opening.take();
         match fresh {
             Ok((deck, renderer)) => {
+                if opening.is_some() {
+                    self.stamp = render::stamp(&deck.path);
+                    self.settling = None;
+                    // Slides of another file: not to be shown for this one.
+                    self.slides.clear();
+                    self.shown.set(None);
+                    (self.cur, self.top) = (0, 0);
+                    self.zoom = Zoom::FIT;
+                    self.view = View::Present;
+                    self.link = None;
+                    self.trouble = None;
+                    // A reload asked for was of the file this replaces.
+                    self.then = self.then.take().filter(|then| *then != Then::Reload);
+                    self.notice = deck.note.clone();
+                } else {
+                    self.notice = Some(match &deck.note {
+                        Some(note) => format!("reloaded; {note}"),
+                        None => "reloaded".into(),
+                    });
+                }
                 self.cur = self.cur.min(deck.pages - 1);
                 self.deck = deck;
                 self.renderer = renderer;
                 self.requested.clear();
                 self.stale = std::mem::take(&mut self.slides);
-                self.notice = Some(match &self.deck.note {
-                    Some(note) => format!("reloaded; {note}"),
-                    None => "reloaded".into(),
+            }
+            Err(e) => {
+                self.notice = Some(match opening {
+                    Some(path) => format!("cannot open {}: {e:#}", path.display()),
+                    None => format!("reload failed: {e:#}"),
                 });
             }
-            Err(e) => self.notice = Some(format!("reload failed: {e:#}")),
         }
         self.dirty = true;
-        if std::mem::take(&mut self.again) {
-            self.reload();
+        match self.then.take() {
+            Some(Then::Open(path)) => self.open(path),
+            Some(Then::Reload) => self.reload(),
+            None => {}
         }
     }
 
@@ -368,9 +452,26 @@ impl App {
 
     fn key(&mut self, key: KeyEvent) {
         self.notice = None;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('c') {
+            self.quit = true;
+            return;
+        }
+        if let Some(browser) = &mut self.browser {
+            match browser.key(key) {
+                browse::Outcome::Stay => {}
+                browse::Outcome::Open(path) => {
+                    self.browser = None;
+                    self.open(path);
+                }
+                browse::Outcome::Quit => self.browser = None,
+            }
+            self.dirty = true;
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
+            KeyCode::Char('o') if ctrl => self.browse(),
             KeyCode::Right if self.zoomed() => self.pan(1, 0),
             KeyCode::Left if self.zoomed() => self.pan(-1, 0),
             KeyCode::Down if self.zoomed() => self.pan(0, 1),
@@ -622,15 +723,33 @@ impl App {
 
     fn draw(&self, f: &mut Frame) {
         let (main, status) = split(f.area());
-        match self.view {
-            View::Present => {
-                let job = self.job(self.presented());
-                let shown = self.draw_slide(f, job, main);
-                self.shown.set(shown.or(self.shown.get()));
+        // Kitty's images are cells, which the list covers; others' are not.
+        let covered = self.browser.is_some()
+            && self.look == Look::Image
+            && !matches!(
+                self.picker.protocol_type(),
+                ProtocolType::Kitty | ProtocolType::Halfblocks
+            );
+        if !covered {
+            match self.view {
+                View::Present => {
+                    let job = self.job(self.presented());
+                    let shown = self.draw_slide(f, job, main);
+                    self.shown.set(shown.or(self.shown.get()));
+                }
+                View::Grid => self.draw_grid(f),
             }
-            View::Grid => self.draw_grid(f),
         }
         f.render_widget(Paragraph::new(self.status()), status);
+        if let Some(browser) = &self.browser {
+            let size = Size::new((main.width * 3 / 4).max(40), (main.height * 3 / 4).max(10));
+            let area = centred(main, size);
+            let block = Block::bordered().border_style(Style::new().fg(Color::Yellow));
+            let inner = block.inner(area);
+            f.render_widget(Clear, area);
+            f.render_widget(block, area);
+            browser.draw(f, inner);
+        }
     }
 
     /// The slide `job` renders, in `area`, which is its key's size; until it
@@ -693,15 +812,15 @@ impl App {
         let (view, keys) = match self.view {
             View::Present if self.zoomed() => (
                 zoom.as_str(),
-                "arrows pan · +/- zoom · 0 fit · n/p next/prev · t text · r reload · q quit",
+                "arrows pan · +/- zoom · 0 fit · n/p next/prev · t text · r reload · ^O open · q quit",
             ),
             View::Present => (
                 "present",
-                "n/p ←/→ next/prev · +/- zoom · g grid · t text · r reload · q quit",
+                "n/p ←/→ next/prev · +/- zoom · g grid · t text · r reload · ^O open · q quit",
             ),
             View::Grid => (
                 "grid",
-                "n/p arrows move · +/- zoom · g/enter present · t text · r reload · q quit",
+                "n/p arrows move · +/- zoom · g/enter present · t text · r reload · ^O open · q quit",
             ),
         };
         let look = match self.look {
@@ -725,10 +844,10 @@ impl App {
             spans.push(Span::styled(format!("  rendering {waiting}"), dim));
         }
         if self.loading.is_some() {
-            let what = if render::markdown(&self.deck.path) {
-                "typesetting…"
-            } else {
-                "reloading…"
+            let what = match &self.opening {
+                Some(path) => format!("opening {}…", path.display()),
+                None if render::markdown(&self.deck.path) => "typesetting…".into(),
+                None => "reloading…".into(),
             };
             spans.push(Span::styled(format!("  {what}"), dim));
         }

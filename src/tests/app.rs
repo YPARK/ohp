@@ -427,7 +427,7 @@ fn a_change_while_reloading_reloads_again() {
     fixture::write(dir.path(), 6);
     app.loading = Some(loading(Deck::open(&dir.path().join("deck.pdf"))));
     app.reload();
-    assert!(app.again);
+    assert!(app.then == Some(Then::Reload));
     app.loaded();
     assert_eq!(app.deck.pages, 6);
     assert!(app.loading.is_some(), "read once more");
@@ -484,4 +484,122 @@ fn dropping_the_app_stops_a_reload_and_waits_for_it() {
     app.loading = Some((std::sync::mpsc::channel().1, reader));
     drop(app);
     assert!(heard.load(Ordering::Relaxed));
+}
+
+fn ctrl(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+}
+
+fn type_in(app: &mut App, text: &str) {
+    press(app, &text.chars().map(KeyCode::Char).collect::<Vec<_>>());
+}
+
+/// A `pages`-page PDF written to `name` in `dir`.
+fn write_named(dir: &Path, name: &str, pages: usize) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, fixture::pdf(pages)).unwrap();
+    path
+}
+
+#[test]
+fn ctrl_o_opens_another_file_in_place_of_this_one() {
+    let (dir, mut app) = app(3);
+    let other = write_named(dir.path(), "other.pdf", 5);
+    press(&mut app, &[KeyCode::Right, KeyCode::Char('g')]);
+    app.key(ctrl('o'));
+    assert!(app.browser.is_some());
+    // Keys go to the list, not the slides.
+    type_in(&mut app, "oth");
+    assert_eq!(app.cur, 1);
+    press(&mut app, &[KeyCode::Enter]);
+    assert!(app.browser.is_none());
+    assert!(app.status().to_string().contains("opening"));
+    finish(&mut app);
+
+    assert_eq!(app.deck.path, other.canonicalize().unwrap());
+    assert_eq!(app.deck.pages, 5);
+    assert_eq!(app.cur, 0);
+    assert!(app.view == View::Present);
+    assert_eq!(app.stamp, render::stamp(&other));
+}
+
+#[test]
+fn the_list_starts_on_the_file_presented() {
+    let (dir, mut app) = app(3);
+    write_named(dir.path(), "another.pdf", 2);
+    app.key(ctrl('o'));
+    press(&mut app, &[KeyCode::Enter]);
+    finish(&mut app);
+    assert_eq!(app.deck.pages, 3);
+}
+
+#[test]
+fn esc_or_ctrl_o_closes_the_list() {
+    let (_dir, mut app) = app(3);
+    app.key(ctrl('o'));
+    press(&mut app, &[KeyCode::Esc]);
+    assert!(app.browser.is_none());
+    app.key(ctrl('o'));
+    app.key(ctrl('o'));
+    assert!(app.browser.is_none());
+    assert!(app.loading.is_none());
+}
+
+#[test]
+fn a_file_that_cannot_be_read_keeps_the_slides() {
+    let (dir, mut app) = app(3);
+    std::fs::write(dir.path().join("broken.pdf"), b"not a pdf").unwrap();
+    app.key(ctrl('o'));
+    type_in(&mut app, "broken");
+    press(&mut app, &[KeyCode::Enter]);
+    finish(&mut app);
+    assert_eq!(app.deck.pages, 3);
+    assert!(app.notice.as_deref().unwrap().starts_with("cannot open"));
+}
+
+#[test]
+fn a_file_picked_while_reloading_is_read_after() {
+    let (dir, mut app) = app(3);
+    write_named(dir.path(), "other.pdf", 5);
+    app.loading = Some(loading(Deck::open(&dir.path().join("deck.pdf"))));
+    app.then = Some(Then::Reload);
+    app.key(ctrl('o'));
+    type_in(&mut app, "oth");
+    press(&mut app, &[KeyCode::Enter]);
+    finish(&mut app);
+    assert_eq!(app.deck.pages, 5);
+    assert!(app.then.is_none());
+}
+
+#[test]
+fn a_reload_asked_for_while_opening_is_dropped() {
+    let (dir, mut app) = app(3);
+    write_named(dir.path(), "other.pdf", 5);
+    app.key(ctrl('o'));
+    type_in(&mut app, "oth");
+    press(&mut app, &[KeyCode::Enter]);
+    // As when the file opened before changes while the other is read.
+    app.reload();
+    assert!(app.then == Some(Then::Reload));
+    finish(&mut app);
+    assert_eq!(app.deck.pages, 5);
+    assert!(app.then.is_none());
+    assert!(app.loading.is_none(), "the file opened is not read again");
+}
+
+#[test]
+fn ctrl_c_quits_with_the_list_open() {
+    let (_dir, mut app) = app(3);
+    app.key(ctrl('o'));
+    app.key(ctrl('c'));
+    assert!(app.quit);
+}
+
+#[test]
+fn the_list_is_drawn_over_the_slides() {
+    let (_dir, mut app) = app(3);
+    app.key(ctrl('o'));
+    let text = screen(&app);
+    assert!(text.contains(" open "));
+    assert!(text.contains("deck.pdf"));
 }

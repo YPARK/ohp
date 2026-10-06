@@ -32,12 +32,20 @@ cargo install --git https://github.com/YPARK/ohp --no-default-features
 ## Use
 
 ```sh
+ohp                                  # pick the file from a list
+ohp ~/talks                          # pick it from a list there
 ohp talk.pdf
 ohp --text talk.pdf                  # slides as text, even where images can be shown
 ohp user@host:~/talks/talk.pdf       # slides on another machine
 ohp talk.Rmd                         # R Markdown slides, chunks run by knitr
 ohp --paper a4 notes.md              # a markdown document, on A4 pages
 ```
+
+In the list, typing narrows it to the names that match, and a path typed
+up to a `/`, as `../talks/` or `~/`, goes to that directory. Up and down
+move, enter opens a file or goes into a folder, left or backspace on an
+empty line goes up, and esc quits. While presenting, ctrl-o brings the
+same list up over the slides.
 
 | Key | |
 |---|---|
@@ -49,6 +57,7 @@ ohp --paper a4 notes.md              # a markdown document, on A4 pages
 | `0` | fit the slide back to the screen |
 | `t` | switch between images and text |
 | `r` | reload the file now, as after fixing what made a reload fail |
+| `ctrl-o` | pick another file to present, from the list above |
 | `q` | quit |
 
 ## Terminals
