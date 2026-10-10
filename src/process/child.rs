@@ -252,7 +252,7 @@ mod group {
 
     /// The signals that end ohp in a hurry, held off a thread starting a
     /// program, so `kill_all` runs on another and waits for it to be known.
-    const HURRY: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+    const HURRY: [libc::c_int; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGALRM];
 
     /// A slot, reserved for a program and then knowing its group, until it
     /// is freed.

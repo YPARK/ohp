@@ -27,11 +27,21 @@ const ALONE: &str = "OHP_TEST_SIGNALS_ALONE";
 fn alone(test: &str) -> std::process::Output {
     let tests = std::env::current_exe().unwrap();
     let test = format!("process::signals::tests::{test}");
-    std::process::Command::new(tests)
-        .env(ALONE, "1")
-        .args(["--ignored", "--exact", &test])
-        .output()
-        .unwrap()
+    let mut alone = std::process::Command::new(tests);
+    alone.env(ALONE, "1").args(["--ignored", "--exact", &test]);
+    // In a session of its own, with no terminal: ending in a hurry, it
+    // restores the terminal it has, which must not be the developer's.
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: only setsid, safe between fork and exec.
+        unsafe {
+            alone.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            })
+        };
+    }
+    alone.output().unwrap()
 }
 
 /// Run in a test process of its own, by the test below.
@@ -47,9 +57,11 @@ fn installed() {
     let signaled = Arc::new(AtomicUsize::new(0));
     install(&stop, &signaled).unwrap();
     // SAFETY: raises a signal a handler is installed for, once.
-    unsafe { libc::raise(SIGTERM) };
+    unsafe { libc::raise(SIGHUP) };
     assert!(stop.load(Ordering::Relaxed), "typesetting is not stopped");
-    assert_eq!(signaled.load(Ordering::Relaxed), SIGTERM as usize);
+    assert_eq!(signaled.load(Ordering::Relaxed), SIGHUP as usize);
+    // Not reading keys, ohp is left to end in order.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
 }
 
 #[test]
@@ -73,9 +85,14 @@ fn hung_up() {
         return;
     }
     install(&Arc::default(), &Arc::default()).unwrap();
-    // SAFETY: raises a signal a handler is installed for, once.
-    unsafe { libc::raise(SIGHUP) };
-    std::thread::sleep(std::time::Duration::from_secs(30));
+    crate::app::READING_KEYS.store(true, Ordering::SeqCst);
+    // SAFETY: raises signals handlers are installed for, once each.
+    unsafe {
+        // Another's alarm does not end ohp.
+        libc::raise(SIGALRM);
+        libc::raise(SIGHUP);
+    }
+    std::thread::sleep(std::time::Duration::from_secs(12));
 }
 
 #[test]

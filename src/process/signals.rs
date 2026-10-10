@@ -7,9 +7,10 @@
 //! it runs are killed and the terminal restored, as nothing else will do it
 //! then.
 //!
-//! The terminal hanging up, as its window closes, ends ohp a second after,
-//! if it has not quit: crossterm, reading the terminal then, reads again
-//! for ever and never returns to the app to quit.
+//! The terminal hanging up while the app reads keys, as its window closes,
+//! ends ohp a second after, if it has not quit: crossterm, reading the
+//! terminal then, reads again for ever and never returns to the app to
+//! quit. Once the app is past reading keys, it is left to end in order.
 
 use crate::process::child;
 use signal_hook::consts::{SIGALRM, SIGHUP, SIGINT, SIGTERM};
@@ -32,12 +33,27 @@ const PATIENCE: usize = 2;
 /// Seconds ohp is given to quit once its terminal hangs up.
 const HUNG_UP: libc::c_uint = 1;
 
+/// Set by a hang-up, for the alarm it sets to tell from another.
+static HUNG: AtomicBool = AtomicBool::new(false);
+
 /// Have the signals set `signaled` to which came and `stop`, and the third
 /// end ohp. Before the terminal is changed, so its settings can be restored.
 pub fn install(stop: &Arc<AtomicBool>, signaled: &Arc<AtomicUsize>) -> io::Result<()> {
     save_terminal();
     // SAFETY: as the actions below.
-    unsafe { low_level::register(SIGALRM, || hurry(SIGHUP)) }?;
+    unsafe {
+        low_level::register(SIGHUP, || {
+            if crate::app::READING_KEYS.load(Ordering::SeqCst) {
+                HUNG.store(true, Ordering::SeqCst);
+                libc::alarm(HUNG_UP);
+            }
+        })?;
+        low_level::register(SIGALRM, || {
+            if HUNG.load(Ordering::SeqCst) && crate::app::READING_KEYS.load(Ordering::SeqCst) {
+                hurry(SIGHUP);
+            }
+        })?;
+    }
     let seen = Arc::new(AtomicUsize::new(0));
     for signal in [SIGINT, SIGTERM, SIGHUP] {
         flag::register(signal, stop.clone())?;
@@ -48,9 +64,6 @@ pub fn install(stop: &Arc<AtomicBool>, signaled: &Arc<AtomicUsize>) -> io::Resul
         // tcsetattr, write and _exit.
         unsafe {
             low_level::register(signal, move || {
-                if signal == SIGHUP {
-                    libc::alarm(HUNG_UP);
-                }
                 if out_of_patience(&seen) {
                     hurry(signal);
                 }
@@ -63,7 +76,7 @@ pub fn install(stop: &Arc<AtomicBool>, signaled: &Arc<AtomicUsize>) -> io::Resul
 /// End ohp at once, as `signal` ends it: kill the programs it runs, and
 /// restore the terminal, as nothing else will do it then. Safe in a signal
 /// handler.
-fn hurry(signal: libc::c_int) {
+fn hurry(signal: libc::c_int) -> ! {
     child::kill_all();
     restore_terminal();
     low_level::exit(i32::from(crate::shell_status(signal as usize)));
