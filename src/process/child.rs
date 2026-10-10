@@ -112,6 +112,27 @@ pub fn last_line(log: &std::path::Path, keep: impl Fn(&str) -> bool) -> Option<S
         .map(str::to_string)
 }
 
+/// Run `command`, what it writes on its error output to `log`, until it is
+/// done or `stop` is set: whether it ran to its end, or why it failed, as
+/// it wrote last.
+#[cfg(feature = "speech")]
+pub fn run_logged(
+    mut command: Command,
+    log: &std::path::Path,
+    stop: &AtomicBool,
+) -> Result<bool, String> {
+    let stderr = std::fs::File::create(log).map_err(|e| e.to_string())?;
+    command.stderr(stderr);
+    match run(command, stop, None) {
+        Ok(Ended::Exited(status)) if status.success() => Ok(true),
+        Ok(Ended::Exited(_)) => Err(last_line(log, |_| true).unwrap_or_else(|| "it failed".into())),
+        Ok(Ended::Stopped) => Ok(false),
+        // Given no time limit, it cannot run past one.
+        Ok(Ended::Paused | Ended::TimedOut) => Err("it was paused".into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Kill every group running, as ohp ends in a hurry. Safe in a signal
 /// handler: it only reads atomics, sleeps and sends signals.
 #[cfg(unix)]

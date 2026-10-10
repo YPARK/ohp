@@ -14,7 +14,7 @@
 //! formula or a table is left out, the reading pauses.
 
 #[cfg(feature = "speech")]
-use crate::process::child::{self, Ended};
+use crate::process::child;
 #[cfg(feature = "speech")]
 use crate::remote;
 use crate::render;
@@ -34,6 +34,8 @@ use std::time::{Duration, Instant};
 
 /// Name of the threads reading, so their panics can be told apart.
 pub const THREAD: &str = "speak";
+/// Name of the threads fetching voices to read in.
+pub const VOICES_THREAD: &str = "voices";
 
 /// How long a formula or a table left out is paused for, unless told.
 const PAUSE: Duration = Duration::from_millis(500);
@@ -68,18 +70,32 @@ const PLAYERS: &[(&str, &str)] = &[
 ];
 
 #[cfg(feature = "speech")]
-/// The voice that reads slides: the one given, or else Piper with a voice
-/// of its found, or else one found.
-pub fn voice(given: Option<String>) -> Option<String> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
+/// Where Piper's voices are kept: `piper` in the user's data directory.
+pub fn piper_dir() -> Option<PathBuf> {
     let data = std::env::var_os("XDG_DATA_HOME")
         .filter(|d| !d.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")));
-    given_or(given, || {
-        data.and_then(|data| piper(&path, &data.join("piper")))
-            .or_else(|| found(&path, VOICES))
-    })
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+        })?;
+    Some(data.join("piper"))
+}
+
+#[cfg(feature = "speech")]
+/// Voices other than Piper's on the `PATH`: each program and its command.
+pub fn others() -> Vec<(&'static str, &'static str)> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    VOICES
+        .iter()
+        .copied()
+        .filter(|(name, _)| on(&path, name))
+        .collect()
+}
+
+#[cfg(feature = "speech")]
+/// Whether `name` is a program on the `PATH`.
+pub fn installed(name: &str) -> bool {
+    on(&std::env::var_os("PATH").unwrap_or_default(), name)
 }
 
 #[cfg(feature = "speech")]
@@ -90,7 +106,8 @@ pub fn player(given: Option<String>) -> Option<String> {
 }
 
 #[cfg(feature = "speech")]
-fn given_or(given: Option<String>, or: impl FnOnce() -> Option<String>) -> Option<String> {
+/// The command `given`, unless blank, or else what `or` finds.
+pub fn given_or(given: Option<String>, or: impl FnOnce() -> Option<String>) -> Option<String> {
     given.filter(|c| !c.trim().is_empty()).or_else(or)
 }
 
@@ -125,14 +142,12 @@ fn found(path: &OsStr, known: &[(&str, &str)]) -> Option<String> {
 }
 
 #[cfg(feature = "speech")]
-/// Piper speaking with the first voice in `voices`, a model with its
-/// config beside it, if Piper is on `path`.
-fn piper(path: &OsStr, voices: &Path) -> Option<String> {
-    if !on(path, "piper") {
-        return None;
-    }
-    let mut models: Vec<PathBuf> = std::fs::read_dir(voices)
-        .ok()?
+/// Piper's voices in `dir`, by name: models with their config beside them.
+pub fn piper_models(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut models: Vec<PathBuf> = entries
         .flatten()
         .map(|entry| entry.path())
         .filter(|model| {
@@ -141,7 +156,13 @@ fn piper(path: &OsStr, voices: &Path) -> Option<String> {
         })
         .collect();
     models.sort();
-    let model = remote::quote(models.first()?.to_str()?);
+    models
+}
+
+#[cfg(feature = "speech")]
+/// Piper speaking with `model`.
+pub fn piper_with(model: &Path) -> Option<String> {
+    let model = remote::quote(model.to_str()?);
     Some(format!("piper -m {model} -f -"))
 }
 
@@ -185,6 +206,18 @@ impl Speaker {
     pub fn with_pause(mut self, pause: Duration) -> Self {
         self.pause = pause;
         self
+    }
+
+    /// The voice slides are read in, if there is one.
+    #[cfg(feature = "speech")]
+    pub fn voice(&self) -> Option<&str> {
+        self.voice.as_deref()
+    }
+
+    /// Read in `voice` from the next slide read on.
+    #[cfg(feature = "speech")]
+    pub fn set_voice(&mut self, voice: String) {
+        self.voice = Some(voice);
     }
 
     /// Whether a slide is being read.
@@ -390,7 +423,7 @@ fn words(data: Arc<Vec<u8>>, page: usize) -> Result<Vec<Spoken>, String> {
     render::caught(said).ok_or_else(|| "cannot read this slide's text".into())
 }
 
-const NO_SPEECH: &str = "ohp was built without its `speech` feature";
+pub const NO_SPEECH: &str = "ohp was built without its `speech` feature";
 
 #[cfg(not(feature = "speech"))]
 fn run(_: &str, _: &Path, _: Option<&Path>, _: &AtomicBool) -> Result<(), String> {
@@ -414,27 +447,11 @@ fn run(
     };
     let mut log = input.as_os_str().to_owned();
     log.push(".log");
-    let stderr = std::fs::File::create(&log).map_err(|e| e.to_string())?;
     let mut sh = Command::new("sh");
-    sh.args(["-c", command])
-        .stdin(stdin)
-        .stdout(stdout)
-        .stderr(stderr);
-    let status = match child::run(sh, stop, None) {
-        Ok(Ended::Exited(status)) => status,
-        Ok(Ended::Stopped) => return Ok(()),
-        // Given no time limit, it cannot run past one.
-        Ok(Ended::Paused | Ended::TimedOut) => return Err("reading aloud paused".into()),
-        Err(e) => return Err(format!("cannot read aloud: {e}")),
-    };
-    if status.success() {
-        return Ok(());
-    }
-    let why = child::last_line(Path::new(&log), |_| true);
-    Err(format!(
-        "cannot read aloud: {}",
-        why.as_deref().unwrap_or("it failed")
-    ))
+    sh.args(["-c", command]).stdin(stdin).stdout(stdout);
+    child::run_logged(sh, Path::new(&log), stop)
+        .map(|_| ())
+        .map_err(|why| format!("cannot read aloud: {why}"))
 }
 
 #[cfg(all(test, feature = "speech"))]

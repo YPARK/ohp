@@ -65,6 +65,7 @@ same list up over the slides.
 | `r` | reload the file now, as after fixing what made a reload fail |
 | `ctrl-o` | pick another file to present, from the list above |
 | `s` | read the slides aloud from this one on; again to stop |
+| `v` | pick the voice to read in, or one of Piper's to download |
 | `q` | quit |
 
 ## Terminals
@@ -165,7 +166,13 @@ done
 ```
 
 With several voices there, the first by name is used; to choose one, give
-it, as `OHP_VOICE='piper -m ~/.local/share/piper/en_GB-alan-medium.onnx -f -'`.
+it, as `OHP_VOICE='piper -m ~/.local/share/piper/en_GB-alan-medium.onnx -f -'`,
+or press `v`. It lists the voices at hand, then, with Piper and `curl`
+installed, every voice in Piper's catalog, your language's first: type to
+narrow the list, and Enter to read in the one picked. A voice not yet there
+is downloaded to `~/.local/share/piper` first, 20 to 140 MB, its progress in
+the status line, and is read in once it is; it stays there for next time.
+The voice picked is used until ohp quits.
 On ARM Linux, take `piper_linux_aarch64.tar.gz` in its place. Piper's
 `-f -` matters: without it, the WAV goes to a file rather than to ohp.
 Piper's macOS releases do not run on today's Macs; there, download a

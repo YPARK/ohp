@@ -11,13 +11,13 @@
 //! A directory is read once, when the query first names it, not on every
 //! key: it may be large, or on a slow network disk.
 
+use crate::menu::{self, Menu, dim, rank};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::text::Span;
+use ratatui::widgets::ListItem;
 use ratatui::{DefaultTerminal, Frame};
-use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
 /// The file picked in `start`, or below or above it; `None` if none is.
@@ -46,26 +46,21 @@ pub enum Outcome {
 pub struct Browser {
     /// The directory names are typed from.
     dir: PathBuf,
-    query: String,
+    /// What is typed, and the entry picked.
+    menu: Menu,
     /// The directory last read, and what is in it or why it cannot be read.
     listing: Option<(PathBuf, Result<Vec<Entry>, String>)>,
     /// What the query names in the directory it names, best match first.
     entries: Vec<Entry>,
-    /// Set as it is drawn, as is `rows`.
-    list: Cell<ListState>,
-    /// Rows the list shows, for page up and down.
-    rows: Cell<u16>,
 }
 
 impl Browser {
     pub fn new(start: &Path) -> anyhow::Result<Self> {
         let mut browser = Browser {
             dir: start.canonicalize()?,
-            query: String::new(),
+            menu: Menu::default(),
             listing: None,
             entries: Vec::new(),
-            list: Cell::default(),
-            rows: Cell::new(1),
         };
         browser.refresh();
         Ok(browser)
@@ -89,55 +84,42 @@ impl Browser {
     pub fn key(&mut self, key: KeyEvent) -> Outcome {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('c' | 'o') if ctrl => return Outcome::Quit,
-            KeyCode::Char('u') if ctrl => self.retype(String::new()),
-            KeyCode::Char('n') if ctrl => self.step(1),
-            KeyCode::Char('p') if ctrl => self.step(-1),
-            KeyCode::Char(c) if !ctrl => self.type_char(c),
-            KeyCode::Down => self.step(1),
-            KeyCode::Up => self.step(-1),
-            KeyCode::PageDown => self.step(self.page()),
-            KeyCode::PageUp => self.step(-self.page()),
-            KeyCode::Backspace | KeyCode::Left if self.query.is_empty() => self.up(),
-            KeyCode::Backspace => {
-                let mut query = self.query.clone();
-                query.pop();
-                self.retype(query);
-            }
+            KeyCode::Char('o') if ctrl => return Outcome::Quit,
+            KeyCode::Backspace | KeyCode::Left if self.menu.query.is_empty() => self.up(),
             KeyCode::Right | KeyCode::Tab if self.picked().is_some_and(|e| e.dir) => self.enter(),
-            KeyCode::Enter => return self.open(),
-            KeyCode::Esc if self.query.is_empty() => return Outcome::Quit,
-            KeyCode::Esc => self.retype(String::new()),
-            _ => {}
+            _ => match self.menu.key(key, self.entries.len()) {
+                menu::Key::Typed('/') => self.slash(),
+                menu::Key::Typed(_) | menu::Key::Retyped => self.refresh(),
+                menu::Key::Enter => return self.open(),
+                menu::Key::Quit => return Outcome::Quit,
+                menu::Key::Moved | menu::Key::Other => {}
+            },
         }
         Outcome::Stay
     }
 
-    fn type_char(&mut self, c: char) {
-        let query = format!("{}{c}", self.query);
-        if c == '/'
-            && let Ok(to) = resolve(&self.dir, &query).canonicalize()
+    /// A `/` typed: go to the directory typed, if it is one.
+    fn slash(&mut self) {
+        if let Ok(to) = resolve(&self.dir, &self.menu.query).canonicalize()
             && to.is_dir()
         {
             self.dir = to;
-            return self.retype(String::new());
+            self.menu.query.clear();
         }
-        self.retype(query);
+        self.refresh();
     }
 
     fn retype(&mut self, query: String) {
-        self.query = query;
+        self.menu.query = query;
         self.refresh();
     }
 
     /// The directory the query names, and the name being typed in it.
     fn split(&self) -> (PathBuf, &str) {
-        match self.query.rfind('/') {
-            Some(at) => (
-                resolve(&self.dir, &self.query[..=at]),
-                &self.query[at + 1..],
-            ),
-            None => (self.dir.clone(), &self.query),
+        let query = &self.menu.query;
+        match query.rfind('/') {
+            Some(at) => (resolve(&self.dir, &query[..=at]), &query[at + 1..]),
+            None => (self.dir.clone(), query),
         }
     }
 
@@ -167,7 +149,7 @@ impl Browser {
             self.entries
                 .extend(ranked.into_iter().map(|(_, e)| e.clone()));
         }
-        self.pick((!self.entries.is_empty()).then_some(0));
+        self.menu.pick((!self.entries.is_empty()).then_some(0));
     }
 
     /// Why the directory the query names cannot be read.
@@ -178,27 +160,8 @@ impl Browser {
         }
     }
 
-    fn pick(&self, at: Option<usize>) {
-        let mut list = self.list.get();
-        list.select(at);
-        self.list.set(list);
-    }
-
     fn picked(&self) -> Option<&Entry> {
-        self.entries.get(self.list.get().selected()?)
-    }
-
-    fn step(&mut self, by: isize) {
-        if self.entries.is_empty() {
-            return;
-        }
-        let at = self.list.get().selected().unwrap_or(0);
-        let last = self.entries.len() - 1;
-        self.pick(Some(at.saturating_add_signed(by).min(last)));
-    }
-
-    fn page(&self) -> isize {
-        isize::try_from(self.rows.get().saturating_sub(1).max(1)).unwrap_or(1)
+        self.entries.get(self.menu.picked()?)
     }
 
     /// Go into the folder picked.
@@ -206,7 +169,7 @@ impl Browser {
         let Some(name) = self.picked().map(|e| e.name.clone()) else {
             return;
         };
-        if name == ".." && self.query.is_empty() {
+        if name == ".." && self.menu.query.is_empty() {
             return self.up();
         }
         let to = self.split().0.join(&name);
@@ -242,7 +205,7 @@ impl Browser {
     /// Pick the entry `name`, if it is listed.
     pub fn select(&mut self, name: &str) {
         if let Some(at) = self.entries.iter().position(|e| e.name == name) {
-            self.pick(Some(at));
+            self.menu.pick(Some(at));
         }
     }
 
@@ -255,7 +218,7 @@ impl Browser {
             Some(entry) => Outcome::Open(self.split().0.join(&entry.name)),
             // A file typed out in full, even one not listed.
             None => {
-                let path = resolve(&self.dir, &self.query);
+                let path = resolve(&self.dir, &self.menu.query);
                 if path.is_file() {
                     Outcome::Open(path)
                 } else {
@@ -266,29 +229,14 @@ impl Browser {
     }
 
     pub fn draw(&self, f: &mut Frame, area: Rect) {
-        let [prompt, list, status] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .areas(area);
-        self.rows.set(list.height);
-
-        let dim = Style::new().fg(Color::DarkGray);
         let mut dir = self.dir.display().to_string();
         if !dir.ends_with('/') {
             dir.push('/');
         }
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(" open ", Style::new().add_modifier(Modifier::BOLD)),
-                Span::styled(dir, dim),
-                Span::raw(self.query.as_str()),
-                Span::styled("▏", Style::new().fg(Color::Yellow)),
-            ])),
-            prompt,
-        );
-
+        let prompt = vec![
+            Span::styled(" open ", Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled(dir, dim()),
+        ];
         let items = self.entries.iter().map(|e| {
             if e.dir {
                 ListItem::new(format!("   {}/", e.name)).style(Style::new().fg(Color::Blue))
@@ -296,25 +244,14 @@ impl Browser {
                 ListItem::new(format!("   {}", e.name))
             }
         });
-        let picked = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-        let mut state = self.list.get();
-        f.render_stateful_widget(List::new(items).highlight_style(picked), list, &mut state);
-        self.list.set(state);
-
-        let mut spans = Vec::new();
-        if let Some(trouble) = self.trouble() {
-            spans.push(Span::styled(
-                format!(" {trouble} "),
-                Style::new().add_modifier(Modifier::BOLD),
-            ));
-        } else if self.entries.is_empty() {
-            spans.push(Span::styled(" no match ", dim));
-        }
-        spans.push(Span::styled(
-            "  type to narrow · a/b/ go to a path · ↑/↓ move · enter open · ←/→ up/into · esc cancel",
-            dim,
-        ));
-        f.render_widget(Paragraph::new(Line::from(spans)), status);
+        let notes = match self.trouble() {
+            Some(trouble) => vec![menu::trouble(trouble)],
+            None if self.entries.is_empty() => vec![Span::styled(" no match ", dim())],
+            None => Vec::new(),
+        };
+        let keys =
+            "type to narrow · a/b/ go to a path · ↑/↓ move · enter open · ←/→ up/into · esc cancel";
+        self.menu.draw(f, area, prompt, items, notes, keys);
     }
 }
 
@@ -361,19 +298,6 @@ fn slides(path: &Path) -> bool {
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
     pdf || cfg!(feature = "markdown") && crate::render::markdown(path)
-}
-
-/// How well `stem` matches `name`, both lowercase, best lowest: `name`
-/// starts with it, has it in it, or has its letters in order.
-fn rank(name: &str, stem: &str) -> Option<u8> {
-    if name.starts_with(stem) {
-        return Some(0);
-    }
-    if name.contains(stem) {
-        return Some(1);
-    }
-    let mut letters = name.chars();
-    stem.chars().all(|c| letters.any(|n| n == c)).then_some(2)
 }
 
 #[cfg(test)]

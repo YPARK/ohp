@@ -19,13 +19,16 @@
 //!
 //! `s` reads the slides aloud, from the current one on, turning to each next
 //! one as the last is read, until the end or `s` again. Turning to another
-//! slide while reading reads that one.
+//! slide while reading reads that one. `v` picks the voice it reads in,
+//! in a list over the slides, which offers Piper's voices to download too.
 
 use crate::browse::{self, Browser};
 use crate::remote::Link;
 use crate::render::{self, Deck, Done, Job, Key, Look, Options, Renderer, Slide, Stamp, Zoom};
 use crate::speak::{self, Speaker};
 use crate::text;
+#[cfg(feature = "speech")]
+use crate::voices::{self, Voices};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
@@ -121,7 +124,10 @@ fn quiet_render_panics() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let thread = std::thread::current();
-        if !matches!(thread.name(), Some(render::THREAD | speak::THREAD)) {
+        if !matches!(
+            thread.name(),
+            Some(render::THREAD | speak::THREAD | speak::VOICES_THREAD)
+        ) {
             prev(info);
         }
     }));
@@ -202,6 +208,9 @@ struct App {
     /// The sentence being read aloud, lit on the slide, as last seen: the
     /// speaker moves on under the screen, and a frame's jobs must agree.
     lit: Option<usize>,
+    /// The voice picker, its list open over the slides when picking.
+    #[cfg(feature = "speech")]
+    voices: Voices,
     dirty: bool,
     quit: bool,
 }
@@ -245,6 +254,8 @@ impl App {
             trouble: None,
             speaker: Speaker::new(None, None),
             lit: None,
+            #[cfg(feature = "speech")]
+            voices: Voices::default(),
             dirty: true,
             quit: false,
         }
@@ -279,6 +290,8 @@ impl App {
             self.watch();
             self.loaded();
             self.read_along();
+            #[cfg(feature = "speech")]
+            self.poll_voices();
             if self.signaled.load(Ordering::Relaxed) != 0 {
                 self.quit = true;
             }
@@ -489,6 +502,44 @@ impl App {
         self.dirty = true;
     }
 
+    /// Open the list to pick the voice slides are read in from.
+    #[cfg(feature = "speech")]
+    fn choose_voice(&mut self) {
+        self.voices.open(self.speaker.voice());
+    }
+
+    #[cfg(not(feature = "speech"))]
+    fn choose_voice(&mut self) {
+        self.notice = Some(speak::NO_SPEECH.into());
+    }
+
+    /// Do what picking voices calls for.
+    #[cfg(feature = "speech")]
+    fn voiced(&mut self, event: voices::Event) {
+        match event {
+            voices::Event::Use(name, command) => {
+                self.speaker.set_voice(command);
+                self.notice = Some(format!("reading in {name}"));
+                // The slide being read is read again in it.
+                if self.speaker.reading() {
+                    self.speak();
+                }
+            }
+            voices::Event::Notice(notice) => self.notice = Some(notice),
+        }
+    }
+
+    /// List Piper's voices once they are fetched, and read in a voice
+    /// downloaded once it is.
+    #[cfg(feature = "speech")]
+    fn poll_voices(&mut self) {
+        let (redraw, event) = self.voices.poll();
+        self.dirty |= redraw;
+        if let Some(event) = event {
+            self.voiced(event);
+        }
+    }
+
     /// Stop a reload under way and wait for it, so a knitr run it started
     /// does not outlive ohp, nor leave its files.
     fn stop(&mut self) {
@@ -527,6 +578,14 @@ impl App {
             self.dirty = true;
             return;
         }
+        #[cfg(feature = "speech")]
+        if self.voices.is_open() {
+            if let Some(event) = self.voices.key(key) {
+                self.voiced(event);
+            }
+            self.dirty = true;
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('o') if ctrl => self.browse(),
@@ -560,6 +619,7 @@ impl App {
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('s') if self.speaker.reading() => self.speaker.stop(),
             KeyCode::Char('s') => self.speak(),
+            KeyCode::Char('v') => self.choose_voice(),
             _ => return,
         }
         self.dirty = true;
@@ -791,7 +851,7 @@ impl App {
     fn draw(&self, f: &mut Frame) {
         let (main, status) = split(f.area());
         // Kitty's images are cells, which the list covers; others' are not.
-        let covered = self.browser.is_some()
+        let covered = self.listing()
             && self.look == Look::Image
             && !matches!(
                 self.picker.protocol_type(),
@@ -808,15 +868,29 @@ impl App {
             }
         }
         f.render_widget(Paragraph::new(self.status()), status);
+        if !self.listing() {
+            return;
+        }
+        let size = Size::new((main.width * 3 / 4).max(40), (main.height * 3 / 4).max(10));
+        let area = centred(main, size);
+        let block = Block::bordered().border_style(Style::new().fg(Color::Yellow));
+        let inner = block.inner(area);
+        f.render_widget(Clear, area);
+        f.render_widget(block, area);
         if let Some(browser) = &self.browser {
-            let size = Size::new((main.width * 3 / 4).max(40), (main.height * 3 / 4).max(10));
-            let area = centred(main, size);
-            let block = Block::bordered().border_style(Style::new().fg(Color::Yellow));
-            let inner = block.inner(area);
-            f.render_widget(Clear, area);
-            f.render_widget(block, area);
             browser.draw(f, inner);
         }
+        #[cfg(feature = "speech")]
+        self.voices.draw(f, inner);
+    }
+
+    /// Whether a list is open over the slides.
+    fn listing(&self) -> bool {
+        #[cfg(feature = "speech")]
+        if self.voices.is_open() {
+            return true;
+        }
+        self.browser.is_some()
     }
 
     /// The slide `job` renders, in `area`, which is its key's size; until it
@@ -885,26 +959,29 @@ impl App {
         let (view, keys) = match self.view {
             View::Present if self.zoomed() => (
                 zoom.as_str(),
-                "arrows pan · +/- zoom · 0 fit · n/p next/prev · t text · s speak · r reload · ^O open · q quit",
+                "arrows pan · +/- zoom · 0 fit · n/p next/prev · t text · s speak · v voice · r reload · ^O open · q quit",
             ),
             View::Present => (
                 "present",
-                "n/p ←/→ next/prev · +/- zoom · g grid · t text · s speak · r reload · ^O open · q quit",
+                "n/p ←/→ next/prev · +/- zoom · g grid · t text · s speak · v voice · r reload · ^O open · q quit",
             ),
             View::Grid => (
                 "grid",
-                "n/p arrows move · +/- zoom · g/enter present · t text · s speak · r reload · ^O open · q quit",
+                "n/p arrows move · +/- zoom · g/enter present · t text · s speak · v voice · r reload · ^O open · q quit",
             ),
         };
         let look = match self.look {
             Look::Image => "",
             Look::Text => " · text",
         };
-        let speaking = if self.speaker.reading() {
-            " · speaking"
-        } else {
-            ""
-        };
+        let mut speaking = String::new();
+        if self.speaker.reading() {
+            speaking.push_str(" · speaking");
+        }
+        #[cfg(feature = "speech")]
+        if let Some(note) = self.voices.note() {
+            speaking.push_str(&note);
+        }
         let mut spans = vec![
             Span::styled(
                 format!(" {} ", self.deck.name),

@@ -21,6 +21,7 @@ mod latex;
 mod markdown;
 #[cfg(feature = "markdown")]
 mod math;
+mod menu;
 #[cfg(any(feature = "markdown", feature = "speech"))]
 mod process;
 mod remote;
@@ -29,6 +30,8 @@ mod speak;
 mod text;
 #[cfg(feature = "markdown")]
 mod typeset;
+#[cfg(feature = "speech")]
+mod voices;
 
 #[cfg(test)]
 #[path = "tests/fixture.rs"]
@@ -185,7 +188,7 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
 #[cfg(feature = "speech")]
 fn speaker(args: &Args) -> speak::Speaker {
     let (voice, play) = (args.voice.clone(), args.play.clone());
-    speak::Speaker::new(speak::voice(voice), speak::player(play)).with_pause(args.pause)
+    speak::Speaker::new(voices::default(voice), speak::player(play)).with_pause(args.pause)
 }
 
 #[cfg(not(feature = "speech"))]

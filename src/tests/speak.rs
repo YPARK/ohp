@@ -168,34 +168,51 @@ fn a_pause_lasts_as_long_as_asked_unless_stopped() {
 }
 
 #[test]
-fn piper_reads_with_the_first_voice_it_has() {
+fn a_program_on_the_path_is_one_allowed_to_run() {
     let dir = tempfile::tempdir().unwrap();
-    let (bin, voices) = (dir.path().join("bin"), dir.path().join("it's voices"));
-    std::fs::create_dir_all(&bin).unwrap();
-    std::fs::create_dir_all(&voices).unwrap();
-    let path = bin.clone().into_os_string();
-    let touch = |name: &str| std::fs::write(voices.join(name), "").unwrap();
-
-    touch("en_US-ryan-high.onnx");
-    touch("en_US-ryan-high.onnx.json");
-    assert_eq!(piper(&path, &voices), None, "no piper on the path");
-
-    std::fs::write(bin.join("piper"), "").unwrap();
+    let path = dir.path().as_os_str();
+    assert!(!on(path, "piper"));
+    std::fs::write(dir.path().join("piper"), "").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(piper(&path, &voices), None, "a piper not allowed to run");
+        assert!(!on(path, "piper"), "a piper not allowed to run");
         let runs = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(bin.join("piper"), runs).unwrap();
+        std::fs::set_permissions(dir.path().join("piper"), runs).unwrap();
     }
-    touch("en_GB-alan-low.onnx");
-    touch("de_DE-thorsten.onnx.json");
-    let model = voices.join("en_US-ryan-high.onnx").display().to_string();
+    assert!(on(path, "piper"));
+}
+
+#[test]
+fn piper_s_voices_are_its_models_with_their_config_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let voices = dir.path().join("it's voices");
+    std::fs::create_dir_all(&voices).unwrap();
+    let touch = |name: &str| std::fs::write(voices.join(name), "").unwrap();
+    for name in [
+        "en_US-ryan-high.onnx",
+        "en_US-ryan-high.onnx.json",
+        "en_GB-alan-low.onnx",
+        "en_GB-alan-low.onnx.json",
+        "de_DE-thorsten.onnx",
+        "fr_FR-siwis.onnx.json",
+    ] {
+        touch(name);
+    }
+    let models = piper_models(&voices);
     assert_eq!(
-        piper(&path, &voices),
+        models,
+        [
+            voices.join("en_GB-alan-low.onnx"),
+            voices.join("en_US-ryan-high.onnx")
+        ]
+    );
+    let model = models[0].display().to_string();
+    assert_eq!(
+        piper_with(&models[0]),
         Some(format!("piper -m {} -f -", remote::quote(&model)))
     );
-    assert_eq!(piper(&path, &dir.path().join("none")), None);
+    assert!(piper_models(&dir.path().join("none")).is_empty());
 }
 
 #[cfg(target_os = "macos")]
