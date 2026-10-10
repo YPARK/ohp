@@ -101,6 +101,17 @@ pub fn run(
     }
 }
 
+/// The last line written to `log`, trimmed, of those `keep` keeps: as most
+/// programs write why they failed last.
+pub fn last_line(log: &std::path::Path, keep: impl Fn(&str) -> bool) -> Option<String> {
+    let text = std::fs::read_to_string(log).ok()?;
+    text.lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && keep(l))
+        .map(str::to_string)
+}
+
 /// Kill every group running, as ohp ends in a hurry. Safe in a signal
 /// handler: it only reads atomics, sleeps and sends signals.
 #[cfg(unix)]

@@ -21,7 +21,11 @@ fn app_with(pdf: &[u8], look: Look) -> (tempfile::TempDir, App) {
 }
 
 fn job(key: Key, look: Look) -> Job {
-    Job { key, look }
+    Job {
+        key,
+        look,
+        lit: None,
+    }
 }
 
 fn press(app: &mut App, keys: &[KeyCode]) {
@@ -602,4 +606,123 @@ fn the_list_is_drawn_over_the_slides() {
     let text = screen(&app);
     assert!(text.contains(" open "));
     assert!(text.contains("deck.pdf"));
+}
+
+#[cfg(feature = "speech")]
+/// An app on a deck whose pages say `texts`, read aloud by `cat` as the
+/// voice and `command` as the player, which gets the text.
+fn speaking(texts: &[&str], command: &str) -> (tempfile::TempDir, App) {
+    let (dir, mut app) = app_with(&fixture::saying(texts), Look::Image);
+    app.speaker = Speaker::new(Some("cat".into()), Some(command.into()));
+    (dir, app)
+}
+
+#[cfg(feature = "speech")]
+/// Keep reading along until `done` holds.
+fn read_until(app: &mut App, done: impl Fn(&App) -> bool) {
+    let start = Instant::now();
+    while !done(app) {
+        assert!(start.elapsed() < Duration::from_secs(10), "reading hung");
+        std::thread::sleep(Duration::from_millis(5));
+        app.read_along();
+    }
+}
+
+#[cfg(feature = "speech")]
+#[test]
+fn s_reads_from_this_slide_to_the_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("read.txt");
+    let (_deck, mut app) = speaking(
+        &["one", "two", "three"],
+        &format!("cat >> '{}'", out.display()),
+    );
+    press(&mut app, &[KeyCode::Char('n'), KeyCode::Char('s')]);
+    read_until(&mut app, |app| app.speaker.page().is_none());
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "two\nthree\n");
+    assert_eq!(app.cur, 2);
+    assert_eq!(app.notice.as_deref(), Some("read to the end"));
+}
+
+#[cfg(feature = "speech")]
+#[test]
+fn s_again_stops_reading() {
+    let (_deck, mut app) = speaking(&["one", "two"], "sleep 30");
+    press(&mut app, &[KeyCode::Char('s')]);
+    assert_eq!(app.speaker.page(), Some(0));
+    press(&mut app, &[KeyCode::Char('s')]);
+    assert_eq!(app.speaker.page(), None);
+    assert_eq!(app.cur, 0);
+}
+
+#[cfg(feature = "speech")]
+#[test]
+fn turning_the_slide_while_reading_reads_that_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("read.txt");
+    let command = format!("cat >> '{}'; sleep 30", out.display());
+    let (_deck, mut app) = speaking(&["one", "two", "three"], &command);
+    press(
+        &mut app,
+        &[KeyCode::Char('s'), KeyCode::Char('n'), KeyCode::Char('n')],
+    );
+    app.read_along();
+    assert_eq!(app.speaker.page(), Some(2));
+    read_until(&mut app, |_| {
+        std::fs::read_to_string(&out).is_ok_and(|t| t.ends_with("three\n"))
+    });
+    assert!(!std::fs::read_to_string(&out).unwrap().contains("two"));
+}
+
+#[cfg(feature = "speech")]
+#[test]
+fn a_reload_while_reading_reads_the_slide_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("read.txt");
+    let command = format!("cat >> '{}'; sleep 30", out.display());
+    let (deck, mut app) = speaking(&["old", "two"], &command);
+    press(&mut app, &[KeyCode::Char('s')]);
+    read_until(&mut app, |_| {
+        std::fs::read_to_string(&out).is_ok_and(|t| t == "old\n")
+    });
+    fixture::write_pdf(deck.path(), &fixture::saying(&["new", "two"]));
+    app.reload();
+    finish(&mut app);
+    assert_eq!(app.speaker.page(), Some(0));
+    read_until(&mut app, |_| {
+        std::fs::read_to_string(&out).is_ok_and(|t| t == "old\nnew\n")
+    });
+}
+
+#[cfg(feature = "speech")]
+#[test]
+fn a_failed_reading_stops_and_says_why() {
+    let (_deck, mut app) = speaking(&["one", "two"], "echo 'no voice' >&2; exit 1");
+    press(&mut app, &[KeyCode::Char('s')]);
+    read_until(&mut app, |app| app.speaker.page().is_none());
+    assert_eq!(app.cur, 0);
+    let notice = app.notice.take().unwrap_or_default();
+    assert!(notice.contains("no voice"), "{notice}");
+}
+
+#[cfg(feature = "speech")]
+#[test]
+fn the_sentence_being_read_is_lit_on_the_slide_read() {
+    let (_deck, mut app) = speaking(
+        &["Only one. Then two.", "next"],
+        "cat > /dev/null; sleep 30",
+    );
+    assert_eq!(app.job(app.presented()).lit, None);
+    press(&mut app, &[KeyCode::Char('s')]);
+    read_until(&mut app, |app| app.lit == Some(0));
+    assert_eq!(app.job(app.presented()).lit, Some(0));
+    let other = Key {
+        page: 1,
+        ..app.presented()
+    };
+    assert_eq!(app.job(other).lit, None);
+    press(&mut app, &[KeyCode::Char('s')]);
+    app.read_along();
+    assert_eq!(app.lit, None);
+    assert_eq!(app.job(app.presented()).lit, None);
 }

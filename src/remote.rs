@@ -294,7 +294,7 @@ fn remote(script: &str) -> String {
     format!("exec sh -c {}", quote(script))
 }
 
-fn quote(s: &str) -> String {
+pub fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 

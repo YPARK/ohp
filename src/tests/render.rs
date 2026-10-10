@@ -56,7 +56,16 @@ fn a_slide_fills_its_cell_box_without_overflowing() {
 
     for (cols, rows) in [(40, 10), (20, 30), (140, 39)] {
         let key = key(1, cols, rows);
-        let image = rasterise(&pdf, &cache, &InterpreterSettings::default(), &picker, key).unwrap();
+        let image = rasterise(
+            &pdf,
+            &cache,
+            &InterpreterSettings::default(),
+            &picker,
+            key,
+            &[],
+            &Kept::default(),
+        )
+        .unwrap();
         let (bw, bh) = (u32::from(cols * font.width), u32::from(rows * font.height));
         assert!(image.width() <= bw && image.height() <= bh, "{cols}x{rows}");
         assert!(
@@ -79,7 +88,9 @@ fn a_page_past_the_end_renders_nothing() {
             &RenderCache::new(),
             &settings,
             &Picker::halfblocks(),
-            key
+            key,
+            &[],
+            &Kept::default()
         )
         .is_none()
     );
@@ -94,6 +105,7 @@ fn job(page: usize, cols: u16, rows: u16, look: Look) -> Job {
     Job {
         key: key(page, cols, rows),
         look,
+        lit: None,
     }
 }
 
@@ -181,6 +193,8 @@ fn zoomed(zoom: Zoom) -> RgbaImage {
         &settings,
         &Picker::halfblocks(),
         key,
+        &[],
+        &Kept::default(),
     )
     .unwrap()
 }
@@ -239,6 +253,8 @@ fn a_zoom_too_large_to_render_is_enlarged_to_fill_the_box() {
         &settings,
         &Picker::halfblocks(),
         key,
+        &[],
+        &Kept::default(),
     )
     .unwrap();
     assert_eq!(image.dimensions(), (1400, 780));
@@ -261,6 +277,7 @@ fn a_zoomed_text_job_shows_the_part_panned_to() {
         renderer.push([Job {
             key,
             look: Look::Text,
+            lit: None,
         }]);
         let Some(Slide::Text { cells, backdrop }) = fixture::next(&renderer).slide else {
             panic!("no text slide");
@@ -276,4 +293,64 @@ fn a_zoomed_text_job_shows_the_part_panned_to() {
     };
     assert_eq!(text(0), "Hello");
     assert_eq!(text(60), "");
+}
+
+#[test]
+fn a_slide_lit_again_is_lit_on_the_page_kept_unlit() {
+    let dir = tempfile::tempdir().unwrap();
+    let deck = Deck::open(&fixture::write(dir.path(), 2)).unwrap();
+    let pdf = Pdf::new(deck.data.clone()).unwrap();
+    let (cache, settings, picker) = (
+        RenderCache::new(),
+        InterpreterSettings::default(),
+        Picker::halfblocks(),
+    );
+    let key = key(1, 40, 10);
+    let lit = |boxes: &[kurbo::Rect], kept: &Kept| {
+        rasterise(&pdf, &cache, &settings, &picker, key, boxes, kept).unwrap()
+    };
+    let (first, second) = (
+        [kurbo::Rect::new(0., 0., 50., 50.)],
+        [kurbo::Rect::new(100., 100., 150., 150.)],
+    );
+    let kept = Kept::default();
+    // Slides drawn with nothing lit, as those either side, are not kept.
+    let unlit = lit(&[], &kept);
+    assert!(kept.lock().unwrap().is_none());
+    lit(&first, &kept);
+    assert!(
+        (kept.lock().unwrap().as_ref())
+            .is_some_and(|((page, ..), image)| *page == 1 && **image == unlit)
+    );
+    assert_eq!(lit(&second, &kept), lit(&second, &Kept::default()));
+}
+
+#[test]
+fn a_zoomed_slide_panned_is_lit_on_the_page_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let deck = Deck::open(&fixture::write(dir.path(), 2)).unwrap();
+    let pdf = Pdf::new(deck.data.clone()).unwrap();
+    let (cache, settings, picker) = (
+        RenderCache::new(),
+        InterpreterSettings::default(),
+        Picker::halfblocks(),
+    );
+    let at = |y| Key {
+        zoom: Zoom {
+            percent: 200,
+            x: 0,
+            y,
+        },
+        ..key(1, 40, 10)
+    };
+    let boxes = [kurbo::Rect::new(0., 100., 200., 200.)];
+    let lit =
+        |key, kept: &Kept| rasterise(&pdf, &cache, &settings, &picker, key, &boxes, kept).unwrap();
+    let kept = Kept::default();
+    lit(at(0), &kept);
+    let page = kept.lock().unwrap().as_ref().unwrap().1.clone();
+    let panned = lit(at(10), &kept);
+    let same = kept.lock().unwrap().as_ref().unwrap().1.clone();
+    assert!(Arc::ptr_eq(&page, &same), "the page was drawn again");
+    assert_eq!(panned, lit(at(10), &Kept::default()));
 }

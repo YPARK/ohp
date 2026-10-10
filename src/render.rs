@@ -12,6 +12,7 @@ use hayro::hayro_interpret::{InterpreterCache, InterpreterSettings};
 use hayro::hayro_syntax::Pdf;
 use hayro::hayro_syntax::page::Page;
 use hayro::vello_cpu::color::palette::css::WHITE;
+use hayro::vello_cpu::kurbo;
 use hayro::{RenderCache, RenderSettings};
 use image::imageops::{self, FilterType};
 use image::{DynamicImage, RgbaImage};
@@ -226,6 +227,8 @@ pub enum Look {
 pub struct Job {
     pub key: Key,
     pub look: Look,
+    /// The sentence being read aloud, lit on the slide.
+    pub lit: Option<usize>,
 }
 
 pub enum Slide {
@@ -252,6 +255,11 @@ struct Jobs {
 
 type Queue = Arc<(Mutex<Jobs>, Condvar)>;
 
+/// A page drawn unlit, with its number and the pixels a point it was drawn
+/// at, so the next sentence read aloud is lit on it without drawing the
+/// page again. The workers share it, as any of them may take that sentence.
+type Kept = Mutex<Option<((usize, f32, f32), Arc<RgbaImage>)>>;
+
 /// Workers for one version of the deck; dropping it stops them.
 pub struct Renderer {
     queue: Queue,
@@ -269,13 +277,19 @@ impl Drop for Renderer {
 impl Renderer {
     pub fn spawn(deck: &Deck, picker: &Picker, workers: usize) -> anyhow::Result<Self> {
         let queue: Queue = Arc::default();
+        let kept: Arc<Kept> = Arc::default();
         let (tx, rx) = channel();
         for _ in 0..workers.max(1) {
-            let (data, queue, tx, picker) =
-                (deck.data.clone(), queue.clone(), tx.clone(), picker.clone());
+            let (data, queue, kept, tx, picker) = (
+                deck.data.clone(),
+                queue.clone(),
+                kept.clone(),
+                tx.clone(),
+                picker.clone(),
+            );
             std::thread::Builder::new()
                 .name(THREAD.into())
-                .spawn(move || work(data, &picker, &queue, &tx))?;
+                .spawn(move || work(data, &picker, &queue, &kept, &tx))?;
         }
         Ok(Renderer { queue, done: rx })
     }
@@ -297,13 +311,16 @@ impl Renderer {
     }
 }
 
-fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, tx: &Sender<Done>) {
+fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, kept: &Kept, tx: &Sender<Done>) {
     let Ok(pdf) = Pdf::new(data) else {
         return;
     };
     let cache = RenderCache::new();
     let fonts = InterpreterCache::new();
     let settings = InterpreterSettings::default();
+    // The text of the page last asked for, kept as each sentence read aloud
+    // asks for the page again.
+    let mut text: Option<(usize, text::Page)> = None;
     let (lock, cvar) = &**queue;
     loop {
         let job = {
@@ -320,12 +337,23 @@ fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, tx: &Sender<Done>) {
         };
         let slide = caught(|| match job.look {
             Look::Image => {
-                let image = rasterise(&pdf, &cache, &settings, picker, job.key)?;
+                // Where the sentence read aloud is, in page points.
+                let lit = job
+                    .lit
+                    .and_then(|k| {
+                        let page = text_of(&mut text, &pdf, job.key.page, &fonts, &settings)?;
+                        Some(page.light(k).boxes)
+                    })
+                    .unwrap_or_default();
+                let image = rasterise(&pdf, &cache, &settings, picker, job.key, &lit, kept)?;
                 let image = DynamicImage::ImageRgba8(image);
                 let proto = picker.new_protocol(image, job.key.size(), Resize::Fit(None));
                 proto.ok().map(Slide::Image)
             }
-            Look::Text => read(&pdf, &cache, &fonts, &settings, picker, job.key),
+            Look::Text => {
+                let page = text_of(&mut text, &pdf, job.key.page, &fonts, &settings)?;
+                read(&pdf, &cache, page, &settings, picker, job, kept)
+            }
         });
         if tx.send(Done { job, slide }).is_err() {
             return;
@@ -333,17 +361,35 @@ fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, tx: &Sender<Done>) {
     }
 }
 
+/// The text of `page`, from `last` if it is that page's, else extracted
+/// and kept there.
+fn text_of<'p, 'a>(
+    last: &'p mut Option<(usize, text::Page)>,
+    pdf: &'a Pdf,
+    page: usize,
+    fonts: &InterpreterCache<'a>,
+    settings: &InterpreterSettings,
+) -> Option<&'p mut text::Page> {
+    if last.as_ref().is_none_or(|(at, _)| *at != page) {
+        *last = Some((page, text::extract(pdf, page, fonts, settings)?));
+    }
+    last.as_mut().map(|(_, text)| text)
+}
+
 /// The slide's text set over a coarse image of it, in coloured half-block
 /// cells, which any terminal shows. Zoomed, the text is set on a grid as
-/// much larger, and the box shows part of it.
+/// much larger, and the box shows part of it. The sentence being read
+/// aloud is lit.
 fn read<'a>(
     pdf: &'a Pdf,
     cache: &RenderCache<'a>,
-    fonts: &InterpreterCache<'a>,
+    text: &mut text::Page,
     settings: &InterpreterSettings,
     picker: &Picker,
-    key: Key,
+    job: Job,
+    kept: &Kept,
 ) -> Option<Slide> {
+    let key = job.key;
     let page = pdf.pages().get(key.page)?;
     let (w, h) = page.render_dimensions();
     let font = picker.font_size();
@@ -363,9 +409,18 @@ fn read<'a>(
     // Four pixels a half-block each way, so glyphs are painted out finely.
     let x_scale = 4. * f32::from(size.width) / w;
     let y_scale = 8. * f32::from(size.height) / h;
-    let mut image = raster(page, cache, settings, x_scale, y_scale)?;
-    let mut text = text::extract(pdf, key.page, fonts, settings)?;
-    let cells = text.set_over(&mut image, size.width, size.height);
+    let lit = job.lit.map(|k| text.light(k).glyphs).unwrap_or_default();
+    let image = unlit(
+        kept,
+        key.page,
+        page,
+        cache,
+        settings,
+        (x_scale, y_scale),
+        lit.contains(&true),
+    )?;
+    let mut image = Arc::unwrap_or_clone(image);
+    let cells = text.set_over(&mut image, size.width, size.height, &lit);
 
     let shown = Size::new(size.width.min(key.cols), size.height.min(key.rows));
     let x = key.zoom.x.min(size.width - shown.width);
@@ -386,7 +441,7 @@ fn read<'a>(
 }
 
 /// `f`'s result, or `None` if it panics: hayro does on some malformed PDFs.
-fn caught<T>(f: impl FnOnce() -> Option<T>) -> Option<T> {
+pub fn caught<T>(f: impl FnOnce() -> Option<T>) -> Option<T> {
     panic::catch_unwind(AssertUnwindSafe(f)).ok().flatten()
 }
 
@@ -398,24 +453,41 @@ fn fit(key: Key, font: (f32, f32), page: (f32, f32)) -> f32 {
 }
 
 /// Page `key.page` as large as fits the pixels behind `key`'s cells, on
-/// white; when zoomed, the part of it enlarged that the box shows.
+/// white, `lit` lit; when zoomed, the part of it enlarged that the box
+/// shows.
 fn rasterise<'a>(
     pdf: &'a Pdf,
     cache: &RenderCache<'a>,
     settings: &InterpreterSettings,
     picker: &Picker,
     key: Key,
+    lit: &[kurbo::Rect],
+    kept: &Kept,
 ) -> Option<RgbaImage> {
     let page = pdf.pages().get(key.page)?;
     let font = picker.font_size();
     let (fw, fh) = (f32::from(font.width), f32::from(font.height));
     let (w, h) = page.render_dimensions();
     let scale = fit(key, (fw, fh), (w, h)) * key.zoom.scale();
+    let drawn = if key.zoom == Zoom::FIT {
+        scale
+    } else {
+        scale.min((MAX_PIXELS / (w * h)).sqrt())
+    };
+    let whole = unlit(
+        kept,
+        key.page,
+        page,
+        cache,
+        settings,
+        (drawn, drawn),
+        !lit.is_empty(),
+    )?;
     if key.zoom == Zoom::FIT {
-        return raster(page, cache, settings, scale, scale);
+        let mut image = Arc::unwrap_or_clone(whole);
+        light(&mut image, lit, drawn, (0, 0));
+        return Some(image);
     }
-    let drawn = scale.min((MAX_PIXELS / (w * h)).sqrt());
-    let image = raster(page, cache, settings, drawn, drawn)?;
     // The box, in the pixels drawn.
     let k = drawn / scale;
     let (bw, bh) = (f32::from(key.cols) * fw * k, f32::from(key.rows) * fh * k);
@@ -427,9 +499,11 @@ fn rasterise<'a>(
         let len = (len as u32).clamp(1, max);
         ((at as u32).min(max - len), len)
     };
-    let (x, cw) = cut(x, bw, image.width());
-    let (y, ch) = cut(y, bh, image.height());
-    let part = imageops::crop_imm(&image, x, y, cw, ch).to_image();
+    let (x, cw) = cut(x, bw, whole.width());
+    let (y, ch) = cut(y, bh, whole.height());
+    // Only the part shown is copied and lit, not the whole page drawn.
+    let mut part = imageops::crop_imm(&*whole, x, y, cw, ch).to_image();
+    light(&mut part, lit, drawn, (x, y));
     if k >= 1. {
         return Some(part);
     }
@@ -440,6 +514,33 @@ fn rasterise<'a>(
     Some(imageops::resize(&part, ow, oh, FilterType::Triangle))
 }
 
+/// Page number `n`, `page`, drawn unlit as `raster` draws it at `scale`
+/// pixels a point, x and y: the one kept if it was drawn so, else drawn,
+/// and kept if a sentence is `lit` on it.
+fn unlit<'a>(
+    kept: &Kept,
+    n: usize,
+    page: &'a Page<'a>,
+    cache: &RenderCache<'a>,
+    settings: &InterpreterSettings,
+    scale: (f32, f32),
+    lit: bool,
+) -> Option<Arc<RgbaImage>> {
+    let at = (n, scale.0, scale.1);
+    let hit = (kept.lock().expect("kept page").as_ref())
+        .filter(|(drawn, _)| *drawn == at)
+        .map(|(_, image)| image.clone());
+    if hit.is_some() {
+        return hit;
+    }
+    let image = Arc::new(raster(page, cache, settings, scale.0, scale.1)?);
+    if lit {
+        *kept.lock().expect("kept page") = Some((at, image.clone()));
+    }
+    Some(image)
+}
+
+/// The page drawn `x_scale` and `y_scale` pixels a point, on white.
 fn raster<'a>(
     page: &'a Page<'a>,
     cache: &RenderCache<'a>,
@@ -465,6 +566,30 @@ fn raster<'a>(
         pixmap.height().into(),
         pixmap.data_as_u8_slice().to_vec(),
     )
+}
+
+/// Light the boxes in `lit`, in page points, on `image`: the part from
+/// pixel `at` of the page drawn `scale` pixels a point. The light
+/// multiplies what is there, so text stays as dark as it was.
+fn light(image: &mut RgbaImage, lit: &[kurbo::Rect], scale: f32, at: (u32, u32)) {
+    let (w, h) = image.dimensions();
+    let px = |v: f64, from: u32, max: u32| {
+        ((v * f64::from(scale)).max(0.) as u32)
+            .saturating_sub(from)
+            .min(max)
+    };
+    for r in lit {
+        let (x0, x1) = (px(r.x0, at.0, w), px(r.x1, at.0, w));
+        let (y0, y1) = (px(r.y0, at.1, h), px(r.y1, at.1, h));
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let p = image.get_pixel_mut(x, y);
+                for (c, l) in p.0.iter_mut().zip(text::LIGHT) {
+                    *c = (u16::from(*c) * u16::from(l) / 255) as u8;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

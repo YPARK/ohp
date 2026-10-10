@@ -44,6 +44,27 @@ fn front_matter_gives_the_title_and_whether_it_is_slides() {
 }
 
 #[test]
+fn toml_front_matter_gives_the_title_and_date_and_is_not_shown() {
+    let (front, body) = front_matter(
+        "+++\ntitle = \"Notes\"\ndate = 2024-09-30\ndraft = true\n[taxonomies]\ntitle = \"no\"\n+++\nbody\n",
+    );
+    assert_eq!(front.title.as_deref(), Some("Notes"));
+    assert_eq!(front.date.as_deref(), Some("2024-09-30"));
+    assert_eq!(body, "body\n");
+    // Not closed: not front matter.
+    let (front, body) = front_matter("+++\ntitle = \"x\"\n");
+    assert!(front.title.is_none() && body.starts_with("+++"));
+    // Comments after a value are not part of it.
+    let (front, _) = front_matter(
+        "+++\ntitle = \"Say \\\"hi\\\" # now\" # draft\ndate = 2024-09-30 # day\n+++\n",
+    );
+    assert_eq!(front.title.as_deref(), Some("Say \\\"hi\\\" # now"));
+    assert_eq!(front.date.as_deref(), Some("2024-09-30"));
+    let (front, _) = front_matter("+++\ntitle = 'C:\\dir' # path\n+++\n");
+    assert_eq!(front.title.as_deref(), Some("C:\\dir"));
+}
+
+#[test]
 fn the_slide_level_is_the_highest_heading_followed_by_content() {
     let events: Vec<Event> = Parser::new("# Part\n## Slide\ntext\n## Next\n### Sub\nx\n").collect();
     assert_eq!(slide_level(&events), Some(2));

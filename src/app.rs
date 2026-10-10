@@ -16,10 +16,15 @@
 //! Ctrl-O picks another file to present, in a list over the slides. It is
 //! read off the UI thread as a reload is, and the slides it replaces stay
 //! until it is.
+//!
+//! `s` reads the slides aloud, from the current one on, turning to each next
+//! one as the last is read, until the end or `s` again. Turning to another
+//! slide while reading reads that one.
 
 use crate::browse::{self, Browser};
 use crate::remote::Link;
 use crate::render::{self, Deck, Done, Job, Key, Look, Options, Renderer, Slide, Stamp, Zoom};
+use crate::speak::{self, Speaker};
 use crate::text;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect, Size};
@@ -58,11 +63,13 @@ const WATCH_EVERY: Duration = Duration::from_millis(250);
 /// machine.
 /// `local` is how files picked with Ctrl-O, which are here, are read.
 /// `signaled` is set when a signal asks ohp to stop.
+/// `speaker` reads the slides aloud.
 pub fn run(
     deck: Deck,
     text: bool,
     link: Option<Link>,
     local: Options,
+    speaker: Speaker,
     signaled: Arc<AtomicUsize>,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
@@ -80,6 +87,7 @@ pub fn run(
         app.notice = app.deck.note.clone();
         app.link = link;
         app.local = local;
+        app.speaker = speaker;
         app.run(&mut terminal)?;
         app.clear_images()
     })();
@@ -107,12 +115,13 @@ fn over_ssh() -> bool {
         .any(|v| std::env::var_os(v).is_some())
 }
 
-/// A slide hayro cannot render shows as failed; its panic must not reach
-/// ratatui's hook, which would tear down the terminal.
+/// A slide hayro cannot render or read aloud shows as failed; its panic
+/// must not reach ratatui's hook, which would tear down the terminal.
 fn quiet_render_panics() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if std::thread::current().name() != Some(render::THREAD) {
+        let thread = std::thread::current();
+        if !matches!(thread.name(), Some(render::THREAD | speak::THREAD)) {
             prev(info);
         }
     }));
@@ -189,6 +198,10 @@ struct App {
     link: Option<Link>,
     /// What is wrong with `link`, shown in the status line until it is not.
     trouble: Option<String>,
+    speaker: Speaker,
+    /// The sentence being read aloud, lit on the slide, as last seen: the
+    /// speaker moves on under the screen, and a frame's jobs must agree.
+    lit: Option<usize>,
     dirty: bool,
     quit: bool,
 }
@@ -230,6 +243,8 @@ impl App {
             notice: None,
             link: None,
             trouble: None,
+            speaker: Speaker::new(None, None),
+            lit: None,
             dirty: true,
             quit: false,
         }
@@ -263,6 +278,7 @@ impl App {
             }
             self.watch();
             self.loaded();
+            self.read_along();
             if self.signaled.load(Ordering::Relaxed) != 0 {
                 self.quit = true;
             }
@@ -391,6 +407,7 @@ impl App {
         match fresh {
             Ok((deck, renderer)) => {
                 if opening.is_some() {
+                    self.speaker.stop();
                     self.stamp = render::stamp(&deck.path);
                     self.settling = None;
                     // Slides of another file: not to be shown for this one.
@@ -415,6 +432,10 @@ impl App {
                 self.renderer = renderer;
                 self.requested.clear();
                 self.stale = std::mem::take(&mut self.slides);
+                // The slide being read is read again from what it says now.
+                if self.speaker.reading() {
+                    self.speak();
+                }
             }
             Err(e) => {
                 self.notice = Some(match opening {
@@ -429,6 +450,43 @@ impl App {
             Some(Then::Reload) => self.reload(),
             None => {}
         }
+    }
+
+    /// Read the current slide aloud, in place of any being read.
+    fn speak(&mut self) {
+        if let Err(e) = self.speaker.read(self.deck.data.clone(), self.cur) {
+            self.notice = Some(e);
+        }
+        // The sentence lit was the last reading's, not one of this slide's.
+        self.lit = None;
+        self.dirty = true;
+    }
+
+    /// Keep reading aloud: the slide turned to, or the next once one is
+    /// read; and light the sentence being read.
+    fn read_along(&mut self) {
+        let lit = self.speaker.sentence();
+        if lit != self.lit {
+            self.lit = lit;
+            self.dirty = true;
+        }
+        let Some(page) = self.speaker.page() else {
+            return;
+        };
+        if page != self.cur {
+            self.speak();
+            return;
+        }
+        match self.speaker.ended() {
+            None => return,
+            Some(Ok(())) if self.cur + 1 < self.deck.pages => {
+                self.cur += 1;
+                self.speak();
+            }
+            Some(Ok(())) => self.notice = Some("read to the end".into()),
+            Some(Err(e)) => self.notice = Some(e),
+        }
+        self.dirty = true;
     }
 
     /// Stop a reload under way and wait for it, so a knitr run it started
@@ -500,6 +558,8 @@ impl App {
             KeyCode::Char('0') if self.view == View::Present => self.zoom = Zoom::FIT,
             // Even unchanged: a chunk may read files ohp does not watch.
             KeyCode::Char('r') => self.reload(),
+            KeyCode::Char('s') if self.speaker.reading() => self.speaker.stop(),
+            KeyCode::Char('s') => self.speak(),
             _ => return,
         }
         self.dirty = true;
@@ -668,10 +728,16 @@ impl App {
         }
     }
 
+    /// The job that draws `key`: the presented slide being read aloud has
+    /// the sentence being read lit.
     fn job(&self, key: Key) -> Job {
+        let reading = self.view == View::Present
+            && key == self.presented()
+            && self.speaker.page() == Some(key.page);
         Job {
             key,
             look: self.look,
+            lit: self.lit.filter(|_| reading),
         }
     }
 
@@ -702,7 +768,7 @@ impl App {
         }
         self.renderer.push(jobs);
 
-        let (cur, zoom, shown) = (self.cur, self.zoom, self.shown.get());
+        let (cur, zoom, shown, lit) = (self.cur, self.zoom, self.shown.get(), self.lit);
         let full = area.as_size();
         let grid = self.grid();
         let slot = Rect::new(0, 0, grid.slot.width, grid.slot.height);
@@ -712,7 +778,8 @@ impl App {
             let key = job.key;
             if key.size() == full {
                 let kept = key.zoom == zoom || key.zoom == Zoom::FIT || Some(*job) == shown;
-                key.page.abs_diff(cur) <= KEEP && kept
+                let lighting = job.lit.is_none() || job.lit == lit || Some(*job) == shown;
+                key.page.abs_diff(cur) <= KEEP && kept && lighting
             } else {
                 key.size() == thumb
             }
@@ -764,11 +831,17 @@ impl App {
             ..job
         };
         let same = |other: &Job| other.key.page == job.key.page && other.look == job.look;
-        let found = [Some(job), self.shown.get().filter(same), Some(fitted)]
-            .into_iter()
-            .flatten()
-            .filter(|j| j.key.size() == job.key.size())
-            .find_map(|j| Some((j, self.slides.get(&j).or_else(|| self.stale.get(&j))?)));
+        let unlit = Job { lit: None, ..job };
+        let found = [
+            Some(job),
+            self.shown.get().filter(same),
+            Some(fitted),
+            Some(unlit),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|j| j.key.size() == job.key.size())
+        .find_map(|j| Some((j, self.slides.get(&j).or_else(|| self.stale.get(&j))?)));
         match found.map(|(_, slide)| slide) {
             Some(Some(Slide::Image(proto))) => {
                 f.render_widget(Image::new(proto), centred(area, proto.size()));
@@ -812,20 +885,25 @@ impl App {
         let (view, keys) = match self.view {
             View::Present if self.zoomed() => (
                 zoom.as_str(),
-                "arrows pan · +/- zoom · 0 fit · n/p next/prev · t text · r reload · ^O open · q quit",
+                "arrows pan · +/- zoom · 0 fit · n/p next/prev · t text · s speak · r reload · ^O open · q quit",
             ),
             View::Present => (
                 "present",
-                "n/p ←/→ next/prev · +/- zoom · g grid · t text · r reload · ^O open · q quit",
+                "n/p ←/→ next/prev · +/- zoom · g grid · t text · s speak · r reload · ^O open · q quit",
             ),
             View::Grid => (
                 "grid",
-                "n/p arrows move · +/- zoom · g/enter present · t text · r reload · ^O open · q quit",
+                "n/p arrows move · +/- zoom · g/enter present · t text · s speak · r reload · ^O open · q quit",
             ),
         };
         let look = match self.look {
             Look::Image => "",
             Look::Text => " · text",
+        };
+        let speaking = if self.speaker.reading() {
+            " · speaking"
+        } else {
+            ""
         };
         let mut spans = vec![
             Span::styled(
@@ -833,7 +911,7 @@ impl App {
                 Style::new().add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(" {}/{} ", self.cur + 1, self.deck.pages)),
-            Span::styled(format!(" {view}{look}"), dim),
+            Span::styled(format!(" {view}{look}{speaking}"), dim),
         ];
         let waiting = self
             .visible()
