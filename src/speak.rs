@@ -235,7 +235,7 @@ impl Speaker {
                     let _ = before.join();
                 }
                 // Nothing to do if the app is gone.
-                let _ = tx.send(reader.read(&data, page));
+                let _ = tx.send(reader.read(data, page));
             })
             .map_err(|e| format!("cannot read aloud: {e}"))?;
         self.reading = Some(Reading {
@@ -294,12 +294,12 @@ impl Reader {
     /// Read `page` of `data` aloud, a sentence at a time, each voiced while
     /// the one before plays, until it is read or `stop` is set. A slide with
     /// no text is read at once.
-    fn read(&self, data: &Arc<Vec<u8>>, page: usize) -> Result<(), String> {
+    fn read(&self, data: Arc<Vec<u8>>, page: usize) -> Result<(), String> {
         // Stopped while the reader before it ended, as slides turned fast.
         if self.stop.load(Ordering::Relaxed) {
             return Ok(());
         }
-        let said = words(data.clone(), page)?;
+        let said = words(data, page)?;
         let sentences: Vec<&String> = said
             .iter()
             .filter_map(|s| match s {

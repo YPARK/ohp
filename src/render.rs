@@ -255,6 +255,11 @@ struct Jobs {
 
 type Queue = Arc<(Mutex<Jobs>, Condvar)>;
 
+/// A page drawn unlit, with its number and the pixels a point it was drawn
+/// at, so the next sentence read aloud is lit on it without drawing the
+/// page again. The workers share it, as any of them may take that sentence.
+type Kept = Mutex<Option<((usize, f32, f32), Arc<RgbaImage>)>>;
+
 /// Workers for one version of the deck; dropping it stops them.
 pub struct Renderer {
     queue: Queue,
@@ -272,13 +277,19 @@ impl Drop for Renderer {
 impl Renderer {
     pub fn spawn(deck: &Deck, picker: &Picker, workers: usize) -> anyhow::Result<Self> {
         let queue: Queue = Arc::default();
+        let kept: Arc<Kept> = Arc::default();
         let (tx, rx) = channel();
         for _ in 0..workers.max(1) {
-            let (data, queue, tx, picker) =
-                (deck.data.clone(), queue.clone(), tx.clone(), picker.clone());
+            let (data, queue, kept, tx, picker) = (
+                deck.data.clone(),
+                queue.clone(),
+                kept.clone(),
+                tx.clone(),
+                picker.clone(),
+            );
             std::thread::Builder::new()
                 .name(THREAD.into())
-                .spawn(move || work(data, &picker, &queue, &tx))?;
+                .spawn(move || work(data, &picker, &queue, &kept, &tx))?;
         }
         Ok(Renderer { queue, done: rx })
     }
@@ -300,7 +311,7 @@ impl Renderer {
     }
 }
 
-fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, tx: &Sender<Done>) {
+fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, kept: &Kept, tx: &Sender<Done>) {
     let Ok(pdf) = Pdf::new(data) else {
         return;
     };
@@ -310,9 +321,6 @@ fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, tx: &Sender<Done>) {
     // The text of the page last asked for, kept as each sentence read aloud
     // asks for the page again.
     let mut text: Option<(usize, text::Page)> = None;
-    // The slide last drawn with a sentence lit, unlit, so the next sentence
-    // is lit on it without drawing the page again.
-    let mut drawn: Option<(Key, RgbaImage)> = None;
     let (lock, cvar) = &**queue;
     loop {
         let job = {
@@ -337,14 +345,14 @@ fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, tx: &Sender<Done>) {
                         Some(page.light(k).boxes)
                     })
                     .unwrap_or_default();
-                let image = rasterise(&pdf, &cache, &settings, picker, job.key, &lit, &mut drawn)?;
+                let image = rasterise(&pdf, &cache, &settings, picker, job.key, &lit, kept)?;
                 let image = DynamicImage::ImageRgba8(image);
                 let proto = picker.new_protocol(image, job.key.size(), Resize::Fit(None));
                 proto.ok().map(Slide::Image)
             }
             Look::Text => {
                 let page = text_of(&mut text, &pdf, job.key.page, &fonts, &settings)?;
-                read(&pdf, &cache, page, &settings, picker, job)
+                read(&pdf, &cache, page, &settings, picker, job, kept)
             }
         });
         if tx.send(Done { job, slide }).is_err() {
@@ -379,6 +387,7 @@ fn read<'a>(
     settings: &InterpreterSettings,
     picker: &Picker,
     job: Job,
+    kept: &Kept,
 ) -> Option<Slide> {
     let key = job.key;
     let page = pdf.pages().get(key.page)?;
@@ -400,8 +409,17 @@ fn read<'a>(
     // Four pixels a half-block each way, so glyphs are painted out finely.
     let x_scale = 4. * f32::from(size.width) / w;
     let y_scale = 8. * f32::from(size.height) / h;
-    let mut image = raster(page, cache, settings, x_scale, y_scale)?;
     let lit = job.lit.map(|k| text.light(k).glyphs).unwrap_or_default();
+    let image = unlit(
+        kept,
+        key.page,
+        page,
+        cache,
+        settings,
+        (x_scale, y_scale),
+        lit.contains(&true),
+    )?;
+    let mut image = Arc::unwrap_or_clone(image);
     let cells = text.set_over(&mut image, size.width, size.height, &lit);
 
     let shown = Size::new(size.width.min(key.cols), size.height.min(key.rows));
@@ -444,7 +462,7 @@ fn rasterise<'a>(
     picker: &Picker,
     key: Key,
     lit: &[kurbo::Rect],
-    kept: &mut Option<(Key, RgbaImage)>,
+    kept: &Kept,
 ) -> Option<RgbaImage> {
     let page = pdf.pages().get(key.page)?;
     let font = picker.font_size();
@@ -456,18 +474,18 @@ fn rasterise<'a>(
     } else {
         scale.min((MAX_PIXELS / (w * h)).sqrt())
     };
-    let mut image = match kept {
-        Some((at, image)) if *at == key => image.clone(),
-        _ => {
-            let image = raster(page, cache, settings, drawn, drawn)?;
-            if !lit.is_empty() {
-                *kept = Some((key, image.clone()));
-            }
-            image
-        }
-    };
-    light(&mut image, lit, drawn, drawn);
+    let whole = unlit(
+        kept,
+        key.page,
+        page,
+        cache,
+        settings,
+        (drawn, drawn),
+        !lit.is_empty(),
+    )?;
     if key.zoom == Zoom::FIT {
+        let mut image = Arc::unwrap_or_clone(whole);
+        light(&mut image, lit, drawn, (0, 0));
         return Some(image);
     }
     // The box, in the pixels drawn.
@@ -481,9 +499,11 @@ fn rasterise<'a>(
         let len = (len as u32).clamp(1, max);
         ((at as u32).min(max - len), len)
     };
-    let (x, cw) = cut(x, bw, image.width());
-    let (y, ch) = cut(y, bh, image.height());
-    let part = imageops::crop_imm(&image, x, y, cw, ch).to_image();
+    let (x, cw) = cut(x, bw, whole.width());
+    let (y, ch) = cut(y, bh, whole.height());
+    // Only the part shown is copied and lit, not the whole page drawn.
+    let mut part = imageops::crop_imm(&*whole, x, y, cw, ch).to_image();
+    light(&mut part, lit, drawn, (x, y));
     if k >= 1. {
         return Some(part);
     }
@@ -492,6 +512,32 @@ fn rasterise<'a>(
         (ch as f32 / k).round() as u32,
     );
     Some(imageops::resize(&part, ow, oh, FilterType::Triangle))
+}
+
+/// Page number `n`, `page`, drawn unlit as `raster` draws it at `scale`
+/// pixels a point, x and y: the one kept if it was drawn so, else drawn,
+/// and kept if a sentence is `lit` on it.
+fn unlit<'a>(
+    kept: &Kept,
+    n: usize,
+    page: &'a Page<'a>,
+    cache: &RenderCache<'a>,
+    settings: &InterpreterSettings,
+    scale: (f32, f32),
+    lit: bool,
+) -> Option<Arc<RgbaImage>> {
+    let at = (n, scale.0, scale.1);
+    let hit = (kept.lock().expect("kept page").as_ref())
+        .filter(|(drawn, _)| *drawn == at)
+        .map(|(_, image)| image.clone());
+    if hit.is_some() {
+        return hit;
+    }
+    let image = Arc::new(raster(page, cache, settings, scale.0, scale.1)?);
+    if lit {
+        *kept.lock().expect("kept page") = Some((at, image.clone()));
+    }
+    Some(image)
 }
 
 /// The page drawn `x_scale` and `y_scale` pixels a point, on white.
@@ -522,15 +568,19 @@ fn raster<'a>(
     )
 }
 
-/// Light the boxes in `lit`, in page points, on `image`, drawn `x_scale`
-/// and `y_scale` pixels a point. The light multiplies what is there, so
-/// text stays as dark as it was.
-fn light(image: &mut RgbaImage, lit: &[kurbo::Rect], x_scale: f32, y_scale: f32) {
+/// Light the boxes in `lit`, in page points, on `image`: the part from
+/// pixel `at` of the page drawn `scale` pixels a point. The light
+/// multiplies what is there, so text stays as dark as it was.
+fn light(image: &mut RgbaImage, lit: &[kurbo::Rect], scale: f32, at: (u32, u32)) {
     let (w, h) = image.dimensions();
-    let px = |v: f64, scale: f32, max: u32| ((v * f64::from(scale)).max(0.) as u32).min(max);
+    let px = |v: f64, from: u32, max: u32| {
+        ((v * f64::from(scale)).max(0.) as u32)
+            .saturating_sub(from)
+            .min(max)
+    };
     for r in lit {
-        let (x0, x1) = (px(r.x0, x_scale, w), px(r.x1, x_scale, w));
-        let (y0, y1) = (px(r.y0, y_scale, h), px(r.y1, y_scale, h));
+        let (x0, x1) = (px(r.x0, at.0, w), px(r.x1, at.0, w));
+        let (y0, y1) = (px(r.y0, at.1, h), px(r.y1, at.1, h));
         for y in y0..y1 {
             for x in x0..x1 {
                 let p = image.get_pixel_mut(x, y);
