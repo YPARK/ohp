@@ -190,7 +190,7 @@ fn speaker(args: &Args) -> speak::Speaker {
 
 #[cfg(not(feature = "speech"))]
 fn speaker(_: &Args) -> speak::Speaker {
-    speak::Speaker::new(speak::voice(None), speak::player(None))
+    speak::Speaker::new(None, None)
 }
 
 #[cfg(feature = "markdown")]

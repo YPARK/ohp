@@ -63,6 +63,7 @@ fn a_slide_fills_its_cell_box_without_overflowing() {
             &picker,
             key,
             &[],
+            &mut None,
         )
         .unwrap();
         let (bw, bh) = (u32::from(cols * font.width), u32::from(rows * font.height));
@@ -88,7 +89,8 @@ fn a_page_past_the_end_renders_nothing() {
             &settings,
             &Picker::halfblocks(),
             key,
-            &[]
+            &[],
+            &mut None
         )
         .is_none()
     );
@@ -192,6 +194,7 @@ fn zoomed(zoom: Zoom) -> RgbaImage {
         &Picker::halfblocks(),
         key,
         &[],
+        &mut None,
     )
     .unwrap()
 }
@@ -251,6 +254,7 @@ fn a_zoom_too_large_to_render_is_enlarged_to_fill_the_box() {
         &Picker::halfblocks(),
         key,
         &[],
+        &mut None,
     )
     .unwrap();
     assert_eq!(image.dimensions(), (1400, 780));
@@ -289,4 +293,28 @@ fn a_zoomed_text_job_shows_the_part_panned_to() {
     };
     assert_eq!(text(0), "Hello");
     assert_eq!(text(60), "");
+}
+
+#[test]
+fn a_slide_lit_again_is_lit_on_the_page_kept_unlit() {
+    let dir = tempfile::tempdir().unwrap();
+    let deck = Deck::open(&fixture::write(dir.path(), 2)).unwrap();
+    let pdf = Pdf::new(deck.data.clone()).unwrap();
+    let (cache, settings, picker) = (
+        RenderCache::new(),
+        InterpreterSettings::default(),
+        Picker::halfblocks(),
+    );
+    let key = key(1, 40, 10);
+    let lit = |boxes: &[kurbo::Rect], kept: &mut Option<(Key, RgbaImage)>| {
+        rasterise(&pdf, &cache, &settings, &picker, key, boxes, kept).unwrap()
+    };
+    let (first, second) = (
+        [kurbo::Rect::new(0., 0., 50., 50.)],
+        [kurbo::Rect::new(100., 100., 150., 150.)],
+    );
+    let mut kept = None;
+    lit(&first, &mut kept);
+    assert!(kept.as_ref().is_some_and(|(at, _)| *at == key));
+    assert_eq!(lit(&second, &mut kept), lit(&second, &mut None));
 }

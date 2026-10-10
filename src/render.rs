@@ -310,6 +310,9 @@ fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, tx: &Sender<Done>) {
     // The text of the page last asked for, kept as each sentence read aloud
     // asks for the page again.
     let mut text: Option<(usize, text::Page)> = None;
+    // The slide last drawn with a sentence lit, unlit, so the next sentence
+    // is lit on it without drawing the page again.
+    let mut drawn: Option<(Key, RgbaImage)> = None;
     let (lock, cvar) = &**queue;
     loop {
         let job = {
@@ -331,10 +334,10 @@ fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, tx: &Sender<Done>) {
                     .lit
                     .and_then(|k| {
                         let page = text_of(&mut text, &pdf, job.key.page, &fonts, &settings)?;
-                        Some(page.light(k))
+                        Some(page.light(k).boxes)
                     })
                     .unwrap_or_default();
-                let image = rasterise(&pdf, &cache, &settings, picker, job.key, &lit)?;
+                let image = rasterise(&pdf, &cache, &settings, picker, job.key, &lit, &mut drawn)?;
                 let image = DynamicImage::ImageRgba8(image);
                 let proto = picker.new_protocol(image, job.key.size(), Resize::Fit(None));
                 proto.ok().map(Slide::Image)
@@ -397,14 +400,9 @@ fn read<'a>(
     // Four pixels a half-block each way, so glyphs are painted out finely.
     let x_scale = 4. * f32::from(size.width) / w;
     let y_scale = 8. * f32::from(size.height) / h;
-    let mut image = raster(page, cache, settings, x_scale, y_scale, &[])?;
-    match job.lit {
-        Some(k) => {
-            text.light(k);
-        }
-        None => text.unlight(),
-    }
-    let cells = text.set_over(&mut image, size.width, size.height);
+    let mut image = raster(page, cache, settings, x_scale, y_scale)?;
+    let lit = job.lit.map(|k| text.light(k).glyphs).unwrap_or_default();
+    let cells = text.set_over(&mut image, size.width, size.height, &lit);
 
     let shown = Size::new(size.width.min(key.cols), size.height.min(key.rows));
     let x = key.zoom.x.min(size.width - shown.width);
@@ -446,17 +444,32 @@ fn rasterise<'a>(
     picker: &Picker,
     key: Key,
     lit: &[kurbo::Rect],
+    kept: &mut Option<(Key, RgbaImage)>,
 ) -> Option<RgbaImage> {
     let page = pdf.pages().get(key.page)?;
     let font = picker.font_size();
     let (fw, fh) = (f32::from(font.width), f32::from(font.height));
     let (w, h) = page.render_dimensions();
     let scale = fit(key, (fw, fh), (w, h)) * key.zoom.scale();
+    let drawn = if key.zoom == Zoom::FIT {
+        scale
+    } else {
+        scale.min((MAX_PIXELS / (w * h)).sqrt())
+    };
+    let mut image = match kept {
+        Some((at, image)) if *at == key => image.clone(),
+        _ => {
+            let image = raster(page, cache, settings, drawn, drawn)?;
+            if !lit.is_empty() {
+                *kept = Some((key, image.clone()));
+            }
+            image
+        }
+    };
+    light(&mut image, lit, drawn, drawn);
     if key.zoom == Zoom::FIT {
-        return raster(page, cache, settings, scale, scale, lit);
+        return Some(image);
     }
-    let drawn = scale.min((MAX_PIXELS / (w * h)).sqrt());
-    let image = raster(page, cache, settings, drawn, drawn, lit)?;
     // The box, in the pixels drawn.
     let k = drawn / scale;
     let (bw, bh) = (f32::from(key.cols) * fw * k, f32::from(key.rows) * fh * k);
@@ -481,15 +494,13 @@ fn rasterise<'a>(
     Some(imageops::resize(&part, ow, oh, FilterType::Triangle))
 }
 
-/// The page drawn `x_scale` and `y_scale` pixels a point, on white, with
-/// the boxes in `lit` lit behind its text.
+/// The page drawn `x_scale` and `y_scale` pixels a point, on white.
 fn raster<'a>(
     page: &'a Page<'a>,
     cache: &RenderCache<'a>,
     settings: &InterpreterSettings,
     x_scale: f32,
     y_scale: f32,
-    lit: &[kurbo::Rect],
 ) -> Option<RgbaImage> {
     let (w, h) = page.render_dimensions();
     let sane = |s: f32, len: f32| s.is_finite() && len * s >= 1.;
@@ -504,13 +515,11 @@ fn raster<'a>(
     };
     let pixmap = hayro::render(page, cache, settings, &render);
     // Premultiplied, but every pixel is opaque over the white background.
-    let mut image = RgbaImage::from_raw(
+    RgbaImage::from_raw(
         pixmap.width().into(),
         pixmap.height().into(),
         pixmap.data_as_u8_slice().to_vec(),
-    )?;
-    light(&mut image, lit, x_scale, y_scale);
-    Some(image)
+    )
 }
 
 /// Light the boxes in `lit`, in page points, on `image`, drawn `x_scale`

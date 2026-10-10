@@ -15,10 +15,13 @@
 
 #[cfg(feature = "speech")]
 use crate::process::child::{self, Ended};
+#[cfg(feature = "speech")]
+use crate::remote;
+use crate::render;
 use crate::text::{self, Spoken};
-use crate::{remote, render};
 use hayro::hayro_interpret::{InterpreterCache, InterpreterSettings};
 use hayro::hayro_syntax::Pdf;
+#[cfg(feature = "speech")]
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "speech")]
@@ -39,6 +42,7 @@ const STEP: Duration = Duration::from_millis(20);
 /// No sentence is being read.
 const NONE: usize = usize::MAX;
 
+#[cfg(feature = "speech")]
 /// Voices that write what is on their input as WAV on their output: the
 /// program looked for, and the command run.
 const VOICES: &[(&str, &str)] = &[
@@ -49,10 +53,11 @@ const VOICES: &[(&str, &str)] = &[
 ];
 /// macOS's voice, the one chosen in its settings. It writes WAV only to a
 /// file it can seek in.
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "speech", target_os = "macos"))]
 const SAY: &str = "d=$(mktemp -d) || exit; \
     say -f - -o \"$d/s.wav\" --data-format=LEI16@22050 && cat \"$d/s.wav\"; \
     s=$?; rm -rf \"$d\"; exit $s";
+#[cfg(feature = "speech")]
 /// Players of WAV on their input, which is a file: `afplay` cannot play
 /// from a pipe.
 const PLAYERS: &[(&str, &str)] = &[
@@ -62,6 +67,7 @@ const PLAYERS: &[(&str, &str)] = &[
     ("play", "play -q -t wav -"),
 ];
 
+#[cfg(feature = "speech")]
 /// The voice that reads slides: the one given, or else Piper with a voice
 /// of its found, or else one found.
 pub fn voice(given: Option<String>) -> Option<String> {
@@ -76,21 +82,25 @@ pub fn voice(given: Option<String>) -> Option<String> {
     })
 }
 
+#[cfg(feature = "speech")]
 /// The player of what the voice says: the one given, or else one found.
 pub fn player(given: Option<String>) -> Option<String> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     given_or(given, || found(&path, PLAYERS))
 }
 
+#[cfg(feature = "speech")]
 fn given_or(given: Option<String>, or: impl FnOnce() -> Option<String>) -> Option<String> {
     given.filter(|c| !c.trim().is_empty()).or_else(or)
 }
 
+#[cfg(feature = "speech")]
 /// Whether `name` is a program on `path`.
 fn on(path: &OsStr, name: &str) -> bool {
     std::env::split_paths(path).any(|dir| runnable(&dir.join(name)))
 }
 
+#[cfg(feature = "speech")]
 /// Whether `file` is a program: a file, and on unix, one allowed to run.
 fn runnable(file: &Path) -> bool {
     let Ok(meta) = std::fs::metadata(file) else {
@@ -105,6 +115,7 @@ fn runnable(file: &Path) -> bool {
     meta.is_file()
 }
 
+#[cfg(feature = "speech")]
 /// The command of the first of `known` on `path`.
 fn found(path: &OsStr, known: &[(&str, &str)]) -> Option<String> {
     known
@@ -113,6 +124,7 @@ fn found(path: &OsStr, known: &[(&str, &str)]) -> Option<String> {
         .map(|(_, command)| command.to_string())
 }
 
+#[cfg(feature = "speech")]
 /// Piper speaking with the first voice in `voices`, a model with its
 /// config beside it, if Piper is on `path`.
 fn piper(path: &OsStr, voices: &Path) -> Option<String> {
@@ -173,6 +185,11 @@ impl Speaker {
     pub fn with_pause(mut self, pause: Duration) -> Self {
         self.pause = pause;
         self
+    }
+
+    /// Whether a slide is being read.
+    pub fn reading(&self) -> bool {
+        self.reading.is_some()
     }
 
     /// The slide being read, if one is.
@@ -240,11 +257,12 @@ impl Speaker {
         }
     }
 
-    /// The slide just read to its end, or why it could not be, once it is.
-    pub fn ended(&mut self) -> Option<Result<usize, String>> {
+    /// Whether the slide being read was read to its end, or why it could
+    /// not be, once it is.
+    pub fn ended(&mut self) -> Option<Result<(), String>> {
         let reading = self.reading.as_ref()?;
         let ended = match reading.done.try_recv() {
-            Ok(ended) => ended.map(|()| reading.page),
+            Ok(ended) => ended,
             Err(TryRecvError::Empty) => return None,
             Err(TryRecvError::Disconnected) => Err("the reader stopped".into()),
         };
@@ -281,7 +299,7 @@ impl Reader {
         if self.stop.load(Ordering::Relaxed) {
             return Ok(());
         }
-        let said = words(data, page)?;
+        let said = words(data.clone(), page)?;
         let sentences: Vec<&String> = said
             .iter()
             .filter_map(|s| match s {
@@ -362,8 +380,8 @@ fn wait(pause: Duration, stop: &AtomicBool) {
 }
 
 /// What reading `page` of `data` aloud says.
-fn words(data: &Arc<Vec<u8>>, page: usize) -> Result<Vec<Spoken>, String> {
-    let pdf = Pdf::new(data.clone()).map_err(|e| format!("cannot read the PDF: {e:?}"))?;
+fn words(data: Arc<Vec<u8>>, page: usize) -> Result<Vec<Spoken>, String> {
+    let pdf = Pdf::new(data).map_err(|e| format!("cannot read the PDF: {e:?}"))?;
     let cache = InterpreterCache::new();
     let settings = InterpreterSettings::default();
     // Past the last page, there is nothing to say.

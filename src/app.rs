@@ -433,7 +433,7 @@ impl App {
                 self.requested.clear();
                 self.stale = std::mem::take(&mut self.slides);
                 // The slide being read is read again from what it says now.
-                if self.speaker.page().is_some() {
+                if self.speaker.reading() {
                     self.speak();
                 }
             }
@@ -479,11 +479,11 @@ impl App {
         }
         match self.speaker.ended() {
             None => return,
-            Some(Ok(_)) if self.cur + 1 < self.deck.pages => {
+            Some(Ok(())) if self.cur + 1 < self.deck.pages => {
                 self.cur += 1;
                 self.speak();
             }
-            Some(Ok(_)) => self.notice = Some("read to the end".into()),
+            Some(Ok(())) => self.notice = Some("read to the end".into()),
             Some(Err(e)) => self.notice = Some(e),
         }
         self.dirty = true;
@@ -558,7 +558,7 @@ impl App {
             KeyCode::Char('0') if self.view == View::Present => self.zoom = Zoom::FIT,
             // Even unchanged: a chunk may read files ohp does not watch.
             KeyCode::Char('r') => self.reload(),
-            KeyCode::Char('s') if self.speaker.page().is_some() => self.speaker.stop(),
+            KeyCode::Char('s') if self.speaker.reading() => self.speaker.stop(),
             KeyCode::Char('s') => self.speak(),
             _ => return,
         }
@@ -900,7 +900,7 @@ impl App {
             Look::Image => "",
             Look::Text => " · text",
         };
-        let speaking = if self.speaker.page().is_some() {
+        let speaking = if self.speaker.reading() {
             " · speaking"
         } else {
             ""

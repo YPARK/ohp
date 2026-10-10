@@ -20,7 +20,7 @@ fn recorder(out: &Path) -> Speaker {
 }
 
 /// Wait for the reading under way to end.
-fn ended(speaker: &mut Speaker) -> Result<usize, String> {
+fn ended(speaker: &mut Speaker) -> Result<(), String> {
     let start = Instant::now();
     loop {
         if let Some(ended) = speaker.ended() {
@@ -51,7 +51,7 @@ fn the_slide_is_voiced_and_played_a_sentence_at_a_time() {
         .read(deck(&["one", "Hello there. It is me"]), 1)
         .unwrap();
     assert_eq!(speaker.page(), Some(1));
-    assert_eq!(ended(&mut speaker), Ok(1));
+    assert_eq!(ended(&mut speaker), Ok(()));
     assert_eq!(speaker.page(), None);
     assert_eq!(
         std::fs::read_to_string(&out).unwrap(),
@@ -71,14 +71,13 @@ fn the_sentence_playing_is_known() {
     let mut speaker = Speaker::new(Some("cat".into()), Some(player));
     speaker.read(deck(&["First one. Second one."]), 0).unwrap();
     for k in 0..2 {
-        let start = Instant::now();
-        while speaker.sentence() != Some(k) {
-            assert!(start.elapsed() < Duration::from_secs(10), "no sentence {k}");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        assert!(
+            fixture::within_seconds(|| speaker.sentence() == Some(k)),
+            "no sentence {k}"
+        );
         std::fs::write(&flag, "").unwrap();
     }
-    assert_eq!(ended(&mut speaker), Ok(0));
+    assert_eq!(ended(&mut speaker), Ok(()));
     assert_eq!(speaker.sentence(), None);
 }
 
@@ -88,7 +87,7 @@ fn a_slide_with_no_text_runs_nothing() {
     let out = dir.path().join("read.txt");
     let mut speaker = recorder(&out);
     speaker.read(Arc::new(fixture::pdf(1)), 0).unwrap();
-    assert_eq!(ended(&mut speaker), Ok(0));
+    assert_eq!(ended(&mut speaker), Ok(()));
     assert!(!out.exists());
 }
 
@@ -143,7 +142,7 @@ fn formulas_tables_and_toml_front_matter_are_not_read() {
          The end.\n",
     );
     let deck = crate::render::Deck::open(&md).unwrap();
-    let said = words(&deck.data, 0).unwrap();
+    let said = words(deck.data.clone(), 0).unwrap();
     let text = |s: &str| Spoken::Text(s.into());
     assert_eq!(
         said,

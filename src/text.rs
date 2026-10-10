@@ -81,8 +81,15 @@ pub struct Page {
     /// Rules the page draws, as a table's: across it and down it.
     across: Vec<Rect>,
     down: Vec<Rect>,
-    /// Which glyphs are being read aloud; none if empty.
-    lit: Vec<bool>,
+}
+
+/// A sentence being read aloud, as `Page::light` finds it.
+#[derive(Debug, Default)]
+pub struct Lit {
+    /// Which of the page's glyphs it is read from.
+    pub glyphs: Vec<bool>,
+    /// Boxes about it, one a line, in page points.
+    pub boxes: Vec<Rect>,
 }
 
 /// A sentence read aloud, and the glyphs it is read from.
@@ -183,23 +190,23 @@ pub fn extract<'a>(
         glyphs: marks.glyphs,
         across: marks.across,
         down: marks.down,
-        lit: Vec::new(),
     })
 }
 
 impl Page {
     /// Set the page on a `cols` × `rows` grid over `image`, a render of it,
-    /// painting each glyph set out of the image.
-    pub fn set_over(&mut self, image: &mut RgbaImage, cols: u16, rows: u16) -> Cells {
+    /// painting each glyph set out of the image, and lighting the cells of
+    /// the glyphs in `lit`.
+    pub fn set_over(&mut self, image: &mut RgbaImage, cols: u16, rows: u16, lit: &[bool]) -> Cells {
         self.sample(image);
-        let (cells, set) = self.layout(cols, rows);
+        let (cells, set) = self.layout(cols, rows, lit);
         self.erase(image, &set);
         cells
     }
 
     /// The page set on a `cols` × `rows` grid, and which glyphs were set:
     /// lines past the bottom and words past the edge are not.
-    fn layout(&self, cols: u16, rows: u16) -> (Cells, Vec<bool>) {
+    fn layout(&self, cols: u16, rows: u16, lit: &[bool]) -> (Cells, Vec<bool>) {
         let (cols, rows) = (usize::from(cols), usize::from(rows));
         let mut grid: Cells = vec![vec![None; cols]; rows];
         let mut set = vec![false; self.glyphs.len()];
@@ -227,7 +234,7 @@ impl Page {
             }
             for (word, &(down, col)) in words.iter().zip(&spots) {
                 let first = &self.glyphs[word.glyphs[0]];
-                let lit = word.glyphs.iter().any(|&g| self.lit.get(g) == Some(&true));
+                let lit = word.glyphs.iter().any(|&g| lit.get(g) == Some(&true));
                 let cell = |ch| Cell {
                     ch,
                     rgb: first.rgb,
@@ -261,28 +268,27 @@ impl Page {
     /// The page's text to be read aloud, a sentence at a time, and a pause
     /// where a formula or a table is left out.
     pub fn spoken(&self) -> Vec<Spoken> {
-        self.sentences()
+        self.sentences(&self.text_lines())
             .into_iter()
             .map(|s| s.map_or(Spoken::Pause, |s| Spoken::Text(s.text)))
             .collect()
     }
 
-    /// Mark sentence `k` of what is read aloud as being read, so `set_over`
-    /// lights its cells, and give boxes about it, one a line, in page points.
-    pub fn light(&mut self, k: usize) -> Vec<Rect> {
+    /// Sentence `k` of what is read aloud, to be lit as it is read.
+    pub fn light(&self, k: usize) -> Lit {
         let lines = self.text_lines();
-        let sentence = self.sentences_of(&lines).into_iter().flatten().nth(k);
-        self.lit = vec![false; self.glyphs.len()];
+        let sentence = self.sentences(&lines).into_iter().flatten().nth(k);
+        let mut glyphs = vec![false; self.glyphs.len()];
         for g in sentence.map(|s| s.glyphs).unwrap_or_default() {
-            self.lit[g] = true;
+            glyphs[g] = true;
         }
-        lines
+        let boxes = lines
             .iter()
             .filter_map(|(_, words)| {
                 words
                     .iter()
                     .flat_map(|w| &w.glyphs)
-                    .filter(|&&i| self.lit[i])
+                    .filter(|&&i| glyphs[i])
                     .map(|&i| {
                         let g = &self.glyphs[i];
                         let (y, size) = (f64::from(g.y), f64::from(g.size));
@@ -295,12 +301,8 @@ impl Page {
                     })
                     .reduce(|a, b| a.union(b))
             })
-            .collect()
-    }
-
-    /// Mark nothing as being read.
-    pub fn unlight(&mut self) {
-        self.lit.clear();
+            .collect();
+        Lit { glyphs, boxes }
     }
 
     /// What is read aloud: sentences, and `None` where a pause goes. A
@@ -308,12 +310,8 @@ impl Page {
     /// letters nor digits, as bullets, are not read, nor a list's numbers,
     /// and an item one starts is a paragraph of its own. Small text, as a
     /// footline, and lines of no letters, as a page number, are left out.
-    fn sentences(&self) -> Vec<Option<Sentence>> {
-        self.sentences_of(&self.text_lines())
-    }
-
-    /// `sentences` of the page's `lines`, as `text_lines` gives them.
-    fn sentences_of(&self, lines: &[(f32, Vec<Word>)]) -> Vec<Option<Sentence>> {
+    /// The page's `lines` are as `text_lines` gives them.
+    fn sentences(&self, lines: &[(f32, Vec<Word>)]) -> Vec<Option<Sentence>> {
         let body = self.body_size();
         let mut said: Vec<Option<Sentence>> = Vec::new();
         let pause = |said: &mut Vec<Option<Sentence>>| {

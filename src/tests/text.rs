@@ -79,7 +79,7 @@ fn said(page: &Page) -> String {
 fn words_are_read_apart_and_set_one_space_apart() {
     let page = page(&fixture::text(40., 200., 24., "Hello World"));
     assert_eq!((page.width, page.height), FRAME);
-    let rows = rows(&page.layout(60, 20).0);
+    let rows = rows(&page.layout(60, 20, &[]).0);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].trim_start(), "Hello World");
 }
@@ -92,7 +92,7 @@ fn lines_keep_their_order_and_a_title_is_bold() {
         fixture::text(40., 136., 12., "second line"),
     ]
     .concat();
-    let (cells, _) = page(&content).layout(60, 20);
+    let (cells, _) = page(&content).layout(60, 20, &[]);
     let rows: Vec<String> = rows(&cells).iter().map(|r| r.trim().to_string()).collect();
     assert_eq!(rows, ["Title", "first line", "second line"]);
     assert!(find(&cells, 'T').bold);
@@ -106,7 +106,7 @@ fn a_paragraph_goes_on_consecutive_rows() {
         fixture::text(40., 136., 12., "second"),
     ]
     .concat();
-    let (cells, _) = page(&content).layout(60, 40);
+    let (cells, _) = page(&content).layout(60, 40, &[]);
     let at: Vec<usize> = cells
         .iter()
         .enumerate()
@@ -124,7 +124,7 @@ fn columns_far_apart_keep_their_place() {
         fixture::text(300., 150., 12., "Right"),
     ]
     .concat();
-    let (cells, _) = page(&content).layout(100, 20);
+    let (cells, _) = page(&content).layout(100, 20, &[]);
     let row = cells
         .iter()
         .find(|row| row.iter().any(Option::is_some))
@@ -147,7 +147,7 @@ fn a_line_too_wide_wraps_and_the_rest_still_shows() {
         fixture::text(10., 100., 12., "after"),
     ]
     .concat();
-    let rows = rows(&page(&content).layout(16, 20).0);
+    let rows = rows(&page(&content).layout(16, 20, &[]).0);
     assert!(rows.len() >= 3, "{rows:?}");
     assert!(rows.iter().all(|r| r.chars().count() <= 16));
     assert_eq!(rows.last().unwrap().trim(), "after");
@@ -160,7 +160,7 @@ fn text_off_the_page_is_dropped() {
         fixture::text(40., 150., 12., "shown"),
     ]
     .concat();
-    let rows = rows(&page(&content).layout(60, 20).0);
+    let rows = rows(&page(&content).layout(60, 20, &[]).0);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].trim(), "shown");
 }
@@ -169,7 +169,7 @@ fn text_off_the_page_is_dropped() {
 fn filled_and_stroked_text_is_read_once() {
     let rows = rows(
         &page("BT /F1 24 Tf 2 Tr 40 150 Td (Hello) Tj ET")
-            .layout(60, 20)
+            .layout(60, 20, &[])
             .0,
     );
     assert_eq!(rows.len(), 1);
@@ -184,7 +184,7 @@ fn rotated_text_is_left_to_the_image() {
     );
     let page = page(&content);
     assert_eq!(page.glyphs.len(), 4);
-    let rows = rows(&page.layout(60, 20).0);
+    let rows = rows(&page.layout(60, 20, &[]).0);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].trim(), "body");
 }
@@ -201,7 +201,7 @@ fn wide_characters_take_two_cells() {
         ],
         ..Page::default()
     };
-    let (cells, set) = page.layout(20, 10);
+    let (cells, set) = page.layout(20, 10, &[]);
     let row = cells
         .iter()
         .find(|row| row.iter().any(Option::is_some))
@@ -214,7 +214,7 @@ fn wide_characters_take_two_cells() {
 #[test]
 fn colour_is_kept() {
     let content = format!("1 0 0 rg {}", fixture::text(40., 150., 12., "red"));
-    let (cells, _) = page(&content).layout(60, 20);
+    let (cells, _) = page(&content).layout(60, 20, &[]);
     assert_eq!(find(&cells, 'r').rgb, [255, 0, 0]);
 }
 
@@ -226,7 +226,7 @@ fn text_the_page_draws_faint_stays_faint() {
         fixture::text(40., 100., 12., "shown")
     );
     let mut page = page(&content);
-    let cells = page.set_over(&mut render(&page), 60, 20);
+    let cells = page.set_over(&mut render(&page), 60, 20, &[]);
     assert!(find(&cells, 'c').faint);
     assert!(!find(&cells, 's').faint);
 }
@@ -258,7 +258,7 @@ fn glyphs_are_painted_with_the_colour_around_them() {
             }
         }
     }
-    page.set_over(&mut image, 60, 20);
+    page.set_over(&mut image, 60, 20, &[]);
     assert!(image.pixels().all(|&p| p != red), "text left in the image");
     assert_eq!(
         image.pixels().filter(|&&p| p == blue).count() as u32,
@@ -293,7 +293,7 @@ fn a_neighbours_ink_does_not_colour_a_glyph() {
             }
         }
     }
-    page.set_over(&mut image, 60, 20);
+    page.set_over(&mut image, 60, 20, &[]);
     assert!(
         image.pixels().all(|&p| p != black),
         "text left in the image"
@@ -320,7 +320,7 @@ fn text_that_is_not_set_stays_in_the_image() {
         image.put_pixel(x, y, black);
     }
     // One row: only the first line is set.
-    let cells = page.set_over(&mut image, 60, 1);
+    let cells = page.set_over(&mut image, 60, 1, &[]);
     assert_eq!(
         rows(&cells),
         [format!("{:>w$}", "first", w = rows(&cells)[0].len())]
@@ -490,7 +490,6 @@ fn a_ruled_table_is_a_pause_and_ruled_prose_is_read() {
             across(5., 90., 90.),
         ],
         down: vec![down(26.5, 24., 44.), down(5., 75., 85.)],
-        ..Page::default()
     };
     assert_eq!(said(&page), "Before\n|\nAfter\nquoted text");
 }
@@ -607,12 +606,13 @@ fn sentences_are_read_apart_across_lines() {
 
 #[test]
 fn a_sentence_lit_is_boxed_a_line_at_a_time() {
-    let mut page = two_sentences();
-    let boxes = page.light(1);
+    let page = two_sentences();
+    let lit = page.light(1);
+    let boxes = lit.boxes;
     let lit: String = page
         .glyphs
         .iter()
-        .zip(&page.lit)
+        .zip(&lit.glyphs)
         .filter(|(_, lit)| **lit)
         .map(|(g, _)| g.text.as_str())
         .collect();
@@ -628,14 +628,13 @@ fn a_sentence_lit_is_boxed_a_line_at_a_time() {
     assert!(boxes[1].x0 < boxes[0].x0);
     assert!(boxes.iter().all(|b| b.height() > 10. && b.height() < 14.));
 
-    assert!(page.light(5).is_empty());
+    assert!(page.light(5).boxes.is_empty());
 }
 
 #[test]
 fn the_cells_of_a_sentence_lit_are_lit() {
-    let mut page = two_sentences();
-    page.light(0);
-    let (cells, _) = page.layout(80, 20);
+    let page = two_sentences();
+    let (cells, _) = page.layout(80, 20, &page.light(0).glyphs);
     let lit: String = cells
         .iter()
         .flatten()
@@ -675,7 +674,7 @@ fn a_bold_heading_ends_its_sentence_and_is_bold() {
         ..Page::default()
     };
     assert_eq!(said(&page), "Heading\nBody text.");
-    let (cells, _) = page.layout(60, 20);
+    let (cells, _) = page.layout(60, 20, &[]);
     assert!(find(&cells, 'H').bold);
     assert!(!find(&cells, 'B').bold);
 }

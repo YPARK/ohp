@@ -138,7 +138,7 @@ pub fn started(command: &str) -> bool {
 
 #[cfg(any(feature = "markdown", feature = "speech"))]
 /// Whether `done` holds within a few seconds.
-fn within_seconds(done: impl Fn() -> bool) -> bool {
+pub fn within_seconds(done: impl Fn() -> bool) -> bool {
     let start = std::time::Instant::now();
     while !done() && start.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(50));
