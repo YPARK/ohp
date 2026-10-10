@@ -106,7 +106,8 @@ pub fn player(given: Option<String>) -> Option<String> {
 }
 
 #[cfg(feature = "speech")]
-fn given_or(given: Option<String>, or: impl FnOnce() -> Option<String>) -> Option<String> {
+/// The command `given`, unless blank, or else what `or` finds.
+pub fn given_or(given: Option<String>, or: impl FnOnce() -> Option<String>) -> Option<String> {
     given.filter(|c| !c.trim().is_empty()).or_else(or)
 }
 

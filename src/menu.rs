@@ -41,13 +41,16 @@ impl Menu {
     pub fn key(&mut self, key: KeyEvent, len: usize) -> Key {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('c') if ctrl => return Key::Quit,
-            KeyCode::Char('u') if ctrl => self.query.clear(),
+            KeyCode::Char('c') if ctrl => Key::Quit,
+            KeyCode::Char('u') if ctrl => {
+                self.query.clear();
+                Key::Retyped
+            }
             KeyCode::Char('n') if ctrl => self.step(1, len),
             KeyCode::Char('p') if ctrl => self.step(-1, len),
             KeyCode::Char(c) if !ctrl => {
                 self.query.push(c);
-                return Key::Typed(c);
+                Key::Typed(c)
             }
             KeyCode::Down => self.step(1, len),
             KeyCode::Up => self.step(-1, len),
@@ -55,15 +58,15 @@ impl Menu {
             KeyCode::PageUp => self.step(-self.page(), len),
             KeyCode::Backspace if !self.query.is_empty() => {
                 self.query.pop();
+                Key::Retyped
             }
-            KeyCode::Enter => return Key::Enter,
-            KeyCode::Esc if self.query.is_empty() => return Key::Quit,
-            KeyCode::Esc => self.query.clear(),
-            _ => return Key::Other,
-        }
-        match key.code {
-            KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Esc => Key::Retyped,
-            _ => Key::Moved,
+            KeyCode::Enter => Key::Enter,
+            KeyCode::Esc if self.query.is_empty() => Key::Quit,
+            KeyCode::Esc => {
+                self.query.clear();
+                Key::Retyped
+            }
+            _ => Key::Other,
         }
     }
 
@@ -78,12 +81,12 @@ impl Menu {
         self.list.get().selected()
     }
 
-    fn step(&self, by: isize, len: usize) {
-        if len == 0 {
-            return;
+    fn step(&self, by: isize, len: usize) -> Key {
+        if len > 0 {
+            let at = self.picked().unwrap_or(0);
+            self.pick(Some(at.saturating_add_signed(by).min(len - 1)));
         }
-        let at = self.picked().unwrap_or(0);
-        self.pick(Some(at.saturating_add_signed(by).min(len - 1)));
+        Key::Moved
     }
 
     fn page(&self) -> isize {

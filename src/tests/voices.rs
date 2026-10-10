@@ -1,6 +1,6 @@
 use super::*;
 use crate::remote;
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::{Duration, Instant};
 
 /// A catalog of Piper's voices, as `voices.json`, of `voices`: each its
@@ -146,6 +146,37 @@ fn the_list_starts_on_the_voice_in_use_and_typing_narrows_it() {
 }
 
 #[test]
+fn ctrl_n_and_ctrl_p_move_as_down_and_up() {
+    let voices = vec![ready("espeak-ng"), ready("espeak"), ready("say")];
+    let mut picker = open(voices, None);
+    let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+    picker.key(ctrl('n'));
+    picker.key(ctrl('n'));
+    assert_eq!(picked(&picker), Some("say"));
+    picker.key(ctrl('p'));
+    assert_eq!(picked(&picker), Some("espeak"));
+}
+
+#[test]
+fn a_voice_to_download_says_why_it_cannot_be() {
+    let far = Voice {
+        name: "en_US-amy-medium".into(),
+        about: "English".into(),
+        how: How::Fetch(Remote {
+            model: ("en/en_US-amy-medium.onnx".into(), 1),
+            config: ("en/en_US-amy-medium.onnx.json".into(), 1),
+        }),
+    };
+    let mut picker = open(vec![far], None);
+    picker.piper = Err("install curl to download Piper's voices");
+    let Some(Event::Notice(why)) = press(&mut picker, &[KeyCode::Enter]) else {
+        panic!("nothing said")
+    };
+    assert!(why.contains("curl"));
+    assert!(picker.download.is_none());
+}
+
+#[test]
 fn the_catalog_added_keeps_the_voice_picked_and_lists_none_twice() {
     let mut list = List::new(vec![ready("espeak"), ready("say")], None);
     list.menu.pick(Some(1));
@@ -174,7 +205,7 @@ fn hosted(dir: &Path, voices: &[(&str, &str, &str, u64)]) -> String {
 }
 
 #[test]
-fn the_catalog_is_fetched_once_and_listed_each_time_the_list_opens() {
+fn the_catalog_fetched_is_added_to_the_list_open() {
     if !curl() {
         return;
     }

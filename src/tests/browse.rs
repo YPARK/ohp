@@ -105,6 +105,18 @@ fn up_and_down_move_within_the_list() {
 }
 
 #[test]
+fn ctrl_n_and_ctrl_p_move_as_down_and_up() {
+    let dir = tree();
+    let mut b = Browser::new(dir.path()).unwrap();
+    let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+    b.key(ctrl('n'));
+    b.key(ctrl('n'));
+    assert_eq!(picked(&b), "talks");
+    b.key(ctrl('p'));
+    assert_eq!(picked(&b), "notes");
+}
+
+#[test]
 fn enter_goes_into_a_folder_and_opens_a_file() {
     let dir = tree();
     let root = dir.path().canonicalize().unwrap();

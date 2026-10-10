@@ -57,7 +57,7 @@ struct Remote {
 /// The voice slides are read in unless one is picked: the one given, or
 /// else the first at hand.
 pub fn default(given: Option<String>) -> Option<String> {
-    given.filter(|g| !g.trim().is_empty()).or_else(|| {
+    speak::given_or(given, || {
         let piper = speak::piper_dir().filter(|_| speak::installed("piper"));
         let voices = at_hand(None, piper.as_deref(), &speak::others());
         voices.into_iter().find_map(|v| match v.how {
@@ -100,7 +100,10 @@ fn at_hand(given: Option<&str>, piper: Option<&Path>, others: &[(&str, &str)]) -
 fn catalog(catalog: &str, language: &str) -> Result<Vec<Voice>, String> {
     let all: serde_json::Map<String, Value> =
         serde_json::from_str(catalog).map_err(|e| format!("cannot read Piper's voices: {e}"))?;
-    let family = language.split(['_', '.', '-']).next().unwrap_or_default();
+    let family = language
+        .split(['_', '.', '-', '@'])
+        .next()
+        .unwrap_or_default();
     let mut voices: Vec<(bool, Voice)> = all
         .into_iter()
         .filter_map(|(key, v)| {
@@ -148,10 +151,12 @@ fn language() -> String {
         .unwrap_or_default()
 }
 
-/// Fetch `url` to `to` with curl, until it is done or `stop` is set.
+/// Fetch `url` to `to` with curl, until it is done or `stop` is set. A
+/// fetch that cannot connect, or stalls, fails rather than waits for ever.
 fn fetch(url: &str, to: &Path, stop: &AtomicBool) -> Result<(), String> {
     let mut curl = Command::new("curl");
-    curl.args(["-fsSL", "-o"])
+    curl.args(["-fsSL", "--connect-timeout", "30"])
+        .args(["--speed-limit", "1000", "--speed-time", "30", "-o"])
         .arg(to)
         .arg(url)
         .stdin(Stdio::null())
@@ -301,10 +306,13 @@ fn download(
             })
         });
     let placed = fetched.and_then(|()| {
-        for (_, part, _) in jobs {
-            std::fs::rename(part, part.with_extension("")).map_err(|e| e.to_string())?;
-        }
-        Ok(())
+        let [(_, model, _), (_, config, _)] = jobs;
+        std::fs::rename(model, model.with_extension("")).map_err(|e| e.to_string())?;
+        std::fs::rename(config, config.with_extension("")).map_err(|e| {
+            // Without its config, the model is no voice: not to be left.
+            let _ = std::fs::remove_file(model.with_extension(""));
+            e.to_string()
+        })
     });
     if let Err(e) = placed {
         for (_, part, _) in jobs {
@@ -327,7 +335,7 @@ pub enum Event {
 enum Catalog {
     Unfetched,
     Fetching(Task<Vec<Voice>>),
-    Fetched(Arc<Vec<Voice>>),
+    Fetched(Vec<Voice>),
 }
 
 /// The voice picker: the list, when open, Piper's catalog, and a voice
@@ -373,10 +381,11 @@ impl Voices {
 
     /// Open the list, `current` the command of the voice in use.
     pub fn open(&mut self, current: Option<&str>) {
-        let dir = speak::piper_dir().filter(|_| speak::installed("piper"));
+        let piper = speak::installed("piper");
+        let dir = speak::piper_dir().filter(|_| piper);
         let at_hand = at_hand(current, dir.as_deref(), &speak::others());
         self.piper = match dir {
-            _ if !speak::installed("piper") => Err("install Piper to download its voices"),
+            _ if !piper => Err("install Piper to download its voices"),
             _ if !speak::installed("curl") => Err("install curl to download Piper's voices"),
             None => Err("no place for Piper's voices: HOME is not set"),
             Some(dir) => Ok(dir),
@@ -421,7 +430,10 @@ impl Voices {
         if self.download.is_some() {
             return Some(Event::Notice("one voice is downloaded at a time".into()));
         }
-        let dir = self.piper.as_ref().ok()?;
+        let dir = match &self.piper {
+            Ok(dir) => dir,
+            Err(why) => return Some(Event::Notice((*why).into())),
+        };
         self.download = Some(Download::start(&voice.name, &remote, &self.root, dir));
         None
     }
@@ -435,8 +447,10 @@ impl Voices {
         {
             match fetched {
                 Ok(voices) => {
-                    let voices = Arc::new(voices);
-                    if let Some(list) = &mut self.list {
+                    // Not to be offered where they cannot be downloaded.
+                    if let Some(list) = &mut self.list
+                        && self.piper.is_ok()
+                    {
                         list.add(&voices);
                     }
                     self.catalog = Catalog::Fetched(voices);
