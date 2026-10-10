@@ -20,6 +20,28 @@ fn a_signal_ends_ohp_with_the_status_a_shell_gives() {
     assert_eq!(crate::shell_status(200), u8::MAX);
 }
 
+#[test]
+fn a_terminal_is_open_until_it_hangs_up() {
+    // SAFETY: opens a pseudo-terminal and its other end, as C strings name,
+    // and closes them.
+    unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        assert!(master >= 0);
+        assert_eq!(libc::grantpt(master), 0);
+        assert_eq!(libc::unlockpt(master), 0);
+        let name = libc::ptsname(master);
+        assert!(!name.is_null());
+        let slave = libc::open(name, libc::O_RDWR | libc::O_NOCTTY);
+        assert!(slave >= 0);
+        assert!(open(slave), "a terminal not hung up");
+        // Its window closed.
+        libc::close(master);
+        assert!(!open(slave), "a terminal hung up");
+        libc::close(slave);
+        assert!(!open(slave), "no terminal");
+    }
+}
+
 /// Set for the test process `installed` runs alone in.
 const ALONE: &str = "OHP_TEST_SIGNALS_ALONE";
 
