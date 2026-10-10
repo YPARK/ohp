@@ -12,6 +12,7 @@ use hayro::hayro_interpret::{InterpreterCache, InterpreterSettings};
 use hayro::hayro_syntax::Pdf;
 use hayro::hayro_syntax::page::Page;
 use hayro::vello_cpu::color::palette::css::WHITE;
+use hayro::vello_cpu::kurbo;
 use hayro::{RenderCache, RenderSettings};
 use image::imageops::{self, FilterType};
 use image::{DynamicImage, RgbaImage};
@@ -226,6 +227,8 @@ pub enum Look {
 pub struct Job {
     pub key: Key,
     pub look: Look,
+    /// The sentence being read aloud, lit on the slide.
+    pub lit: Option<usize>,
 }
 
 pub enum Slide {
@@ -304,6 +307,9 @@ fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, tx: &Sender<Done>) {
     let cache = RenderCache::new();
     let fonts = InterpreterCache::new();
     let settings = InterpreterSettings::default();
+    // The text of the page last asked for, kept as each sentence read aloud
+    // asks for the page again.
+    let mut text: Option<(usize, text::Page)> = None;
     let (lock, cvar) = &**queue;
     loop {
         let job = {
@@ -320,12 +326,23 @@ fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, tx: &Sender<Done>) {
         };
         let slide = caught(|| match job.look {
             Look::Image => {
-                let image = rasterise(&pdf, &cache, &settings, picker, job.key)?;
+                // Where the sentence read aloud is, in page points.
+                let lit = job
+                    .lit
+                    .and_then(|k| {
+                        let page = text_of(&mut text, &pdf, job.key.page, &fonts, &settings)?;
+                        Some(page.light(k))
+                    })
+                    .unwrap_or_default();
+                let image = rasterise(&pdf, &cache, &settings, picker, job.key, &lit)?;
                 let image = DynamicImage::ImageRgba8(image);
                 let proto = picker.new_protocol(image, job.key.size(), Resize::Fit(None));
                 proto.ok().map(Slide::Image)
             }
-            Look::Text => read(&pdf, &cache, &fonts, &settings, picker, job.key),
+            Look::Text => {
+                let page = text_of(&mut text, &pdf, job.key.page, &fonts, &settings)?;
+                read(&pdf, &cache, page, &settings, picker, job)
+            }
         });
         if tx.send(Done { job, slide }).is_err() {
             return;
@@ -333,17 +350,34 @@ fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, tx: &Sender<Done>) {
     }
 }
 
+/// The text of `page`, from `last` if it is that page's, else extracted
+/// and kept there.
+fn text_of<'p, 'a>(
+    last: &'p mut Option<(usize, text::Page)>,
+    pdf: &'a Pdf,
+    page: usize,
+    fonts: &InterpreterCache<'a>,
+    settings: &InterpreterSettings,
+) -> Option<&'p mut text::Page> {
+    if last.as_ref().is_none_or(|(at, _)| *at != page) {
+        *last = Some((page, text::extract(pdf, page, fonts, settings)?));
+    }
+    last.as_mut().map(|(_, text)| text)
+}
+
 /// The slide's text set over a coarse image of it, in coloured half-block
 /// cells, which any terminal shows. Zoomed, the text is set on a grid as
-/// much larger, and the box shows part of it.
+/// much larger, and the box shows part of it. The sentence being read
+/// aloud is lit.
 fn read<'a>(
     pdf: &'a Pdf,
     cache: &RenderCache<'a>,
-    fonts: &InterpreterCache<'a>,
+    text: &mut text::Page,
     settings: &InterpreterSettings,
     picker: &Picker,
-    key: Key,
+    job: Job,
 ) -> Option<Slide> {
+    let key = job.key;
     let page = pdf.pages().get(key.page)?;
     let (w, h) = page.render_dimensions();
     let font = picker.font_size();
@@ -363,8 +397,13 @@ fn read<'a>(
     // Four pixels a half-block each way, so glyphs are painted out finely.
     let x_scale = 4. * f32::from(size.width) / w;
     let y_scale = 8. * f32::from(size.height) / h;
-    let mut image = raster(page, cache, settings, x_scale, y_scale)?;
-    let mut text = text::extract(pdf, key.page, fonts, settings)?;
+    let mut image = raster(page, cache, settings, x_scale, y_scale, &[])?;
+    match job.lit {
+        Some(k) => {
+            text.light(k);
+        }
+        None => text.unlight(),
+    }
     let cells = text.set_over(&mut image, size.width, size.height);
 
     let shown = Size::new(size.width.min(key.cols), size.height.min(key.rows));
@@ -386,7 +425,7 @@ fn read<'a>(
 }
 
 /// `f`'s result, or `None` if it panics: hayro does on some malformed PDFs.
-fn caught<T>(f: impl FnOnce() -> Option<T>) -> Option<T> {
+pub fn caught<T>(f: impl FnOnce() -> Option<T>) -> Option<T> {
     panic::catch_unwind(AssertUnwindSafe(f)).ok().flatten()
 }
 
@@ -398,13 +437,15 @@ fn fit(key: Key, font: (f32, f32), page: (f32, f32)) -> f32 {
 }
 
 /// Page `key.page` as large as fits the pixels behind `key`'s cells, on
-/// white; when zoomed, the part of it enlarged that the box shows.
+/// white, `lit` lit; when zoomed, the part of it enlarged that the box
+/// shows.
 fn rasterise<'a>(
     pdf: &'a Pdf,
     cache: &RenderCache<'a>,
     settings: &InterpreterSettings,
     picker: &Picker,
     key: Key,
+    lit: &[kurbo::Rect],
 ) -> Option<RgbaImage> {
     let page = pdf.pages().get(key.page)?;
     let font = picker.font_size();
@@ -412,10 +453,10 @@ fn rasterise<'a>(
     let (w, h) = page.render_dimensions();
     let scale = fit(key, (fw, fh), (w, h)) * key.zoom.scale();
     if key.zoom == Zoom::FIT {
-        return raster(page, cache, settings, scale, scale);
+        return raster(page, cache, settings, scale, scale, lit);
     }
     let drawn = scale.min((MAX_PIXELS / (w * h)).sqrt());
-    let image = raster(page, cache, settings, drawn, drawn)?;
+    let image = raster(page, cache, settings, drawn, drawn, lit)?;
     // The box, in the pixels drawn.
     let k = drawn / scale;
     let (bw, bh) = (f32::from(key.cols) * fw * k, f32::from(key.rows) * fh * k);
@@ -440,12 +481,15 @@ fn rasterise<'a>(
     Some(imageops::resize(&part, ow, oh, FilterType::Triangle))
 }
 
+/// The page drawn `x_scale` and `y_scale` pixels a point, on white, with
+/// the boxes in `lit` lit behind its text.
 fn raster<'a>(
     page: &'a Page<'a>,
     cache: &RenderCache<'a>,
     settings: &InterpreterSettings,
     x_scale: f32,
     y_scale: f32,
+    lit: &[kurbo::Rect],
 ) -> Option<RgbaImage> {
     let (w, h) = page.render_dimensions();
     let sane = |s: f32, len: f32| s.is_finite() && len * s >= 1.;
@@ -460,11 +504,33 @@ fn raster<'a>(
     };
     let pixmap = hayro::render(page, cache, settings, &render);
     // Premultiplied, but every pixel is opaque over the white background.
-    RgbaImage::from_raw(
+    let mut image = RgbaImage::from_raw(
         pixmap.width().into(),
         pixmap.height().into(),
         pixmap.data_as_u8_slice().to_vec(),
-    )
+    )?;
+    light(&mut image, lit, x_scale, y_scale);
+    Some(image)
+}
+
+/// Light the boxes in `lit`, in page points, on `image`, drawn `x_scale`
+/// and `y_scale` pixels a point. The light multiplies what is there, so
+/// text stays as dark as it was.
+fn light(image: &mut RgbaImage, lit: &[kurbo::Rect], x_scale: f32, y_scale: f32) {
+    let (w, h) = image.dimensions();
+    let px = |v: f64, scale: f32, max: u32| ((v * f64::from(scale)).max(0.) as u32).min(max);
+    for r in lit {
+        let (x0, x1) = (px(r.x0, x_scale, w), px(r.x1, x_scale, w));
+        let (y0, y1) = (px(r.y0, y_scale, h), px(r.y1, y_scale, h));
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let p = image.get_pixel_mut(x, y);
+                for (c, l) in p.0.iter_mut().zip(text::LIGHT) {
+                    *c = (u16::from(*c) * u16::from(l) / 255) as u8;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

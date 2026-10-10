@@ -49,6 +49,8 @@ fn mark(x0: f32, y: f32, size: f32, text: &str) -> Mark {
     Mark {
         x0,
         x1: x0 + size * text.chars().count() as f32,
+        start: x0,
+        end: x0 + size * text.chars().count() as f32,
         y0: y - 0.7 * size,
         y1: y,
         y,
@@ -56,7 +58,21 @@ fn mark(x0: f32, y: f32, size: f32, text: &str) -> Mark {
         text: text.into(),
         rgb: [0; 3],
         back: [255; 3],
+        math: false,
+        heavy: false,
     }
+}
+
+/// What reading `page` aloud says, a pause written `|`.
+fn said(page: &Page) -> String {
+    page.spoken()
+        .iter()
+        .map(|s| match s {
+            Spoken::Text(t) => t.as_str(),
+            Spoken::Pause => "|",
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -183,6 +199,7 @@ fn wide_characters_take_two_cells() {
             mark(15., 50., 5., "글"),
             mark(30., 50., 5., "ok"),
         ],
+        ..Page::default()
     };
     let (cells, set) = page.layout(20, 10);
     let row = cells
@@ -264,6 +281,7 @@ fn a_neighbours_ink_does_not_colour_a_glyph() {
         width: 100.,
         height: 100.,
         glyphs: vec![tall, short],
+        ..Page::default()
     };
     let mut image = RgbaImage::from_pixel(200, 200, Rgba([255; 4]));
     let black = Rgba([0, 0, 0, 255]);
@@ -315,6 +333,186 @@ fn text_that_is_not_set_stays_in_the_image() {
 }
 
 #[test]
+fn a_paragraph_is_read_as_one_line_its_broken_word_whole() {
+    let content = [
+        fixture::text(40., 150., 12., "Slides are read by easily-"),
+        fixture::text(40., 136., 12., "downloadable voices"),
+    ]
+    .concat();
+    assert_eq!(
+        said(&page(&content)),
+        "Slides are read by easily-downloadable voices"
+    );
+}
+
+#[test]
+fn a_title_and_items_are_read_apart_and_bullets_not_at_all() {
+    let content = [
+        fixture::text(20., 220., 24., "Results"),
+        fixture::text(40., 150., 12., "* first item"),
+        fixture::text(40., 136., 12., "* second item!"),
+        fixture::text(40., 122., 12., "and its end"),
+    ]
+    .concat();
+    assert_eq!(
+        said(&page(&content)),
+        "Results\nfirst item\nsecond item!\nand its end"
+    );
+}
+
+#[test]
+fn numbered_items_are_read_apart_and_their_numbers_not_at_all() {
+    let content = [
+        fixture::text(40., 150., 12., "1. First point"),
+        fixture::text(40., 136., 12., "2. Second point"),
+        fixture::text(40., 122., 12., "(iv) and the fourth"),
+    ]
+    .concat();
+    assert_eq!(
+        said(&page(&content)),
+        "First point\nSecond point\nand the fourth"
+    );
+    assert!(label("12.") && label("b)") && label("(iv)") && label("(3)"));
+    assert!(!label("2024.") && !label("Fig.") && !label("A.") && !label("one"));
+}
+
+#[test]
+fn a_mark_set_over_its_letter_does_not_split_the_word() {
+    // A grave accent, its pen not moved, set over the n before it.
+    let grave = Mark {
+        x1: 13.,
+        start: 13.,
+        end: 13.,
+        ..mark(11., 50., 5., "\u{300}")
+    };
+    let page = Page {
+        width: 100.,
+        height: 100.,
+        glyphs: vec![mark(10., 50., 5., "n"), grave, mark(15., 50., 5., "ext")],
+        ..Page::default()
+    };
+    assert_eq!(said(&page), "n\u{300}ext");
+}
+
+#[test]
+fn a_footline_is_not_read() {
+    let content = [
+        fixture::text(40., 150., 12., "Body text"),
+        fixture::text(40., 136., 12., "more body"),
+        fixture::text(40., 10., 6., "Author 3 / 20"),
+        fixture::text(200., 20., 12., "7"),
+    ]
+    .concat();
+    assert_eq!(said(&page(&content)), "Body text more body");
+}
+
+#[test]
+fn letters_reaching_into_a_space_do_not_join_words() {
+    // An italic f, its outline reaching 0.15 em into the 0.25 em space
+    // after it.
+    let f = Mark {
+        x1: 31.5,
+        ..mark(20., 50., 10., "f")
+    };
+    let page = Page {
+        width: 100.,
+        height: 100.,
+        glyphs: vec![mark(10., 50., 10., "o"), f, mark(32.5, 50., 10., "raw")],
+        ..Page::default()
+    };
+    assert_eq!(said(&page), "of raw");
+}
+
+#[test]
+fn a_formula_is_a_pause_once_however_long() {
+    let math = |x0, y, text| Mark {
+        math: true,
+        ..mark(x0, y, 5., text)
+    };
+    let page = Page {
+        width: 200.,
+        height: 100.,
+        glyphs: vec![
+            // Take x + y first, / so on. / α
+            mark(10., 30., 5., "Take"),
+            math(35., 30., "x"),
+            math(41., 30., "+"),
+            math(47., 30., "y"),
+            mark(60., 30., 5., "first"),
+            mark(10., 37., 5., "so"),
+            mark(25., 37., 5., "on"),
+            math(10., 60., "α"),
+        ],
+        ..Page::default()
+    };
+    assert_eq!(said(&page), "Take\n|\nfirst so on\n|");
+}
+
+#[test]
+fn greek_and_math_letters_are_a_formulas() {
+    assert!(math_char('α') && math_char('𝑍') && math_char('∑'));
+    assert!(!math_char('a') && !math_char('é'));
+    assert!(math_font("NewCMMath-Regular") && math_font("CMMI10"));
+    assert!(!math_font("LibertinusSerif-Regular") && !math_font("CMR10"));
+}
+
+/// A rule across from `x0` to `x1` at `y`, or down from `y0` to `y1` at `x`.
+fn across(x0: f64, x1: f64, y: f64) -> Rect {
+    Rect::new(x0, y - 0.25, x1, y + 0.25)
+}
+
+fn down(x: f64, y0: f64, y1: f64) -> Rect {
+    Rect::new(x - 0.25, y0, x + 0.25, y1)
+}
+
+#[test]
+fn a_ruled_table_is_a_pause_and_ruled_prose_is_read() {
+    let page = Page {
+        width: 200.,
+        height: 100.,
+        glyphs: vec![
+            mark(10., 10., 5., "Before"),
+            // Columns closer than a wide gap, a rule between them.
+            mark(10., 30., 5., "aaa"),
+            mark(28., 30., 5., "b"),
+            mark(10., 40., 5., "one"),
+            mark(28., 40., 5., "two"),
+            mark(10., 60., 5., "After"),
+            // As a block quote, its rule down its left.
+            mark(10., 80., 5., "quoted"),
+            mark(42., 80., 5., "text"),
+        ],
+        across: vec![
+            across(5., 50., 24.),
+            across(5., 50., 34.),
+            across(5., 50., 44.),
+            across(5., 90., 70.),
+            across(5., 90., 90.),
+        ],
+        down: vec![down(26.5, 24., 44.), down(5., 75., 85.)],
+        ..Page::default()
+    };
+    assert_eq!(said(&page), "Before\n|\nAfter\nquoted text");
+}
+
+#[test]
+fn columns_far_apart_under_booktabs_rules_are_a_table() {
+    let page = Page {
+        width: 200.,
+        height: 100.,
+        glyphs: vec![
+            mark(10., 30., 5., "Gene"),
+            mark(60., 30., 5., "Score"),
+            mark(10., 60., 5., "Prose"),
+            mark(40., 60., 5., "here"),
+        ],
+        across: vec![across(5., 100., 20.), across(5., 100., 40.)],
+        ..Page::default()
+    };
+    assert_eq!(said(&page), "|\nProse here");
+}
+
+#[test]
 fn overlay_writes_text_that_reads_on_the_backdrop() {
     let area = Area::new(0, 0, 6, 2);
     let white = Color::Rgb(255, 255, 255);
@@ -328,12 +526,14 @@ fn overlay_writes_text_that_reads_on_the_backdrop() {
         rgb: [0; 3],
         bold: true,
         faint: false,
+        lit: false,
     };
     let pale = Cell {
         ch: 'b',
         rgb: [220; 3],
         bold: false,
         faint: true,
+        lit: false,
     };
     let cells: Cells = vec![
         vec![Some(dark), Some(dark), Some(pale), None, None, None],
@@ -368,9 +568,114 @@ fn overlay_blanks_the_cell_under_a_wide_character() {
         rgb: [0; 3],
         bold: false,
         faint: false,
+        lit: false,
     };
     overlay(&vec![vec![Some(wide), None, None, None]], area, &mut buf);
     assert_eq!(buf[(0, 0)].symbol(), "한");
     assert_eq!(buf[(1, 0)].symbol(), " ");
     assert_eq!(buf[(2, 0)].symbol(), "▀");
+}
+
+#[test]
+fn a_sentence_ends_at_its_stop_but_not_at_an_initial_or_abbreviation() {
+    for word in ["end.", "why?", "so!", "(this).", "“quoted.”"] {
+        assert!(ends_sentence(word), "{word}");
+    }
+    for word in ["e.g.", "Fig.", "J.", "(i.e.", "word", "3.5"] {
+        assert!(!ends_sentence(word), "{word}");
+    }
+}
+
+/// A paragraph of two sentences, the second over two lines.
+fn two_sentences() -> Page {
+    page(
+        &[
+            fixture::text(40., 150., 12., "One thing, e.g. this. Another"),
+            fixture::text(40., 136., 12., "thing here."),
+        ]
+        .concat(),
+    )
+}
+
+#[test]
+fn sentences_are_read_apart_across_lines() {
+    assert_eq!(
+        said(&two_sentences()),
+        "One thing, e.g. this.\nAnother thing here."
+    );
+}
+
+#[test]
+fn a_sentence_lit_is_boxed_a_line_at_a_time() {
+    let mut page = two_sentences();
+    let boxes = page.light(1);
+    let lit: String = page
+        .glyphs
+        .iter()
+        .zip(&page.lit)
+        .filter(|(_, lit)| **lit)
+        .map(|(g, _)| g.text.as_str())
+        .collect();
+    assert_eq!(lit, "Anotherthinghere.");
+    assert_eq!(boxes.len(), 2);
+    // The first line's box starts at the sentence, not the line.
+    let start = page
+        .glyphs
+        .iter()
+        .find(|g| g.text.starts_with('A'))
+        .unwrap();
+    assert!((boxes[0].x0 - f64::from(start.start)).abs() < 0.01);
+    assert!(boxes[1].x0 < boxes[0].x0);
+    assert!(boxes.iter().all(|b| b.height() > 10. && b.height() < 14.));
+
+    assert!(page.light(5).is_empty());
+}
+
+#[test]
+fn the_cells_of_a_sentence_lit_are_lit() {
+    let mut page = two_sentences();
+    page.light(0);
+    let (cells, _) = page.layout(80, 20);
+    let lit: String = cells
+        .iter()
+        .flatten()
+        .flatten()
+        .filter(|c| c.lit)
+        .map(|c| c.ch)
+        .collect();
+    assert_eq!(lit, "Onething,e.g.this.");
+}
+
+#[test]
+fn a_bold_font_is_known_by_its_name() {
+    for name in [
+        "LibertinusSerif-Bold",
+        "Helvetica-BoldOblique",
+        "SourceSans3-Semibold",
+        "CMBX10",
+    ] {
+        assert!(bold_font(name), "{name}");
+    }
+    for name in ["LibertinusSerif-Regular", "Helvetica", "CMR10", "CMMI10"] {
+        assert!(!bold_font(name), "{name}");
+    }
+}
+
+#[test]
+fn a_bold_heading_ends_its_sentence_and_is_bold() {
+    let heavy = |m: Mark| Mark { heavy: true, ..m };
+    let page = Page {
+        width: 200.,
+        height: 100.,
+        glyphs: vec![
+            heavy(mark(5., 20., 10., "Heading")),
+            mark(5., 32., 10., "Body"),
+            mark(60., 32., 10., "text."),
+        ],
+        ..Page::default()
+    };
+    assert_eq!(said(&page), "Heading\nBody text.");
+    let (cells, _) = page.layout(60, 20);
+    assert!(find(&cells, 'H').bold);
+    assert!(!find(&cells, 'B').bold);
 }

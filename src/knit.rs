@@ -77,15 +77,10 @@ fn run(rmd: &Path, stop: &AtomicBool) -> Result<Knitted, String> {
         Err(e) => return Err(format!("cannot run R: {e}")),
     };
     if !status.success() {
-        let stderr = std::fs::read_to_string(&log).unwrap_or_default();
-        let why = stderr
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty() && !l.starts_with("Execution halted"))
-            .unwrap_or("knitr failed");
+        let why = child::last_line(&log, |l| !l.starts_with("Execution halted"));
         return Err(format!(
             "knitting failed, chunks shown as code: {}",
-            why.trim()
+            why.as_deref().unwrap_or("knitr failed")
         ));
     }
     let md = std::fs::read_to_string(&out).map_err(|e| format!("knitr wrote nothing: {e}"))?;

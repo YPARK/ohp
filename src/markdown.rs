@@ -206,6 +206,9 @@ struct Front {
 /// The front matter, and what follows it.
 fn front_matter(text: &str) -> (Front, &str) {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if let Some(toml) = toml_front_matter(text) {
+        return toml;
+    }
     let mut front = Front::default();
     let Some(rest) = text
         .strip_prefix("---\n")
@@ -283,6 +286,60 @@ fn front_matter(text: &str) -> (Front, &str) {
         }
     }
     (front, &rest[body_start..])
+}
+
+/// Front matter between `+++` lines, in TOML, as Hugo and Zola write it,
+/// and what follows it. Only its title and date are read: none of it is
+/// pandoc's.
+fn toml_front_matter(text: &str) -> Option<(Front, &str)> {
+    let rest = text
+        .strip_prefix("+++\n")
+        .or_else(|| text.strip_prefix("+++\r\n"))?;
+    let mut front = Front::default();
+    let mut at = 0;
+    // Keys before the first `[table]` are the document's own.
+    let mut top = true;
+    for line in rest.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed == "+++" {
+            return Some((front, &rest[at + line.len()..]));
+        }
+        at += line.len();
+        top &= !trimmed.starts_with('[');
+        let Some((key, value)) = trimmed.split_once('=').filter(|_| top) else {
+            continue;
+        };
+        let value = Some(toml_value(value)).filter(|v| !v.is_empty());
+        match key.trim() {
+            "title" => front.title = value,
+            "date" => front.date = value,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A TOML value on one line: within its quotes, or as it is, less any
+/// comment after it.
+fn toml_value(value: &str) -> String {
+    let value = value.trim();
+    for q in ['"', '\''] {
+        if let Some(rest) = value.strip_prefix(q) {
+            // A basic string's quote may be escaped; a literal's may not.
+            let mut escaped = false;
+            let end = rest.find(|c| {
+                let close = c == q && !escaped;
+                escaped = q == '"' && c == '\\' && !escaped;
+                close
+            });
+            return rest[..end.unwrap_or(rest.len())].to_string();
+        }
+    }
+    value
+        .split_once('#')
+        .map_or(value, |(v, _)| v)
+        .trim()
+        .to_string()
 }
 
 /// A YAML scalar: quoted, plain, or a block under `|` or `>`.

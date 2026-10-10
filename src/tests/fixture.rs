@@ -83,6 +83,13 @@ pub fn hello() -> Vec<u8> {
     with(&[text(40., 200., 24., "Hello")])
 }
 
+#[cfg(feature = "speech")]
+/// A PDF whose pages say `texts`, in 12-point lines.
+pub fn saying(texts: &[&str]) -> Vec<u8> {
+    let contents: Vec<String> = texts.iter().map(|t| text(40., 150., 12., t)).collect();
+    with(&contents)
+}
+
 /// The renderer's next finished job.
 pub fn next(renderer: &Renderer) -> Done {
     renderer
@@ -108,29 +115,45 @@ pub fn r_here() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-#[cfg(feature = "markdown")]
+#[cfg(any(feature = "markdown", feature = "speech"))]
 /// A `sleep` this test run alone starts, so no other run's is taken for
 /// it: a time with the run's id in it.
 pub fn marked_sleep(whole: u32) -> String {
     format!("sleep {whole}.{}", std::process::id())
 }
 
-#[cfg(feature = "markdown")]
+#[cfg(any(feature = "markdown", feature = "speech"))]
 /// Whether, within a few seconds, no process is left whose command ends in
 /// `command`: one killed takes a moment to go.
 pub fn gone(command: &str) -> bool {
+    within_seconds(|| !running(command))
+}
+
+#[cfg(feature = "speech")]
+/// Whether, within a few seconds, a process whose command ends in
+/// `command` is running.
+pub fn started(command: &str) -> bool {
+    within_seconds(|| running(command))
+}
+
+#[cfg(any(feature = "markdown", feature = "speech"))]
+/// Whether `done` holds within a few seconds.
+fn within_seconds(done: impl Fn() -> bool) -> bool {
+    let start = std::time::Instant::now();
+    while !done() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    done()
+}
+
+#[cfg(any(feature = "markdown", feature = "speech"))]
+/// Whether a process whose command ends in `command` is running.
+fn running(command: &str) -> bool {
     // A dot is any character to pgrep, and the end is anchored, so no
     // longer time, as another run's, matches.
     let pattern = format!("{}$", command.replace('.', "\\."));
-    let running = || {
-        std::process::Command::new("pgrep")
-            .args(["-f", &pattern])
-            .output()
-            .is_ok_and(|o| !o.stdout.is_empty())
-    };
-    let start = std::time::Instant::now();
-    while running() && start.elapsed() < Duration::from_secs(5) {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    !running()
+    std::process::Command::new("pgrep")
+        .args(["-f", &pattern])
+        .output()
+        .is_ok_and(|o| !o.stdout.is_empty())
 }

@@ -56,7 +56,15 @@ fn a_slide_fills_its_cell_box_without_overflowing() {
 
     for (cols, rows) in [(40, 10), (20, 30), (140, 39)] {
         let key = key(1, cols, rows);
-        let image = rasterise(&pdf, &cache, &InterpreterSettings::default(), &picker, key).unwrap();
+        let image = rasterise(
+            &pdf,
+            &cache,
+            &InterpreterSettings::default(),
+            &picker,
+            key,
+            &[],
+        )
+        .unwrap();
         let (bw, bh) = (u32::from(cols * font.width), u32::from(rows * font.height));
         assert!(image.width() <= bw && image.height() <= bh, "{cols}x{rows}");
         assert!(
@@ -79,7 +87,8 @@ fn a_page_past_the_end_renders_nothing() {
             &RenderCache::new(),
             &settings,
             &Picker::halfblocks(),
-            key
+            key,
+            &[]
         )
         .is_none()
     );
@@ -94,6 +103,7 @@ fn job(page: usize, cols: u16, rows: u16, look: Look) -> Job {
     Job {
         key: key(page, cols, rows),
         look,
+        lit: None,
     }
 }
 
@@ -181,6 +191,7 @@ fn zoomed(zoom: Zoom) -> RgbaImage {
         &settings,
         &Picker::halfblocks(),
         key,
+        &[],
     )
     .unwrap()
 }
@@ -239,6 +250,7 @@ fn a_zoom_too_large_to_render_is_enlarged_to_fill_the_box() {
         &settings,
         &Picker::halfblocks(),
         key,
+        &[],
     )
     .unwrap();
     assert_eq!(image.dimensions(), (1400, 780));
@@ -261,6 +273,7 @@ fn a_zoomed_text_job_shows_the_part_panned_to() {
         renderer.push([Job {
             key,
             look: Look::Text,
+            lit: None,
         }]);
         let Some(Slide::Text { cells, backdrop }) = fixture::next(&renderer).slide else {
             panic!("no text slide");

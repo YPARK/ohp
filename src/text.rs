@@ -12,6 +12,13 @@
 //! the text is set where it reads well, not exactly where the page has it,
 //! and would otherwise show twice. Glyphs that are not set, such as rotated
 //! labels or lines past the bottom of the grid, stay in the image.
+//!
+//! Read aloud, the text leaves out formulas and tables, a pause in their
+//! place. A glyph is a formula's when its font is a math font or its
+//! character is a mathematical one: pdfTeX's Type1 fonts give no names, so
+//! there a formula's plain letters are read. A line is a table's when rules
+//! run above and below it and its words fall in columns, apart across a rule
+//! or a wide gap.
 
 use hayro::hayro_interpret::font::Glyph;
 use hayro::hayro_interpret::hayro_cmap::BfString;
@@ -25,10 +32,16 @@ use image::{Rgba, RgbaImage};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as Area;
 use ratatui::style::{Color, Modifier, Style};
+use std::collections::HashMap;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// A gap wider than this, in ems, starts a new word.
-const WORD_GAP: f32 = 0.2;
+/// A gap wider than this, in ems, from where the pen ends a glyph to where
+/// it starts the next, starts a new word. A space a justified line squeezes
+/// is about twice it.
+const WORD_GAP: f32 = 0.1;
+/// Where a glyph's advance is not known, the room assumed between its
+/// outline and the pen either side, in ems.
+const BEARING: f64 = 0.05;
 /// A gap wider than this, in ems, is kept on screen, as between columns.
 const WIDE_GAP: f32 = 1.5;
 /// Baselines closer than this, in ems, are one line.
@@ -38,6 +51,19 @@ const SAME_LINE: f32 = 0.35;
 const TIGHT: f32 = 1.6;
 /// Text this much larger than the body is drawn bold.
 const LARGE: f32 = 1.15;
+/// Text this much smaller than the body, as a footline or a page number, is
+/// not read aloud.
+const SMALL: f32 = 0.8;
+/// Words this far apart, in ems, are in columns of a table, where rules run
+/// above and below them; prose is never spaced so wide.
+const TABLE_GAP: f32 = 1.;
+/// Thickest a drawn line is to be a rule, as a table's, in points.
+const RULE: f64 = 3.;
+/// How far a line being read is lit above and below its baseline, in ems.
+const LIT_ASCENT: f64 = 0.8;
+const LIT_DESCENT: f64 = 0.25;
+/// The colour a sentence being read is lit with, behind its text.
+pub const LIGHT: [u8; 3] = [255, 226, 110];
 /// Least difference in luma between text and what is behind it. Text the
 /// page itself draws fainter than this, as beamer does covered items, is
 /// left faint.
@@ -47,11 +73,30 @@ const CONTRAST: f32 = 0.4;
 const TYPE3: (f64, f64, f64) = (0.8, 0.5, 0.2);
 
 /// The text of one page, in page points with y growing down.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Page {
     pub width: f32,
     pub height: f32,
     glyphs: Vec<Mark>,
+    /// Rules the page draws, as a table's: across it and down it.
+    across: Vec<Rect>,
+    down: Vec<Rect>,
+    /// Which glyphs are being read aloud; none if empty.
+    lit: Vec<bool>,
+}
+
+/// A sentence read aloud, and the glyphs it is read from.
+struct Sentence {
+    text: String,
+    glyphs: Vec<usize>,
+}
+
+/// What reading a page aloud says: a sentence, or a pause where a formula
+/// or a table is left out.
+#[derive(Debug, PartialEq)]
+pub enum Spoken {
+    Text(String),
+    Pause,
 }
 
 /// One drawn glyph.
@@ -59,6 +104,10 @@ pub struct Page {
 struct Mark {
     x0: f32,
     x1: f32,
+    /// Where the pen starts the glyph and ends it, past its advance: the
+    /// outline of an f or a j reaches into the space beside it.
+    start: f32,
+    end: f32,
     /// Top and bottom of the glyph's outline.
     y0: f32,
     y1: f32,
@@ -70,14 +119,24 @@ struct Mark {
     rgb: [u8; 3],
     /// The colour around the glyph on the rendered page.
     back: [u8; 3],
+    /// It is a formula's.
+    math: bool,
+    /// Its font is a bold one.
+    heavy: bool,
 }
 
 /// A run of glyphs with no word gap between them.
 struct Word {
     x0: f32,
     x1: f32,
+    /// Where the pen ends its last glyph.
+    end: f32,
     size: f32,
     text: String,
+    /// Some of it is a formula.
+    math: bool,
+    /// All of it is set in bold.
+    heavy: bool,
     /// Its glyphs, as indices into the page's.
     glyphs: Vec<usize>,
 }
@@ -90,6 +149,8 @@ pub struct Cell {
     pub bold: bool,
     /// The page draws it faint against its background.
     pub faint: bool,
+    /// It is being read aloud.
+    pub lit: bool,
 }
 
 /// Rows of cells, `None` where nothing is written. A wide character's
@@ -115,11 +176,14 @@ pub fn extract<'a>(
     interpret_page(page, &mut ctx, &mut marks);
     // Text off the page is clipped away when rendered; beamer keeps some there.
     let on_page = |g: &Mark| g.x1 >= 0. && g.x0 <= width && g.y >= 0. && g.y <= height + g.size;
-    marks.0.retain(on_page);
+    marks.glyphs.retain(on_page);
     Some(Page {
         width,
         height,
-        glyphs: marks.0,
+        glyphs: marks.glyphs,
+        across: marks.across,
+        down: marks.down,
+        lit: Vec::new(),
     })
 }
 
@@ -163,11 +227,13 @@ impl Page {
             }
             for (word, &(down, col)) in words.iter().zip(&spots) {
                 let first = &self.glyphs[word.glyphs[0]];
+                let lit = word.glyphs.iter().any(|&g| self.lit.get(g) == Some(&true));
                 let cell = |ch| Cell {
                     ch,
                     rgb: first.rgb,
-                    bold: word.size > LARGE * body,
+                    bold: word.heavy || word.size > LARGE * body,
                     faint: faint(first.rgb, first.back),
+                    lit,
                 };
                 let mut at = col;
                 for ch in word.text.chars() {
@@ -190,6 +256,162 @@ impl Page {
             prev = Some((y, size, last));
         }
         (grid, set)
+    }
+
+    /// The page's text to be read aloud, a sentence at a time, and a pause
+    /// where a formula or a table is left out.
+    pub fn spoken(&self) -> Vec<Spoken> {
+        self.sentences()
+            .into_iter()
+            .map(|s| s.map_or(Spoken::Pause, |s| Spoken::Text(s.text)))
+            .collect()
+    }
+
+    /// Mark sentence `k` of what is read aloud as being read, so `set_over`
+    /// lights its cells, and give boxes about it, one a line, in page points.
+    pub fn light(&mut self, k: usize) -> Vec<Rect> {
+        let lines = self.text_lines();
+        let sentence = self.sentences_of(&lines).into_iter().flatten().nth(k);
+        self.lit = vec![false; self.glyphs.len()];
+        for g in sentence.map(|s| s.glyphs).unwrap_or_default() {
+            self.lit[g] = true;
+        }
+        lines
+            .iter()
+            .filter_map(|(_, words)| {
+                words
+                    .iter()
+                    .flat_map(|w| &w.glyphs)
+                    .filter(|&&i| self.lit[i])
+                    .map(|&i| {
+                        let g = &self.glyphs[i];
+                        let (y, size) = (f64::from(g.y), f64::from(g.size));
+                        Rect::new(
+                            f64::from(g.start),
+                            y - LIT_ASCENT * size,
+                            f64::from(g.end),
+                            y + LIT_DESCENT * size,
+                        )
+                    })
+                    .reduce(|a, b| a.union(b))
+            })
+            .collect()
+    }
+
+    /// Mark nothing as being read.
+    pub fn unlight(&mut self) {
+        self.lit.clear();
+    }
+
+    /// What is read aloud: sentences, and `None` where a pause goes. A
+    /// title, an item or a paragraph ends a sentence too. Words of no
+    /// letters nor digits, as bullets, are not read, nor a list's numbers,
+    /// and an item one starts is a paragraph of its own. Small text, as a
+    /// footline, and lines of no letters, as a page number, are left out.
+    fn sentences(&self) -> Vec<Option<Sentence>> {
+        self.sentences_of(&self.text_lines())
+    }
+
+    /// `sentences` of the page's `lines`, as `text_lines` gives them.
+    fn sentences_of(&self, lines: &[(f32, Vec<Word>)]) -> Vec<Option<Sentence>> {
+        let body = self.body_size();
+        let mut said: Vec<Option<Sentence>> = Vec::new();
+        let pause = |said: &mut Vec<Option<Sentence>>| {
+            if said.last().is_none_or(Option::is_some) {
+                said.push(None);
+            }
+        };
+        // Whether the last sentence goes on: it has not ended, nor its
+        // paragraph.
+        let mut open = false;
+        // The last line read: its baseline, size and whether it is bold.
+        let mut prev: Option<(f32, f32, bool)> = None;
+        for &(y, ref words) in lines {
+            let size = words.iter().map(|w| w.size).fold(0., f32::max);
+            if size < SMALL * body {
+                continue;
+            }
+            if self.tabular(y, words) {
+                pause(&mut said);
+                continue;
+            }
+            let worded = |w: &Word| !w.math && w.text.chars().any(char::is_alphanumeric);
+            let lettered = words
+                .iter()
+                .any(|w| !w.math && w.text.chars().any(char::is_alphabetic));
+            // A bullet, or a list's number, starts an item, and is not read.
+            let item = words
+                .first()
+                .is_some_and(|w| !w.math && (!worded(w) || label(&w.text)));
+            let read = |i: usize, w: &Word| worded(w) && !(item && i == 0);
+            let heavy = (words.iter().enumerate())
+                .filter(|&(i, w)| read(i, w))
+                .all(|(_, w)| w.heavy);
+            let apart = prev.is_none_or(|(py, psize, pheavy)| {
+                item || y - py > TIGHT * size.max(psize)
+                    || size > LARGE * psize
+                    || psize > LARGE * size
+                    || heavy != pheavy
+            });
+            if apart && lettered {
+                open = false;
+            }
+            let mut first = true;
+            for (i, w) in words.iter().enumerate() {
+                if w.math {
+                    pause(&mut said);
+                    continue;
+                }
+                if !lettered || !read(i, w) {
+                    continue;
+                }
+                match said.last_mut() {
+                    Some(Some(s)) if open => {
+                        // A word hyphenated across the break is joined again
+                        // with its hyphen: it may be a compound's.
+                        if !(first && s.text.ends_with('-')) {
+                            s.text.push(' ');
+                        }
+                        s.text.push_str(&w.text);
+                        s.glyphs.extend(&w.glyphs);
+                    }
+                    _ => said.push(Some(Sentence {
+                        text: w.text.clone(),
+                        glyphs: w.glyphs.clone(),
+                    })),
+                }
+                open = !ends_sentence(&w.text);
+                first = false;
+            }
+            if !first {
+                prev = Some((y, size, heavy));
+            }
+        }
+        said
+    }
+
+    /// Whether a line is a table's: rules run above and below its words,
+    /// and they fall in columns, apart across a rule or a wide gap.
+    fn tabular(&self, y: f32, words: &[Word]) -> bool {
+        let y = f64::from(y);
+        let ruled = words.iter().any(|w| {
+            let x = f64::from(w.x0 + w.x1) / 2.;
+            let top = y - f64::from(w.size) / 2.;
+            let over = |r: &&Rect| r.x0 <= x && x <= r.x1;
+            let mut rules = self.across.iter().filter(over);
+            rules.clone().any(|r| r.y1 <= top) && rules.any(|r| r.y0 >= y)
+        });
+        ruled
+            && words.windows(2).any(|pair| {
+                let [a, b] = pair else { return false };
+                let top = y - f64::from(a.size.max(b.size)) / 2.;
+                let (left, right) = (f64::from(a.x1), f64::from(b.x0));
+                b.x0 - a.x1 > TABLE_GAP * a.size.max(b.size)
+                    || self.down.iter().any(|r| {
+                        let x = (r.x0 + r.x1) / 2.;
+                        r.y0 <= top && r.y1 >= y && left <= x && x <= right
+                    })
+            })
     }
 
     /// Note the colour around each glyph in `image`, a render of this page.
@@ -288,16 +510,23 @@ impl Page {
         for &i in line {
             let g = &self.glyphs[i];
             match words.last_mut() {
-                Some(w) if g.x0 - w.x1 <= WORD_GAP * w.size.max(g.size) => {
+                Some(w) if g.start - w.end <= WORD_GAP * w.size.max(g.size) => {
                     w.text.push_str(&g.text);
                     w.x1 = w.x1.max(g.x1);
+                    // A mark set over the letter before it ends short of it.
+                    w.end = w.end.max(g.end);
+                    w.math |= g.math;
+                    w.heavy &= g.heavy;
                     w.glyphs.push(i);
                 }
                 _ => words.push(Word {
                     x0: g.x0,
                     x1: g.x1,
+                    end: g.end,
                     size: g.size,
                     text: g.text.clone(),
+                    math: g.math,
+                    heavy: g.heavy,
                     glyphs: vec![i],
                 }),
             }
@@ -334,6 +563,31 @@ fn place(words: &[Word], col_of: &impl Fn(f32) -> usize, cols: usize) -> Vec<(us
     spots
 }
 
+/// Whether `word` ends a sentence: it ends as one does, and is not an
+/// abbreviation nor an initial.
+fn ends_sentence(word: &str) -> bool {
+    const ABBREVIATIONS: [&str; 12] = [
+        "e.g.", "i.e.", "vs.", "cf.", "al.", "Fig.", "Eq.", "Dr.", "Mr.", "Ms.", "Mrs.", "No.",
+    ];
+    let word = word.trim_start_matches(['(', '[', '"', '\'', '“', '‘']);
+    let end = word.trim_end_matches([')', ']', '"', '\'', '”', '’']);
+    let initial = end.chars().count() == 2 && end.starts_with(char::is_uppercase);
+    end.ends_with(['.', '!', '?']) && !initial && !ABBREVIATIONS.contains(&end)
+}
+
+/// Whether `word` numbers an item of a list, as `1.`, `b)`, `(iv)` do.
+fn label(word: &str) -> bool {
+    let word = word.strip_prefix('(').unwrap_or(word);
+    let Some(n) = word.strip_suffix(['.', ')']) else {
+        return false;
+    };
+    let all = |f: fn(char) -> bool| !n.is_empty() && n.chars().all(f);
+    let roman = |c| matches!(c, 'i' | 'v' | 'x');
+    (n.len() <= 3 && all(|c| c.is_ascii_digit()))
+        || (n.len() == 1 && all(|c| c.is_ascii_lowercase()))
+        || (n.len() <= 4 && all(roman))
+}
+
 /// Write the cells over what `area` of `buf` already shows, a coarse image
 /// of the slide, each on the colour behind it.
 pub fn overlay(cells: &Cells, area: Area, buf: &mut Buffer) {
@@ -351,8 +605,8 @@ pub fn overlay(cells: &Cells, area: Area, buf: &mut Buffer) {
             };
             // A block cell shows its top half in fg and bottom half in bg.
             let [top, bottom] = [target.fg, target.bg].map(|c| rgb_of(c).unwrap_or([255; 3]));
-            let back = mix(top, bottom);
-            let fg = if cell.faint {
+            let back = if cell.lit { LIGHT } else { mix(top, bottom) };
+            let fg = if cell.faint && !cell.lit {
                 cell.rgb
             } else {
                 readable(cell.rgb, back)
@@ -411,14 +665,63 @@ fn unligate(c: char) -> Option<&'static str> {
     })
 }
 
-/// Collects the glyphs a page draws; everything else is ignored.
+/// Whether a font, by its PostScript name, is one formulas are set in.
+fn math_font(name: &str) -> bool {
+    const TEX: [&str; 8] = [
+        "CMMI", "CMSY", "CMEX", "CMBSY", "MSAM", "MSBM", "EUFM", "RSFS",
+    ];
+    name.contains("Math") || TEX.iter().any(|tex| name.starts_with(tex))
+}
+
+/// Whether a font, by its PostScript name, is a bold one.
+fn bold_font(name: &str) -> bool {
+    const WEIGHTS: [&str; 4] = ["bold", "black", "heavy", "demi"];
+    let lower = name.to_ascii_lowercase();
+    name.starts_with("CMBX")
+        || name.starts_with("CMB10")
+        || WEIGHTS.iter().any(|w| lower.contains(w))
+}
+
+/// Whether a character is a formula's: Greek, a mathematical operator or
+/// symbol, or a mathematical letter.
+fn math_char(c: char) -> bool {
+    matches!(c,
+        '\u{0391}'..='\u{03C9}'
+        | '\u{2200}'..='\u{22FF}'
+        | '\u{27C0}'..='\u{27EF}'
+        | '\u{2980}'..='\u{2AFF}'
+        | '\u{1D400}'..='\u{1D7FF}')
+}
+
+/// Collects the glyphs a page draws, and the rules; everything else is
+/// ignored.
 #[derive(Default)]
-struct Marks(Vec<Mark>);
+struct Marks {
+    glyphs: Vec<Mark>,
+    across: Vec<Rect>,
+    down: Vec<Rect>,
+    /// Whether each font, by its cache key, is a math font and a bold one.
+    fonts: HashMap<u128, (bool, bool)>,
+}
 
 impl<'a> Device<'a> for Marks {
     fn set_soft_mask(&mut self, _: Option<SoftMask<'a>>) {}
     fn set_blend_mode(&mut self, _: BlendMode) {}
-    fn draw_path(&mut self, _: &BezPath, _: Affine, _: &Paint<'a>, _: &PathDrawMode) {}
+
+    fn draw_path(&mut self, path: &BezPath, transform: Affine, _: &Paint<'a>, mode: &PathDrawMode) {
+        let mut bbox = transform.transform_rect_bbox(path.bounding_box());
+        if let PathDrawMode::Stroke(stroke) = mode {
+            let half = f64::from(stroke.line_width) * transform.determinant().abs().sqrt() / 2.;
+            bbox = bbox.inflate(half, half);
+        }
+        let (w, h) = (bbox.width(), bbox.height());
+        if h <= RULE && w >= 2. * RULE {
+            self.across.push(bbox);
+        } else if w <= RULE && h >= 2. * RULE {
+            self.down.push(bbox);
+        }
+    }
+
     fn push_clip_path(&mut self, _: &ClipPath) {}
     fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'a>>, _: BlendMode) {}
     fn draw_image(&mut self, _: Image<'a, '_>, _: Affine) {}
@@ -476,14 +779,42 @@ impl<'a> Device<'a> for Marks {
                 )
             }
         };
+        let advance = match glyph {
+            Glyph::Outline(o) => o.advance_width(),
+            Glyph::Type3(_) => None,
+        };
+        let pen = |at: f64| (m * Point::new(at, 0.)).x;
+        // A width past the outline by more than an em is in other units.
+        let (start, end) = match advance.map(|a| pen(a.into())) {
+            Some(end) if end >= origin.x && end <= bbox.x1 + f64::from(size) => (origin.x, end),
+            _ => {
+                let bearing = BEARING * f64::from(size);
+                (bbox.x0 - bearing, bbox.x1 + bearing)
+            }
+        };
         // Filled and stroked text, as in fake bold, is drawn twice.
         let again = |l: &Mark| l.text == text && l.x0 == bbox.x0 as f32 && l.y == origin.y as f32;
-        if self.0.last().is_some_and(again) {
+        if self.glyphs.last().is_some_and(again) {
             return;
         }
-        self.0.push(Mark {
+        let (math_face, heavy) = match glyph {
+            Glyph::Outline(o) => *self.fonts.entry(o.font_cache_key()).or_insert_with(|| {
+                o.font_data()
+                    .and_then(|f| f.postscript_name)
+                    .map_or((false, false), |name| {
+                        // Less a subset's tag, as `ABCDEF+`.
+                        let name = name.split_once('+').map_or(&*name, |(_, base)| base);
+                        (math_font(name), bold_font(name))
+                    })
+            }),
+            Glyph::Type3(_) => (false, false),
+        };
+        let math = math_face || text.chars().any(math_char);
+        self.glyphs.push(Mark {
             x0: bbox.x0 as f32,
             x1: bbox.x1 as f32,
+            start: start as f32,
+            end: end as f32,
             y0: bbox.y0 as f32,
             y1: bbox.y1 as f32,
             y: origin.y as f32,
@@ -491,6 +822,8 @@ impl<'a> Device<'a> for Marks {
             text,
             rgb,
             back: [255; 3],
+            math,
+            heavy,
         });
     }
 }

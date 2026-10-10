@@ -21,10 +21,11 @@ mod latex;
 mod markdown;
 #[cfg(feature = "markdown")]
 mod math;
-#[cfg(feature = "markdown")]
+#[cfg(any(feature = "markdown", feature = "speech"))]
 mod process;
 mod remote;
 mod render;
+mod speak;
 mod text;
 #[cfg(feature = "markdown")]
 mod typeset;
@@ -38,6 +39,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "speech")]
+use std::time::Duration;
 
 #[cfg_attr(
     feature = "markdown",
@@ -51,7 +54,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// Keys: n/p or arrows next/previous slide (up/down move a row in the grid),
 /// g or tab switches between the slide and a grid of all slides, enter
 /// presents the slide picked in the grid, t switches between images and
-/// text, q quits.
+/// text, s reads the slides aloud from this one on, q quits.
 ///
 /// +/- zoom the slide, or the grid. Zoomed in, arrows pan the slide and 0
 /// fits it back to the screen.
@@ -88,6 +91,32 @@ struct Args {
     #[cfg(feature = "markdown")]
     #[arg(long)]
     no_knit: bool,
+    /// Shell command that writes the text on its input as WAV audio on its
+    /// output, to read slides aloud with s, as `piper -m voice.onnx -f -`.
+    /// [default: Piper with the first voice in ~/.local/share/piper, else
+    /// macOS's say, else espeak-ng --stdout, or espeak's]
+    #[cfg(feature = "speech")]
+    #[arg(long, env = "OHP_VOICE", value_name = "COMMAND")]
+    voice: Option<String>,
+    /// Shell command that plays the WAV audio on its input. [default: aplay
+    /// -q, paplay, afplay /dev/stdin or sox's play, the first found]
+    #[cfg(feature = "speech")]
+    #[arg(long, env = "OHP_PLAY", value_name = "COMMAND")]
+    play: Option<String>,
+    /// Seconds paused, reading aloud, where a formula or a table is left
+    /// out.
+    #[cfg(feature = "speech")]
+    #[arg(long, value_name = "SECONDS", default_value = "0.5", value_parser = seconds)]
+    pause: Duration,
+}
+
+/// A time in seconds, as `0.5`.
+#[cfg(feature = "speech")]
+fn seconds(s: &str) -> Result<Duration, String> {
+    let secs: f64 = s
+        .parse()
+        .map_err(|_| format!("`{s}` is not a number of seconds"))?;
+    Duration::try_from_secs_f64(secs).map_err(|_| format!("`{s}` is not a time to pause"))
 }
 
 fn main() -> anyhow::Result<ExitCode> {
@@ -135,7 +164,7 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
         knit: local.knit && remote.is_none(),
         ..local.clone()
     };
-    #[cfg(all(unix, feature = "markdown"))]
+    #[cfg(all(unix, any(feature = "markdown", feature = "speech")))]
     process::signals::install(&options.stop, signaled)?;
     let deck = render::Deck::open_with(path, options);
     // Stopped while the deck was read: no screen to show.
@@ -143,7 +172,25 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
         return Ok(());
     }
     let link = remote.as_ref().map(remote::Remote::link);
-    app::run(deck?, args.text, link, local, signaled.clone())
+    app::run(
+        deck?,
+        args.text,
+        link,
+        local,
+        speaker(&args),
+        signaled.clone(),
+    )
+}
+
+#[cfg(feature = "speech")]
+fn speaker(args: &Args) -> speak::Speaker {
+    let (voice, play) = (args.voice.clone(), args.play.clone());
+    speak::Speaker::new(speak::voice(voice), speak::player(play)).with_pause(args.pause)
+}
+
+#[cfg(not(feature = "speech"))]
+fn speaker(_: &Args) -> speak::Speaker {
+    speak::Speaker::new(speak::voice(None), speak::player(None))
 }
 
 #[cfg(feature = "markdown")]

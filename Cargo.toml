@@ -11,7 +11,9 @@ keywords = ["pdf", "beamer", "slides", "tui", "markdown"]
 categories = ["command-line-utilities", "visualization"]
 
 [features]
-default = ["markdown"]
+default = ["markdown", "speech"]
+# Slides read aloud by a speech program, run as R is, in a session of its own.
+speech = ["dep:libc", "dep:signal-hook"]
 # Markdown and R Markdown, typeset by typst. Typst's evaluator grows its
 # stack through `psm`, which assembles one small file with the C toolchain.
 # Citations are read with typst's own bibliography crates.
@@ -31,7 +33,7 @@ markdown = [
 
 [dependencies]
 anyhow = "1.0"
-clap = { version = "4.6", features = ["derive"] }
+clap = { version = "4.6", features = ["derive", "env"] }
 hayagriva = { version = "0.10.1", optional = true }
 hayro = "0.7.1"
 image = { version = "0.25", default-features = false }
@@ -50,7 +52,7 @@ typst-pdf = { version = "0.15.1", optional = true }
 unicode-width = "0.2"
 
 [target.'cfg(unix)'.dependencies]
-# To stop knitr's chunks with R, as their process group.
+# To stop knitr's chunks with R, and a speech pipeline, as their process group.
 libc = { version = "0.2", optional = true }
-# To stop knitr on Ctrl-C, which no longer reaches its process group.
+# To stop them on Ctrl-C, which no longer reaches their process group.
 signal-hook = { version = "0.4", optional = true }
