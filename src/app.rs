@@ -19,13 +19,16 @@
 //!
 //! `s` reads the slides aloud, from the current one on, turning to each next
 //! one as the last is read, until the end or `s` again. Turning to another
-//! slide while reading reads that one.
+//! slide while reading reads that one. `v` picks the voice it reads in,
+//! in a list over the slides, which offers Piper's voices to download too.
 
 use crate::browse::{self, Browser};
 use crate::remote::Link;
 use crate::render::{self, Deck, Done, Job, Key, Look, Options, Renderer, Slide, Stamp, Zoom};
 use crate::speak::{self, Speaker};
 use crate::text;
+#[cfg(feature = "speech")]
+use crate::voices::{self, How, Voice};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
@@ -202,6 +205,12 @@ struct App {
     /// The sentence being read aloud, lit on the slide, as last seen: the
     /// speaker moves on under the screen, and a frame's jobs must agree.
     lit: Option<usize>,
+    /// The list a voice is picked from, open over the slides.
+    #[cfg(feature = "speech")]
+    voices: Option<voices::Menu>,
+    /// A voice being downloaded, and the percent of it last shown.
+    #[cfg(feature = "speech")]
+    download: Option<(voices::Download, u8)>,
     dirty: bool,
     quit: bool,
 }
@@ -245,6 +254,10 @@ impl App {
             trouble: None,
             speaker: Speaker::new(None, None),
             lit: None,
+            #[cfg(feature = "speech")]
+            voices: None,
+            #[cfg(feature = "speech")]
+            download: None,
             dirty: true,
             quit: false,
         }
@@ -279,6 +292,8 @@ impl App {
             self.watch();
             self.loaded();
             self.read_along();
+            #[cfg(feature = "speech")]
+            self.downloading();
             if self.signaled.load(Ordering::Relaxed) != 0 {
                 self.quit = true;
             }
@@ -489,6 +504,88 @@ impl App {
         self.dirty = true;
     }
 
+    /// Open the list to pick the voice slides are read in from.
+    #[cfg(feature = "speech")]
+    fn choose_voice(&mut self) {
+        let dir = speak::piper_dir();
+        let piper = speak::installed("piper");
+        let current = self.speaker.voice();
+        let at_hand = voices::at_hand(current, dir.as_deref(), piper, &speak::others());
+        let catalog = if !piper {
+            Err("install Piper to download its voices".into())
+        } else if !speak::installed("curl") {
+            Err("install curl to download Piper's voices".into())
+        } else if dir.is_none() {
+            Err("no place for Piper's voices: HOME is not set".into())
+        } else {
+            Ok(voices::Catalog::fetch(voices::PIPER_VOICES))
+        };
+        self.voices = Some(voices::Menu::new(at_hand, current, catalog));
+    }
+
+    #[cfg(not(feature = "speech"))]
+    fn choose_voice(&mut self) {
+        self.notice = Some(speak::NO_SPEECH.into());
+    }
+
+    /// Read in `voice`, once it is downloaded if it must be.
+    #[cfg(feature = "speech")]
+    fn use_voice(&mut self, voice: Voice) {
+        match voice.how {
+            How::Ready(command) => self.read_in(&voice.name, command),
+            How::Fetch(_) if self.download.is_some() => {
+                self.notice = Some("one voice is downloaded at a time".into());
+            }
+            How::Fetch(remote) => match speak::piper_dir() {
+                Some(dir) => {
+                    let download = voices::Download::start(&remote, voices::PIPER_VOICES, &dir);
+                    self.download = Some((download, 0));
+                }
+                None => self.notice = Some("no place for Piper's voices: HOME is not set".into()),
+            },
+        }
+    }
+
+    /// Read in the voice `name`, which speaks with `command`; the slide
+    /// being read is read again in it.
+    #[cfg(feature = "speech")]
+    fn read_in(&mut self, name: &str, command: String) {
+        self.speaker.set_voice(command);
+        self.notice = Some(format!("reading in {name}"));
+        if self.speaker.reading() {
+            self.speak();
+        }
+    }
+
+    /// List Piper's voices once they are fetched, and read in a voice
+    /// downloaded once it is.
+    #[cfg(feature = "speech")]
+    fn downloading(&mut self) {
+        if let Some(menu) = &mut self.voices
+            && menu.poll()
+        {
+            self.dirty = true;
+        }
+        let Some((download, shown)) = &mut self.download else {
+            return;
+        };
+        let Some(ended) = download.ended() else {
+            let now = (download.progress() * 100.) as u8;
+            if now != *shown {
+                *shown = now;
+                self.dirty = true;
+            }
+            return;
+        };
+        let name = download.name.clone();
+        self.download = None;
+        match ended {
+            Ok(command) => self.read_in(&name, command),
+            Err(e) => self.notice = Some(format!("cannot download {name}: {e}")),
+        }
+        self.dirty = true;
+    }
+
     /// Stop a reload under way and wait for it, so a knitr run it started
     /// does not outlive ohp, nor leave its files.
     fn stop(&mut self) {
@@ -527,6 +624,19 @@ impl App {
             self.dirty = true;
             return;
         }
+        #[cfg(feature = "speech")]
+        if let Some(menu) = &mut self.voices {
+            match menu.key(key) {
+                voices::Outcome::Stay => {}
+                voices::Outcome::Pick(voice) => {
+                    self.voices = None;
+                    self.use_voice(voice);
+                }
+                voices::Outcome::Quit => self.voices = None,
+            }
+            self.dirty = true;
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('o') if ctrl => self.browse(),
@@ -560,6 +670,7 @@ impl App {
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('s') if self.speaker.reading() => self.speaker.stop(),
             KeyCode::Char('s') => self.speak(),
+            KeyCode::Char('v') => self.choose_voice(),
             _ => return,
         }
         self.dirty = true;
@@ -791,7 +902,7 @@ impl App {
     fn draw(&self, f: &mut Frame) {
         let (main, status) = split(f.area());
         // Kitty's images are cells, which the list covers; others' are not.
-        let covered = self.browser.is_some()
+        let covered = self.listing()
             && self.look == Look::Image
             && !matches!(
                 self.picker.protocol_type(),
@@ -808,15 +919,43 @@ impl App {
             }
         }
         f.render_widget(Paragraph::new(self.status()), status);
+        if !self.listing() {
+            return;
+        }
+        let size = Size::new((main.width * 3 / 4).max(40), (main.height * 3 / 4).max(10));
+        let area = centred(main, size);
+        let block = Block::bordered().border_style(Style::new().fg(Color::Yellow));
+        let inner = block.inner(area);
+        f.render_widget(Clear, area);
+        f.render_widget(block, area);
         if let Some(browser) = &self.browser {
-            let size = Size::new((main.width * 3 / 4).max(40), (main.height * 3 / 4).max(10));
-            let area = centred(main, size);
-            let block = Block::bordered().border_style(Style::new().fg(Color::Yellow));
-            let inner = block.inner(area);
-            f.render_widget(Clear, area);
-            f.render_widget(block, area);
             browser.draw(f, inner);
         }
+        #[cfg(feature = "speech")]
+        if let Some(menu) = &self.voices {
+            menu.draw(f, inner);
+        }
+    }
+
+    /// How far the voice being downloaded is, if one is.
+    #[cfg(feature = "speech")]
+    fn download_note(&self) -> Option<String> {
+        let (download, shown) = self.download.as_ref()?;
+        Some(format!(" · downloading {} {shown}%", download.name))
+    }
+
+    #[cfg(not(feature = "speech"))]
+    fn download_note(&self) -> Option<String> {
+        None
+    }
+
+    /// Whether a list is open over the slides.
+    fn listing(&self) -> bool {
+        #[cfg(feature = "speech")]
+        if self.voices.is_some() {
+            return true;
+        }
+        self.browser.is_some()
     }
 
     /// The slide `job` renders, in `area`, which is its key's size; until it
@@ -885,26 +1024,28 @@ impl App {
         let (view, keys) = match self.view {
             View::Present if self.zoomed() => (
                 zoom.as_str(),
-                "arrows pan · +/- zoom · 0 fit · n/p next/prev · t text · s speak · r reload · ^O open · q quit",
+                "arrows pan · +/- zoom · 0 fit · n/p next/prev · t text · s speak · v voice · r reload · ^O open · q quit",
             ),
             View::Present => (
                 "present",
-                "n/p ←/→ next/prev · +/- zoom · g grid · t text · s speak · r reload · ^O open · q quit",
+                "n/p ←/→ next/prev · +/- zoom · g grid · t text · s speak · v voice · r reload · ^O open · q quit",
             ),
             View::Grid => (
                 "grid",
-                "n/p arrows move · +/- zoom · g/enter present · t text · s speak · r reload · ^O open · q quit",
+                "n/p arrows move · +/- zoom · g/enter present · t text · s speak · v voice · r reload · ^O open · q quit",
             ),
         };
         let look = match self.look {
             Look::Image => "",
             Look::Text => " · text",
         };
-        let speaking = if self.speaker.reading() {
-            " · speaking"
-        } else {
-            ""
-        };
+        let mut speaking = String::new();
+        if self.speaker.reading() {
+            speaking.push_str(" · speaking");
+        }
+        if let Some(download) = self.download_note() {
+            speaking.push_str(&download);
+        }
         let mut spans = vec![
             Span::styled(
                 format!(" {} ", self.deck.name),

@@ -29,6 +29,8 @@ mod speak;
 mod text;
 #[cfg(feature = "markdown")]
 mod typeset;
+#[cfg(feature = "speech")]
+mod voices;
 
 #[cfg(test)]
 #[path = "tests/fixture.rs"]

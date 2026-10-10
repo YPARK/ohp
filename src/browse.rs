@@ -365,7 +365,7 @@ fn slides(path: &Path) -> bool {
 
 /// How well `stem` matches `name`, both lowercase, best lowest: `name`
 /// starts with it, has it in it, or has its letters in order.
-fn rank(name: &str, stem: &str) -> Option<u8> {
+pub fn rank(name: &str, stem: &str) -> Option<u8> {
     if name.starts_with(stem) {
         return Some(0);
     }

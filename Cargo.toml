@@ -13,7 +13,7 @@ categories = ["command-line-utilities", "visualization"]
 [features]
 default = ["markdown", "speech"]
 # Slides read aloud by a speech program, run as R is, in a session of its own.
-speech = ["dep:libc", "dep:signal-hook"]
+speech = ["dep:libc", "dep:signal-hook", "dep:serde_json"]
 # Markdown and R Markdown, typeset by typst. Typst's evaluator grows its
 # stack through `psm`, which assembles one small file with the C toolchain.
 # Citations are read with typst's own bibliography crates.
