@@ -1,9 +1,10 @@
 use super::*;
 use crate::remote;
-use ratatui::crossterm::event::KeyEvent;
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use std::time::{Duration, Instant};
 
 /// A catalog of Piper's voices, as `voices.json`, of `voices`: each its
-/// name, language family and English name, and its files' sizes.
+/// name, language family and English name, and its model's size.
 fn catalog_of(voices: &[(&str, &str, &str, u64)]) -> String {
     let entries: Vec<String> = voices
         .iter()
@@ -31,16 +32,26 @@ fn names(voices: &[Voice]) -> Vec<&str> {
     voices.iter().map(|v| v.name.as_str()).collect()
 }
 
+/// What `task` came to, waiting for it a while.
+fn done<T: Send + 'static>(task: &Task<T>) -> Result<T, String> {
+    let start = Instant::now();
+    loop {
+        if let Some(done) = task.done() {
+            return done;
+        }
+        assert!(start.elapsed() < Duration::from_secs(10), "the task hung");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
-fn the_catalog_lists_the_voices_not_kept_the_users_language_first() {
+fn the_catalog_lists_piper_s_voices_the_user_s_language_first() {
     let json = catalog_of(&[
         ("de_DE-thorsten-medium", "de", "German", 3_000_000),
         ("en_US-ryan-high", "en", "English", 1),
         ("en_GB-alba-medium", "en", "English", 1),
-        ("en_US-amy-medium", "en", "English", 1),
     ]);
-    let kept = HashSet::from(["en_US-amy-medium".to_string()]);
-    let voices = catalog(&json, &kept, "en_CA.UTF-8").unwrap();
+    let voices = catalog(&json, "en_CA.UTF-8").unwrap();
     assert_eq!(
         names(&voices),
         [
@@ -50,16 +61,16 @@ fn the_catalog_lists_the_voices_not_kept_the_users_language_first() {
         ]
     );
     assert_eq!(voices[2].about, "German (Somewhere) · medium · 4 MB");
+    // The model card is not downloaded.
     let How::Fetch(remote) = &voices[2].how else {
         panic!("not to download")
     };
-    // The model card is not downloaded.
-    assert_eq!(remote.files.len(), 2);
-    assert!(catalog("not json", &kept, "en").is_err());
+    assert!(remote.model.0.ends_with(".onnx") && remote.config.0.ends_with(".onnx.json"));
+    assert!(catalog("not json", "en").is_err());
 }
 
 #[test]
-fn the_voices_at_hand_are_the_one_given_piper_s_and_others() {
+fn the_voices_at_hand_are_piper_s_others_and_the_one_given() {
     let dir = tempfile::tempdir().unwrap();
     let touch = |name: &str| std::fs::write(dir.path().join(name), "").unwrap();
     touch("en_US-amy-medium.onnx");
@@ -67,16 +78,22 @@ fn the_voices_at_hand_are_the_one_given_piper_s_and_others() {
     let amy = speak::piper_with(&dir.path().join("en_US-amy-medium.onnx")).unwrap();
     let others = [("espeak-ng", "espeak-ng --stdout")];
 
-    let voices = at_hand(Some("my-voice"), Some(dir.path()), true, &others);
+    let voices = at_hand(Some("my-voice"), Some(dir.path()), &others);
     assert_eq!(names(&voices), ["given", "en_US-amy-medium", "espeak-ng"]);
     assert_eq!(voices[1].how, How::Ready(amy.clone()));
-
     // Given one of those listed anyway, it is not listed twice.
-    let voices = at_hand(Some(&amy), Some(dir.path()), true, &others);
+    let voices = at_hand(Some(&amy), Some(dir.path()), &others);
     assert_eq!(names(&voices), ["en_US-amy-medium", "espeak-ng"]);
     // Without Piper, its voices are not listed.
-    let voices = at_hand(None, Some(dir.path()), false, &others);
-    assert_eq!(names(&voices), ["espeak-ng"]);
+    assert_eq!(names(&at_hand(None, None, &others)), ["espeak-ng"]);
+}
+
+#[test]
+fn a_voice_given_is_the_default() {
+    assert_eq!(
+        default(Some("my-voice".into())).as_deref(),
+        Some("my-voice")
+    );
 }
 
 fn ready(name: &str) -> Voice {
@@ -87,34 +104,56 @@ fn ready(name: &str) -> Voice {
     }
 }
 
-fn press(menu: &mut Menu, keys: &[KeyCode]) -> Outcome {
-    let mut last = Outcome::Stay;
-    for &code in keys {
-        last = menu.key(KeyEvent::from(code));
-    }
-    last
+/// A picker of `voices`, open on them, `current` in use.
+fn open(voices: Vec<Voice>, current: Option<&str>) -> Voices {
+    let mut picker = Voices::new("file:///nowhere");
+    picker.list = Some(List::new(voices, current));
+    picker
+}
+
+fn press(picker: &mut Voices, keys: &[KeyCode]) -> Option<Event> {
+    keys.iter()
+        .fold(None, |_, &code| picker.key(KeyEvent::from(code)))
+}
+
+fn picked(picker: &Voices) -> Option<&str> {
+    Some(picker.list.as_ref()?.picked()?.name.as_str())
 }
 
 #[test]
-fn the_menu_starts_on_the_voice_in_use_and_typing_narrows_it() {
+fn the_list_starts_on_the_voice_in_use_and_typing_narrows_it() {
     let voices = vec![ready("espeak-ng"), ready("espeak"), ready("say")];
-    let mut menu = Menu::new(voices, Some("espeak --stdout"), Err("no Piper".into()));
-    assert_eq!(menu.picked().map(|v| v.name.as_str()), Some("espeak"));
+    let mut picker = open(voices, Some("espeak --stdout"));
+    assert_eq!(picked(&picker), Some("espeak"));
 
     // The voice the typing starts first, then those with its letters.
-    press(&mut menu, &[KeyCode::Char('s'), KeyCode::Char('a')]);
-    assert_eq!(menu.shown, [2, 0, 1]);
-    let Outcome::Pick(voice) = press(&mut menu, &[KeyCode::Enter]) else {
+    press(&mut picker, &[KeyCode::Char('s'), KeyCode::Char('a')]);
+    assert_eq!(picker.list.as_ref().unwrap().shown, [2, 0, 1]);
+    let Some(Event::Use(name, command)) = press(&mut picker, &[KeyCode::Enter]) else {
         panic!("nothing picked")
     };
-    assert_eq!(voice.name, "say");
+    assert_eq!((name.as_str(), command.as_str()), ("say", "say --stdout"));
+    assert!(!picker.is_open());
 
     // Esc clears what is typed, then closes the list.
-    press(&mut menu, &[KeyCode::Char('z'), KeyCode::Char('z')]);
-    assert!(menu.picked().is_none());
-    assert!(matches!(press(&mut menu, &[KeyCode::Esc]), Outcome::Stay));
-    assert_eq!(menu.shown.len(), 3);
-    assert!(matches!(press(&mut menu, &[KeyCode::Esc]), Outcome::Quit));
+    let mut picker = open(vec![ready("say")], None);
+    press(&mut picker, &[KeyCode::Char('z'), KeyCode::Char('z')]);
+    assert_eq!(picked(&picker), None);
+    press(&mut picker, &[KeyCode::Esc]);
+    assert_eq!(picked(&picker), Some("say"));
+    press(&mut picker, &[KeyCode::Esc]);
+    assert!(!picker.is_open());
+}
+
+#[test]
+fn the_catalog_added_keeps_the_voice_picked_and_lists_none_twice() {
+    let mut list = List::new(vec![ready("espeak"), ready("say")], None);
+    list.menu.pick(Some(1));
+    let mut amy = ready("en_US-amy-medium");
+    amy.about = "English".into();
+    list.add(&[ready("say"), amy]);
+    assert_eq!(names(&list.voices), ["espeak", "say", "en_US-amy-medium"]);
+    assert_eq!(list.picked().map(|v| v.name.as_str()), Some("say"));
 }
 
 fn curl() -> bool {
@@ -135,20 +174,35 @@ fn hosted(dir: &Path, voices: &[(&str, &str, &str, u64)]) -> String {
 }
 
 #[test]
-fn the_catalog_is_fetched_and_listed_in_the_menu() {
+fn the_catalog_is_fetched_once_and_listed_each_time_the_list_opens() {
     if !curl() {
         return;
     }
     let host = tempfile::tempdir().unwrap();
     let root = hosted(host.path(), &[("en_US-amy-medium", "en", "English", 10)]);
-    let mut menu = Menu::new(vec![ready("espeak")], None, Ok(Catalog::fetch(&root)));
-    let start = std::time::Instant::now();
-    while !menu.poll() {
-        assert!(start.elapsed().as_secs() < 10, "the catalog never came");
-        std::thread::sleep(std::time::Duration::from_millis(5));
+    let mut picker = open(vec![ready("espeak")], None);
+    picker.root = root;
+    picker.piper = Ok(PathBuf::from("/nowhere"));
+    picker.catalog = Catalog::Fetching(fetch_catalog(&picker.root));
+    let start = Instant::now();
+    while !matches!(picker.catalog, Catalog::Fetched(_)) {
+        assert!(start.elapsed() < Duration::from_secs(10), "no catalog came");
+        std::thread::sleep(Duration::from_millis(5));
+        picker.poll();
     }
-    assert_eq!(names(&menu.voices), ["espeak", "en_US-amy-medium"]);
-    assert!(menu.trouble.is_none());
+    let list = picker.list.as_ref().unwrap();
+    assert_eq!(names(&list.voices), ["espeak", "en_US-amy-medium"]);
+}
+
+/// Download Piper's voice `key` from `root`, which `json` lists, to `to`.
+fn download_from(json: &str, root: &str, to: &Path) -> (Download, Result<String, String>) {
+    let voice = catalog(json, "en").unwrap().remove(0);
+    let How::Fetch(remote) = &voice.how else {
+        panic!("not to download")
+    };
+    let download = Download::start(&voice.name, remote, root, to);
+    let done = done(&download.task);
+    (download, done)
 }
 
 #[test]
@@ -159,30 +213,19 @@ fn a_voice_downloaded_is_put_in_place_and_read_in() {
     let (host, voices) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let listed = [("en_US-amy-medium", "en", "English", 5000)];
     let root = hosted(host.path(), &listed);
-    let json = std::fs::read_to_string(host.path().join("voices.json")).unwrap();
-    let remote = match catalog(&json, &HashSet::new(), "en").unwrap().remove(0).how {
-        How::Fetch(remote) => remote,
-        How::Ready(_) => panic!("not to download"),
-    };
     let to = voices.path().join("piper");
+    let (download, done) = download_from(&catalog_of(&listed), &root, &to);
 
-    let download = Download::start(&remote, &root, &to);
-    let ended = loop {
-        if let Some(ended) = download.ended() {
-            break ended;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    };
     let model = to.join("en_US-amy-medium.onnx");
     assert_eq!(
-        ended,
+        done,
         Ok(format!(
             "piper -m {} -f -",
             remote::quote(model.to_str().unwrap())
         ))
     );
     assert_eq!(speak::piper_models(&to), [model]);
-    assert_eq!(download.progress(), 1.);
+    assert_eq!(download.percent(), 100);
     // No part, nor log, is left.
     assert_eq!(std::fs::read_dir(&to).unwrap().count(), 2);
 }
@@ -194,26 +237,14 @@ fn a_download_that_fails_leaves_nothing() {
     }
     let (host, voices) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let root = hosted(host.path(), &[("en_US-amy-medium", "en", "English", 10)]);
+    let to = voices.path().join("piper");
     // The catalog says the model is larger than it is.
     let json = catalog_of(&[("en_US-amy-medium", "en", "English", 11)]);
-    let remote = match catalog(&json, &HashSet::new(), "en").unwrap().remove(0).how {
-        How::Fetch(remote) => remote,
-        How::Ready(_) => panic!("not to download"),
-    };
-    let to = voices.path().join("piper");
-    let download = Download::start(&remote, &root, &to);
-    let ended = loop {
-        if let Some(ended) = download.ended() {
-            break ended;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    };
-    assert!(ended.is_err_and(|e| e.contains("came short")));
+    let (_, done) = download_from(&json, &root, &to);
+    assert!(done.is_err_and(|e| e.contains("came short")));
     assert_eq!(std::fs::read_dir(&to).unwrap().count(), 0);
 
-    let missing = Download::start(&remote, &format!("{root}/nowhere"), &to);
-    while missing.ended().is_none() {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    let (_, done) = download_from(&json, &format!("{root}/nowhere"), &to);
+    assert!(done.is_err());
     assert_eq!(std::fs::read_dir(&to).unwrap().count(), 0);
 }

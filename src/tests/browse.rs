@@ -99,7 +99,7 @@ fn up_and_down_move_within_the_list() {
     assert_eq!(picked(&b), "talks");
     press(&mut b, &[KeyCode::Up, KeyCode::Up, KeyCode::Up]);
     assert_eq!(picked(&b), "..");
-    b.rows.set(20);
+    b.menu.rows.set(20);
     press(&mut b, &[KeyCode::PageDown]);
     assert_eq!(picked(&b), *names(&b).last().unwrap());
 }
@@ -112,7 +112,7 @@ fn enter_goes_into_a_folder_and_opens_a_file() {
     type_in(&mut b, "talks");
     press(&mut b, &[KeyCode::Enter]);
     assert_eq!(b.dir, root.join("talks"));
-    assert!(b.query.is_empty());
+    assert!(b.menu.query.is_empty());
     type_in(&mut b, "int");
     let path = opened(press(&mut b, &[KeyCode::Enter]));
     assert_eq!(path, root.join("talks/intro.pdf"));
@@ -140,7 +140,7 @@ fn a_typed_path_goes_to_its_directory() {
     let mut b = Browser::new(&root.join("notes")).unwrap();
     type_in(&mut b, "../talks/");
     assert_eq!(b.dir, root.join("talks"));
-    assert!(b.query.is_empty());
+    assert!(b.menu.query.is_empty());
     type_in(&mut b, "old/fi");
     assert_eq!(b.dir, root.join("talks/old"));
     assert_eq!(names(&b), ["first.pdf"]);
@@ -159,7 +159,7 @@ fn a_path_to_nowhere_stays_typed() {
     let mut b = Browser::new(&root).unwrap();
     type_in(&mut b, "nowhere/");
     assert_eq!(b.dir, root);
-    assert_eq!(b.query, "nowhere/");
+    assert_eq!(b.menu.query, "nowhere/");
     assert!(b.entries.is_empty());
     assert!(b.trouble().is_some());
     assert!(matches!(press(&mut b, &[KeyCode::Enter]), Outcome::Stay));
@@ -182,6 +182,6 @@ fn esc_clears_then_quits() {
     let mut b = Browser::new(dir.path()).unwrap();
     type_in(&mut b, "al");
     assert!(matches!(press(&mut b, &[KeyCode::Esc]), Outcome::Stay));
-    assert!(b.query.is_empty());
+    assert!(b.menu.query.is_empty());
     assert!(matches!(press(&mut b, &[KeyCode::Esc]), Outcome::Quit));
 }

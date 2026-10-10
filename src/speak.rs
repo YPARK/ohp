@@ -14,7 +14,7 @@
 //! formula or a table is left out, the reading pauses.
 
 #[cfg(feature = "speech")]
-use crate::process::child::{self, Ended};
+use crate::process::child;
 #[cfg(feature = "speech")]
 use crate::remote;
 use crate::render;
@@ -34,6 +34,8 @@ use std::time::{Duration, Instant};
 
 /// Name of the threads reading, so their panics can be told apart.
 pub const THREAD: &str = "speak";
+/// Name of the threads fetching voices to read in.
+pub const VOICES_THREAD: &str = "voices";
 
 /// How long a formula or a table left out is paused for, unless told.
 const PAUSE: Duration = Duration::from_millis(500);
@@ -66,18 +68,6 @@ const PLAYERS: &[(&str, &str)] = &[
     ("afplay", "afplay /dev/stdin"),
     ("play", "play -q -t wav -"),
 ];
-
-#[cfg(feature = "speech")]
-/// The voice that reads slides: the one given, or else Piper with a voice
-/// of its found, or else one found.
-pub fn voice(given: Option<String>) -> Option<String> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    given_or(given, || {
-        piper_dir()
-            .and_then(|dir| piper(&path, &dir))
-            .or_else(|| found(&path, VOICES))
-    })
-}
 
 #[cfg(feature = "speech")]
 /// Where Piper's voices are kept: `piper` in the user's data directory.
@@ -148,15 +138,6 @@ fn found(path: &OsStr, known: &[(&str, &str)]) -> Option<String> {
         .iter()
         .find(|(name, _)| on(path, name))
         .map(|(_, command)| command.to_string())
-}
-
-#[cfg(feature = "speech")]
-/// Piper speaking with the first voice in `voices`, if Piper is on `path`.
-fn piper(path: &OsStr, voices: &Path) -> Option<String> {
-    if !on(path, "piper") {
-        return None;
-    }
-    piper_with(piper_models(voices).first()?)
 }
 
 #[cfg(feature = "speech")]
@@ -465,27 +446,11 @@ fn run(
     };
     let mut log = input.as_os_str().to_owned();
     log.push(".log");
-    let stderr = std::fs::File::create(&log).map_err(|e| e.to_string())?;
     let mut sh = Command::new("sh");
-    sh.args(["-c", command])
-        .stdin(stdin)
-        .stdout(stdout)
-        .stderr(stderr);
-    let status = match child::run(sh, stop, None) {
-        Ok(Ended::Exited(status)) => status,
-        Ok(Ended::Stopped) => return Ok(()),
-        // Given no time limit, it cannot run past one.
-        Ok(Ended::Paused | Ended::TimedOut) => return Err("reading aloud paused".into()),
-        Err(e) => return Err(format!("cannot read aloud: {e}")),
-    };
-    if status.success() {
-        return Ok(());
-    }
-    let why = child::last_line(Path::new(&log), |_| true);
-    Err(format!(
-        "cannot read aloud: {}",
-        why.as_deref().unwrap_or("it failed")
-    ))
+    sh.args(["-c", command]).stdin(stdin).stdout(stdout);
+    child::run_logged(sh, Path::new(&log), stop)
+        .map(|_| ())
+        .map_err(|why| format!("cannot read aloud: {why}"))
 }
 
 #[cfg(all(test, feature = "speech"))]
