@@ -23,6 +23,27 @@ fn a_signal_ends_ohp_with_the_status_a_shell_gives() {
 /// Set for the test process `installed` runs alone in.
 const ALONE: &str = "OHP_TEST_SIGNALS_ALONE";
 
+/// Run `test`, ignored, in a test process of its own.
+fn alone(test: &str) -> std::process::Output {
+    let tests = std::env::current_exe().unwrap();
+    let test = format!("process::signals::tests::{test}");
+    let mut alone = std::process::Command::new(tests);
+    alone.env(ALONE, "1").args(["--ignored", "--exact", &test]);
+    // In a session of its own, with no terminal: ending in a hurry, it
+    // restores the terminal it has, which must not be the developer's.
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: only setsid, safe between fork and exec.
+        unsafe {
+            alone.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            })
+        };
+    }
+    alone.output().unwrap()
+}
+
 /// Run in a test process of its own, by the test below.
 #[test]
 #[ignore = "installs signal handlers: run alone, by a_signal_sets_the_flags"]
@@ -39,16 +60,13 @@ fn installed() {
     unsafe { libc::raise(SIGHUP) };
     assert!(stop.load(Ordering::Relaxed), "typesetting is not stopped");
     assert_eq!(signaled.load(Ordering::Relaxed), SIGHUP as usize);
+    // Not reading keys, ohp is left to end in order.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
 }
 
 #[test]
 fn a_signal_sets_the_flags() {
-    let tests = std::env::current_exe().unwrap();
-    let ran = std::process::Command::new(tests)
-        .env(ALONE, "1")
-        .args(["--ignored", "--exact", "process::signals::tests::installed"])
-        .output()
-        .unwrap();
+    let ran = alone("installed");
     let out = String::from_utf8_lossy(&ran.stdout);
     assert!(
         ran.status.success(),
@@ -56,4 +74,31 @@ fn a_signal_sets_the_flags() {
         String::from_utf8_lossy(&ran.stderr)
     );
     assert!(out.contains("1 passed"), "{out}");
+}
+
+/// Run in a test process of its own, by the test below: hung up, and stuck,
+/// as ohp is in crossterm then.
+#[test]
+#[ignore = "installs signal handlers: run alone, by a_hang_up_ends_ohp_stuck"]
+fn hung_up() {
+    if std::env::var_os(ALONE).is_none() {
+        return;
+    }
+    install(&Arc::default(), &Arc::default()).unwrap();
+    crate::app::READING_KEYS.store(true, Ordering::SeqCst);
+    // SAFETY: raises signals handlers are installed for, once each.
+    unsafe {
+        // Another's alarm does not end ohp.
+        libc::raise(SIGALRM);
+        libc::raise(SIGHUP);
+    }
+    std::thread::sleep(std::time::Duration::from_secs(12));
+}
+
+#[test]
+fn a_hang_up_ends_ohp_stuck() {
+    let start = std::time::Instant::now();
+    let ran = alone("hung_up");
+    assert_eq!(ran.status.code(), Some(129), "{ran:?}");
+    assert!(start.elapsed().as_secs() < 10, "ended late");
 }

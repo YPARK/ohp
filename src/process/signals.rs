@@ -6,9 +6,14 @@
 //! A third, for a stop that does not come, ends ohp at once: the programs
 //! it runs are killed and the terminal restored, as nothing else will do it
 //! then.
+//!
+//! The terminal hanging up while the app reads keys, as its window closes,
+//! ends ohp a second after, if it has not quit: crossterm, reading the
+//! terminal then, reads again for ever and never returns to the app to
+//! quit. Once the app is past reading keys, it is left to end in order.
 
 use crate::process::child;
-use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+use signal_hook::consts::{SIGALRM, SIGHUP, SIGINT, SIGTERM};
 use signal_hook::{flag, low_level};
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -25,30 +30,56 @@ const LEAVE_SCREEN: &[u8] = b"\x1b[?1049l\x1b[?25h";
 /// Signals seen before the one that ends ohp at once.
 const PATIENCE: usize = 2;
 
+/// Seconds ohp is given to quit once its terminal hangs up.
+const HUNG_UP: libc::c_uint = 1;
+
+/// Set by a hang-up, for the alarm it sets to tell from another.
+static HUNG: AtomicBool = AtomicBool::new(false);
+
 /// Have the signals set `signaled` to which came and `stop`, and the third
 /// end ohp. Before the terminal is changed, so its settings can be restored.
 pub fn install(stop: &Arc<AtomicBool>, signaled: &Arc<AtomicUsize>) -> io::Result<()> {
     save_terminal();
+    // SAFETY: as the actions below.
+    unsafe {
+        low_level::register(SIGHUP, || {
+            if crate::app::READING_KEYS.load(Ordering::SeqCst) {
+                HUNG.store(true, Ordering::SeqCst);
+                libc::alarm(HUNG_UP);
+            }
+        })?;
+        low_level::register(SIGALRM, || {
+            if HUNG.load(Ordering::SeqCst) && crate::app::READING_KEYS.load(Ordering::SeqCst) {
+                hurry(SIGHUP);
+            }
+        })?;
+    }
     let seen = Arc::new(AtomicUsize::new(0));
     for signal in [SIGINT, SIGTERM, SIGHUP] {
         flag::register(signal, stop.clone())?;
         flag::register_usize(signal, signaled.clone(), signal as usize)?;
         let seen = seen.clone();
-        let status = i32::from(crate::shell_status(signal as usize));
         // SAFETY: the action only touches atomics and makes system calls
-        // that are safe in a signal handler: nanosleep, killpg, tcsetattr,
-        // write and _exit.
+        // that are safe in a signal handler: alarm, nanosleep, killpg,
+        // tcsetattr, write and _exit.
         unsafe {
             low_level::register(signal, move || {
                 if out_of_patience(&seen) {
-                    child::kill_all();
-                    restore_terminal();
-                    low_level::exit(status);
+                    hurry(signal);
                 }
             })
         }?;
     }
     Ok(())
+}
+
+/// End ohp at once, as `signal` ends it: kill the programs it runs, and
+/// restore the terminal, as nothing else will do it then. Safe in a signal
+/// handler.
+fn hurry(signal: libc::c_int) -> ! {
+    child::kill_all();
+    restore_terminal();
+    low_level::exit(i32::from(crate::shell_status(signal as usize)));
 }
 
 /// Count a signal: whether it is the one to end ohp at once.

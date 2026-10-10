@@ -43,7 +43,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -131,6 +131,26 @@ fn quiet_render_panics() {
             prev(info);
         }
     }));
+}
+
+/// Set while the app reads keys, where crossterm is stuck for ever once the
+/// terminal hangs up: only then is ohp ended a while after a hang-up.
+pub static READING_KEYS: AtomicBool = AtomicBool::new(false);
+
+/// `READING_KEYS` set until it is dropped.
+struct ReadingKeys;
+
+impl ReadingKeys {
+    fn start() -> Self {
+        READING_KEYS.store(true, Ordering::SeqCst);
+        ReadingKeys
+    }
+}
+
+impl Drop for ReadingKeys {
+    fn drop(&mut self) {
+        READING_KEYS.store(false, Ordering::SeqCst);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -262,6 +282,7 @@ impl App {
     }
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
+        let _reading = ReadingKeys::start();
         let mut screen = Rect::default();
         while !self.quit {
             let size = terminal.size()?;
