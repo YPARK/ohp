@@ -48,7 +48,7 @@ fn the_slide_is_voiced_and_played_a_sentence_at_a_time() {
     let out = dir.path().join("read.txt");
     let mut speaker = recorder(&out);
     speaker
-        .read(deck(&["one", "Hello there. It is me"]), 1)
+        .read(deck(&["one", "Hello there. It is me"]), 1, 0)
         .unwrap();
     assert_eq!(speaker.page(), Some(1));
     assert_eq!(ended(&mut speaker), Ok(()));
@@ -56,6 +56,35 @@ fn the_slide_is_voiced_and_played_a_sentence_at_a_time() {
     assert_eq!(
         std::fs::read_to_string(&out).unwrap(),
         "Hello there.\nIt is me\n"
+    );
+}
+
+#[test]
+fn a_slide_is_read_from_the_sentence_asked_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let flag = dir.path().join("go");
+    let out = dir.path().join("read.txt");
+    // The player writes what it is given, then waits for the test.
+    let player = format!(
+        "cat >> '{}'; while [ ! -e '{}' ]; do sleep 0.01; done; rm '{1}'",
+        out.display(),
+        flag.display()
+    );
+    let mut speaker = Speaker::new(Some("cat".into()), Some(player));
+    speaker
+        .read(deck(&["One here. Two here. Three here."]), 0, 1)
+        .unwrap();
+    for k in 1..3 {
+        assert!(
+            fixture::within_seconds(|| speaker.sentence() == Some(k)),
+            "no sentence {k}"
+        );
+        std::fs::write(&flag, "").unwrap();
+    }
+    assert_eq!(ended(&mut speaker), Ok(()));
+    assert_eq!(
+        std::fs::read_to_string(&out).unwrap(),
+        "Two here.\nThree here.\n"
     );
 }
 
@@ -69,7 +98,9 @@ fn the_sentence_playing_is_known() {
         flag.display()
     );
     let mut speaker = Speaker::new(Some("cat".into()), Some(player));
-    speaker.read(deck(&["First one. Second one."]), 0).unwrap();
+    speaker
+        .read(deck(&["First one. Second one."]), 0, 0)
+        .unwrap();
     for k in 0..2 {
         assert!(
             fixture::within_seconds(|| speaker.sentence() == Some(k)),
@@ -86,7 +117,7 @@ fn a_slide_with_no_text_runs_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("read.txt");
     let mut speaker = recorder(&out);
-    speaker.read(Arc::new(fixture::pdf(1)), 0).unwrap();
+    speaker.read(Arc::new(fixture::pdf(1)), 0, 0).unwrap();
     assert_eq!(ended(&mut speaker), Ok(()));
     assert!(!out.exists());
 }
@@ -98,7 +129,7 @@ fn a_failing_voice_or_player_says_why() {
         Speaker::new(fail(), Some("cat > /dev/null".into())),
         Speaker::new(Some("cat".into()), fail()),
     ] {
-        speaker.read(deck(&["Hello"]), 0).unwrap();
+        speaker.read(deck(&["Hello"]), 0, 0).unwrap();
         let why = ended(&mut speaker).unwrap_err();
         assert!(why.contains("no voice here"), "{why}");
     }
@@ -110,7 +141,7 @@ fn nothing_to_read_with_is_an_error() {
         Speaker::new(None, Some("cat".into())),
         Speaker::new(Some("cat".into()), None),
     ] {
-        assert!(speaker.read(deck(&["Hello"]), 0).is_err());
+        assert!(speaker.read(deck(&["Hello"]), 0, 0).is_err());
         assert_eq!(speaker.page(), None);
     }
 }
@@ -119,7 +150,7 @@ fn nothing_to_read_with_is_an_error() {
 fn stopping_ends_the_whole_pipeline() {
     let sleep = fixture::marked_sleep(30);
     let mut speaker = Speaker::new(Some("cat".into()), Some(format!("cat | {sleep} | cat")));
-    speaker.read(deck(&["Hello"]), 0).unwrap();
+    speaker.read(deck(&["Hello"]), 0, 0).unwrap();
     assert!(fixture::started(&sleep), "the pipeline never started");
     let start = Instant::now();
     speaker.stop();
@@ -199,11 +230,23 @@ fn piper_s_voices_are_its_models_with_their_config_by_name() {
     ] {
         touch(name);
     }
+    // sherpa-onnx's voices each have a directory of their own; one being
+    // unpacked is not yet a voice.
+    for (sub, name) in [
+        ("vits-piper-en_GB-cori-high", "en_GB-cori-high"),
+        ("vits-piper-en_US-amy-low.part", "en_US-amy-low"),
+    ] {
+        std::fs::create_dir_all(voices.join(sub)).unwrap();
+        for file in [format!("{name}.onnx"), format!("{name}.onnx.json")] {
+            touch(&format!("{sub}/{file}"));
+        }
+    }
     let models = piper_models(&voices);
     assert_eq!(
         models,
         [
             voices.join("en_GB-alan-low.onnx"),
+            voices.join("vits-piper-en_GB-cori-high/en_GB-cori-high.onnx"),
             voices.join("en_US-ryan-high.onnx")
         ]
     );
@@ -213,6 +256,55 @@ fn piper_s_voices_are_its_models_with_their_config_by_name() {
         Some(format!("piper -m {} -f -", remote::quote(&model)))
     );
     assert!(piper_models(&dir.path().join("none")).is_empty());
+}
+
+#[test]
+fn sherpa_onnx_speaks_its_own_voices_and_piper_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let own = dir.path().join("vits-piper-en_GB-alan-low");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::write(own.join("tokens.txt"), "").unwrap();
+    let (theirs, plain) = (own.join("en_GB-alan-low.onnx"), dir.path().join("amy.onnx"));
+    let sherpa = PathBuf::from("/opt/sherpa-onnx-offline-tts");
+
+    let both = Engines {
+        sherpa: Some(sherpa.clone()),
+        piper: true,
+    };
+    assert_eq!(both.voice(&theirs), sherpa_with(&sherpa, &theirs));
+    assert_eq!(both.voice(&plain), piper_with(&plain));
+    let piper = Engines {
+        sherpa: None,
+        piper: true,
+    };
+    assert_eq!(piper.voice(&theirs), piper_with(&theirs));
+    let sherpa_only = Engines {
+        sherpa: Some(sherpa),
+        piper: false,
+    };
+    assert_eq!(sherpa_only.voice(&plain), None);
+    assert!(!Engines::default().any());
+}
+
+#[test]
+fn sherpa_onnx_is_given_the_text_as_an_argument_and_its_wav_is_written_out() {
+    let dir = tempfile::tempdir().unwrap();
+    // As sherpa-onnx: the WAV to the file named, chatter on its output.
+    let sherpa = dir.path().join("sherpa");
+    let script = "#!/bin/sh\nfor a; do case $a in --output-filename=*) out=${a#*=};; esac; done\n\
+                  eval \"t=\\${$#}\"\necho saved\nprintf 'RIFF:%s' \"$t\" > \"$out\"\n";
+    std::fs::write(&sherpa, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&sherpa, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let command = sherpa_with(&sherpa, &dir.path().join("v/en.onnx")).unwrap();
+
+    let (text, wav) = (dir.path().join("s.txt"), dir.path().join("s.wav"));
+    std::fs::write(&text, "-5 degrees, it's \"cold\".").unwrap();
+    run(&command, &text, Some(&wav), &AtomicBool::new(false)).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&wav).unwrap(),
+        "RIFF:-5 degrees, it's \"cold\"."
+    );
 }
 
 #[cfg(target_os = "macos")]

@@ -4,14 +4,7 @@ use std::sync::Arc;
 
 /// Page 0 of a one-page PDF drawn by `content`.
 fn page(content: &str) -> Page {
-    let pdf = Pdf::new(Arc::new(fixture::with(&[content]))).unwrap();
-    extract(
-        &pdf,
-        0,
-        &InterpreterCache::new(),
-        &InterpreterSettings::default(),
-    )
-    .unwrap()
+    of(Arc::new(fixture::with(&[content])), 0).unwrap()
 }
 
 /// Each row's text, trailing blanks trimmed; blank rows dropped.
@@ -512,6 +505,112 @@ fn columns_far_apart_under_booktabs_rules_are_a_table() {
 }
 
 #[test]
+fn columns_are_read_one_after_the_other_under_a_title_across_them() {
+    let page = Page {
+        width: 200.,
+        height: 100.,
+        glyphs: vec![
+            mark(10., 10., 5., "Two"),
+            mark(28., 10., 5., "columns"),
+            mark(66., 10., 5., "side"),
+            mark(89., 10., 5., "by"),
+            mark(102., 10., 5., "side"),
+            mark(10., 30., 5., "Left"),
+            mark(35., 30., 5., "one"),
+            mark(110., 30., 5., "Right"),
+            mark(140., 30., 5., "one"),
+            mark(10., 37., 5., "goes"),
+            mark(35., 37., 5., "on."),
+            mark(110., 37., 5., "ends"),
+            mark(135., 37., 5., "here."),
+        ],
+        ..Page::default()
+    };
+    assert_eq!(
+        said(&page),
+        "Two columns side by side\nLeft one goes on.\nRight one ends here."
+    );
+    let lit = page.light(1);
+    assert_eq!(lit.boxes.len(), 2);
+    assert!(lit.boxes.iter().all(|b| b.x1 < 100.));
+}
+
+#[test]
+fn a_sentence_goes_on_from_a_columns_foot_to_the_next_columns_head() {
+    let page = Page {
+        width: 200.,
+        height: 100.,
+        glyphs: vec![
+            mark(10., 30., 5., "It"),
+            mark(110., 30., 5., "the"),
+            mark(10., 37., 5., "runs"),
+            mark(35., 37., 5., "into"),
+            mark(110., 37., 5., "next."),
+        ],
+        ..Page::default()
+    };
+    assert_eq!(said(&page), "It runs into the next.");
+}
+
+#[test]
+fn a_lists_labels_are_not_a_column() {
+    let page = Page {
+        width: 200.,
+        height: 100.,
+        glyphs: vec![
+            mark(10., 20., 10., "*"),
+            mark(25., 20., 10., "first"),
+            mark(80., 20., 10., "item"),
+            mark(25., 32., 10., "wrapped"),
+            mark(10., 44., 10., "*"),
+            mark(25., 44., 10., "second"),
+        ],
+        ..Page::default()
+    };
+    assert_eq!(said(&page), "first item wrapped\nsecond");
+}
+
+#[test]
+fn prose_between_the_pages_own_rules_is_read_though_a_line_has_a_wide_gap() {
+    let page = Page {
+        width: 200.,
+        height: 100.,
+        glyphs: vec![
+            mark(10., 30., 5., "Prose"),
+            mark(37., 30., 5., "with"),
+            // A superscript's room left in the line.
+            mark(10., 37., 5., "gap"),
+            mark(40., 37., 5., "here."),
+            mark(10., 44., 5., "more"),
+            mark(32., 44., 5., "prose."),
+        ],
+        across: vec![across(5., 190., 5.), across(5., 190., 95.)],
+        ..Page::default()
+    };
+    assert_eq!(said(&page), "Prose with gap here.\nmore prose.");
+}
+
+#[test]
+fn a_centred_title_and_display_beside_short_lines_are_no_column() {
+    let page = Page {
+        width: 200.,
+        height: 100.,
+        glyphs: vec![
+            mark(120., 10., 10., "Notes"),
+            mark(10., 30., 10., "Short"),
+            mark(10., 45., 10., "one."),
+            Mark {
+                math: true,
+                ..mark(120., 60., 10., "x")
+            },
+            mark(10., 75., 10., "More."),
+        ],
+        ..Page::default()
+    };
+    assert_eq!(said(&page), "Notes\nShort one.\n|\nMore.");
+}
+
+#[test]
 fn overlay_writes_text_that_reads_on_the_backdrop() {
     let area = Area::new(0, 0, 6, 2);
     let white = Color::Rgb(255, 255, 255);
@@ -526,6 +625,7 @@ fn overlay_writes_text_that_reads_on_the_backdrop() {
         bold: true,
         faint: false,
         lit: false,
+        glyph: 0,
     };
     let pale = Cell {
         ch: 'b',
@@ -533,6 +633,7 @@ fn overlay_writes_text_that_reads_on_the_backdrop() {
         bold: false,
         faint: true,
         lit: false,
+        glyph: 0,
     };
     let cells: Cells = vec![
         vec![Some(dark), Some(dark), Some(pale), None, None, None],
@@ -568,6 +669,7 @@ fn overlay_blanks_the_cell_under_a_wide_character() {
         bold: false,
         faint: false,
         lit: false,
+        glyph: 0,
     };
     overlay(&vec![vec![Some(wide), None, None, None]], area, &mut buf);
     assert_eq!(buf[(0, 0)].symbol(), "한");
@@ -643,6 +745,21 @@ fn the_cells_of_a_sentence_lit_are_lit() {
         .map(|c| c.ch)
         .collect();
     assert_eq!(lit, "Onething,e.g.this.");
+}
+
+#[test]
+fn a_sentence_is_found_from_a_glyph_set_on_the_grid_or_a_point_near_it() {
+    let page = two_sentences();
+    let (cells, _) = page.layout(80, 20, &[]);
+    let at = |ch| page.sentence_of(find(&cells, ch).glyph);
+    assert_eq!((at('O'), at('A'), at('r')), (Some(0), Some(1), Some(1)));
+    let start = |text: &str| page.glyphs.iter().find(|g| g.text == text).unwrap();
+    let a = start("A");
+    assert_eq!(page.sentence_near(a.x0 + 1., a.y - 2.), Some(1));
+    let o = start("O");
+    // Left of the first word, a little way into the margin.
+    assert_eq!(page.sentence_near(o.x0 - 5., o.y), Some(0));
+    assert_eq!(page.sentence_near(o.x0, o.y + 100.), None);
 }
 
 #[test]

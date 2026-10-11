@@ -31,8 +31,9 @@ cargo install --git https://github.com/YPARK/ohp --no-default-features --feature
 
 Reading slides aloud, the `speech` feature, is in the default build, and
 reads with speech programs it runs, none built in: on macOS, its own `say`
-and `afplay`, with nothing to install; on Linux, `espeak-ng` and ALSA's
-`aplay`, as `sudo apt install espeak-ng alsa-utils`, or, far better, Piper,
+and `afplay`, with nothing to install, and natural voices a key away, as
+[On macOS](#on-macos) shows; on Linux, `espeak-ng` and ALSA's `aplay`, as
+`sudo apt install espeak-ng alsa-utils`, or, far better, Piper's voices,
 set up as [Reading aloud](#reading-aloud) shows.
 
 ## Use
@@ -65,8 +66,12 @@ same list up over the slides.
 | `r` | reload the file now, as after fixing what made a reload fail |
 | `ctrl-o` | pick another file to present, from the list above |
 | `s` | read the slides aloud from this one on; again to stop |
+| click | read aloud from the sentence clicked; in the grid, pick the slide clicked, and present it clicked again or double-clicked |
 | `v` | pick the voice to read in, or one of Piper's to download |
 | `q` | quit |
+
+ohp takes the mouse, so selecting text in the terminal needs Shift held,
+or Option in macOS terminals; the wheel turns slides as the arrows do.
 
 ## Terminals
 
@@ -133,25 +138,57 @@ is watched, so after changing the bibliography, save the markdown again.
 
 `s` reads the current slide aloud, then turns to the next and reads that,
 to the end of the deck or until `s` again; turning to another slide while
-reading reads that one. Each slide's text is taken from the PDF as `--text`
+reading reads that one. Clicking a sentence on the slide, or near one,
+reads from there on the same way, whether or not the slide was being read.
+Each slide's text is taken from the PDF as `--text`
 takes it, a sentence at a time, leaving out bullets and list numbers,
 footlines and page numbers, and the sentence being read is lit on the
 slide, in yellow. Formulas
 and tables are not read: a pause takes the place of each, half a second
 unless `--pause` gives another, as `--pause 1`.
 
+### On macOS
+
+Nothing needs installing: `s` reads at once, in macOS's own voice. For a
+better one, with no Python, Homebrew or anything else to set up:
+
+1. Open slides, as `ohp talk.pdf`, and press `v`. The list shows macOS's
+   natural voices, as `Daniel` or `Samantha`, and `sherpa-onnx`.
+2. Pick `sherpa-onnx`, Enter: it downloads, 20 MB, in seconds, to
+   `~/.local/share/piper/sherpa-onnx`, `installing sherpa-onnx…` in the
+   status line meanwhile.
+3. The list opens again, now with Piper's natural voices, yours in your
+   language first. Type to narrow it, as `en_GB` or `alan`, and Enter: the
+   voice downloads, 20 to 140 MB, its progress in the status line, and
+   reading goes on in it. `en_US-lessac-medium` and `en_GB-alan-medium` are
+   good to start with; `high` voices are fuller, `medium` ones quicker.
+4. Press `s`, or click a sentence on the slide to read from there.
+
+The voices downloaded stay in `~/.local/share/piper`: the next time, the
+first of them by name is the voice without asking, and `v` switches among
+them, or back to a macOS voice. A macOS voice sounds better once its
+Premium or Enhanced version is downloaded, under System Settings >
+Accessibility > Spoken Content > System voice > Manage Voices; choosing it
+there makes it the voice ohp reads in when no Piper voice is downloaded.
+To remove everything, `rm -rf ~/.local/share/piper`.
+
 Two shell commands do the reading. The voice, `--voice` or `OHP_VOICE`,
 turns the text of a sentence on its input into WAV audio on its output; the
 player, `--play` or `OHP_PLAY`, plays the WAV on its input. Without them,
-the voice is [Piper](https://github.com/rhasspy/piper) if it is installed
-with a voice in `~/.local/share/piper` (or `$XDG_DATA_HOME/piper`); else,
+the voice is one of [Piper](https://github.com/rhasspy/piper)'s in
+`~/.local/share/piper` (or `$XDG_DATA_HOME/piper`), if there is one, with
+Piper or sherpa-onnx installed to speak it; else,
 on macOS, `say`, in the voice chosen under System Settings > Accessibility >
 Spoken Content; else `espeak-ng --stdout` or `espeak --stdout`. The player
-is the first of `aplay`, `paplay`, `afplay` and sox's `play` found. Piper
-runs on the CPU with voices from
+is the first of `aplay`, `paplay`, `afplay` and sox's `play` found. Piper's
+voices run on the CPU, and sound far better than espeak. `v`, below, sets
+them up with no more than `curl`; or, to set Piper up by hand on Linux,
+with a voice from
 [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices) on
-Hugging Face, and sounds far better than espeak. To set it up on Linux, so
-that `s` uses it with nothing more to set:
+Hugging Face, so
+that `s` uses it with nothing more to set (on ARM Linux, with
+`piper_linux_aarch64.tar.gz`; Piper's `-f -` matters: without it, the WAV
+goes to a file rather than to ohp):
 
 ```sh
 # Piper's C++ release: one program, with ONNX Runtime and espeak-ng beside it.
@@ -167,25 +204,40 @@ done
 
 With several voices there, the first by name is used; to choose one, give
 it, as `OHP_VOICE='piper -m ~/.local/share/piper/en_GB-alan-medium.onnx -f -'`,
-or press `v`. It lists the voices at hand, then, with Piper and `curl`
-installed, every voice in Piper's catalog, your language's first: type to
-narrow the list, and Enter to read in the one picked. A voice not yet there
-is downloaded to `~/.local/share/piper` first, 20 to 140 MB, its progress in
-the status line, and is read in once it is; it stays there for next time.
-The voice picked is used until ohp quits.
-On ARM Linux, take `piper_linux_aarch64.tar.gz` in its place. Piper's
-`-f -` matters: without it, the WAV goes to a file rather than to ohp.
-Piper's macOS releases do not run on today's Macs; there, download a
-Premium voice for `say`, under Spoken Content > System voice > Manage
-Voices, which sounds nearly as good. The sound comes out of the machine
+or press `v`. It lists the voices at hand, on macOS `say`'s, then, with
+`curl` and Piper or sherpa-onnx installed, the voices in Piper's catalog,
+your language's first: type to narrow the list, and Enter to read in the
+one picked. Only voices that sound natural are listed: not macOS's
+robotic ones and sound effects, as `Fred`, `Zarvox` or `Grandpa`, nor
+Piper's of `low` quality, nor a few others of its that sound flat. Of the
+many in English, only the best are listed: Piper's `lessac`, `ryan`,
+`amy`, `alan`, `cori` and `jenny_dioco`, and macOS's `Samantha`, `Daniel`
+and any downloaded as Premium or Enhanced. The catalog is
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)'s copies of Piper's
+voices, which Piper speaks too. A voice not yet there is downloaded to a
+directory of its own in `~/.local/share/piper` first, 20 to 140 MB, its
+progress in the status line, and is read in once it is; it stays there for
+next time. The voice picked is used until ohp quits.
+
+Without Piper, `v` lists sherpa-onnx itself: picking it downloads its
+release for the machine, 20 MB, a program and the libraries it needs, to
+`~/.local/share/piper/sherpa-onnx`, in seconds, with no Python or anything
+else to install; the list then opens again on Piper's voices to download.
+sherpa-onnx speaks them as Piper does, as quickly. This is the way on
+macOS, where Piper's own releases do not run on today's Macs; on ARM
+Linux, sherpa-onnx has no such release, and Piper is set up by hand.
+Better voices for `say` can be downloaded too, under Spoken Content >
+System voice > Manage Voices. The sound comes out of the machine
 ohp runs on: for slides on another machine, run ohp here with `host:path`,
 not over ssh there.
 
 A formula is known by its math font, as typst's and unicode-math's are, or
 by its mathematical characters; pdfLaTeX's math fonts give no names, so
 there its plain letters are still read. A table is known by rules above and
-below its rows and its columns. Columns of prose side by side are read in
-the order their lines run across the page. A sentence ends at a full stop,
+below its rows and its columns. Columns of prose side by side, as beamer's
+`columns` or a two-column paper's, are read one after the other, each from
+its top to its foot; columns closer than an em apart are not told apart,
+and are read a line across the page at a time. A sentence ends at a full stop,
 question or exclamation mark, but not at an initial or an abbreviation such
 as `e.g.` or `Fig.`. The voice works a sentence ahead of the player, so a
 voice slow to start, as Piper's, mostly delays just the first sentence

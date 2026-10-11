@@ -96,7 +96,7 @@ struct Args {
     no_knit: bool,
     /// Shell command that writes the text on its input as WAV audio on its
     /// output, to read slides aloud with s, as `piper -m voice.onnx -f -`.
-    /// [default: Piper with the first voice in ~/.local/share/piper, else
+    /// [default: the first of Piper's voices in ~/.local/share/piper, else
     /// macOS's say, else espeak-ng --stdout, or espeak's]
     #[cfg(feature = "speech")]
     #[arg(long, env = "OHP_VOICE", value_name = "COMMAND")]

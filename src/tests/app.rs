@@ -705,6 +705,131 @@ fn a_failed_reading_stops_and_says_why() {
     assert!(notice.contains("no voice"), "{notice}");
 }
 
+fn click(app: &mut App, at: Position) {
+    app.mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: at.x,
+        row: at.y,
+        modifiers: KeyModifiers::NONE,
+    });
+}
+
+#[cfg(feature = "speech")]
+/// What is read once the slide is clicked where `at` finds, the slide
+/// drawn first in `look` at `zoom`, as it shows.
+fn read_from_click(
+    look: Look,
+    zoom: Zoom,
+    at: impl Fn(&App, &ratatui::buffer::Buffer) -> Position,
+) -> String {
+    use ratatui::backend::TestBackend;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("read.txt");
+    let (_deck, mut app) = speaking(
+        &["One here. Two here. Three here."],
+        &format!("cat >> '{}'", out.display()),
+    );
+    (app.look, app.zoom) = (look, zoom);
+    app.schedule();
+    app.receive(fixture::next(&app.renderer));
+    let mut terminal = ratatui::Terminal::new(TestBackend::new(140, 40)).unwrap();
+    terminal.draw(|f| app.draw(f)).unwrap();
+    let at = at(&app, terminal.backend().buffer());
+    click(&mut app, at);
+    assert_eq!(app.speaker.page(), Some(0), "nothing read from the click");
+    read_until(&mut app, |app| app.speaker.page().is_none());
+    std::fs::read_to_string(&out).unwrap()
+}
+
+#[cfg(feature = "speech")]
+/// Where sentence 1 of the slide shows, the slide as it is drawn.
+fn second_sentence(app: &App) -> Position {
+    let (job, area) = app.drawn.get().unwrap();
+    let page = text::of(app.deck.data.clone(), 0).unwrap();
+    let b = page.light(1).boxes[0];
+    // Halfblocks' cells are 10×20 pixels; the slide fits the screen, and is
+    // enlarged from that.
+    let fit = (f64::from(MAIN.width) * 10. / f64::from(page.width))
+        .min(f64::from(MAIN.height) * 20. / f64::from(page.height));
+    let scale = fit * f64::from(job.key.zoom.percent) / 100.;
+    let cell = |at: f64, size: f64, pan: u16| (at * scale / size) as u16 - pan;
+    Position::new(
+        area.x + cell(b.center().x, 10., job.key.zoom.x),
+        area.y + cell(b.center().y, 20., job.key.zoom.y),
+    )
+}
+
+#[cfg(feature = "speech")]
+#[test]
+fn clicking_a_sentence_on_the_slide_reads_from_it() {
+    let read = read_from_click(Look::Image, Zoom::FIT, |app, _| second_sentence(app));
+    assert_eq!(read, "Two here.\nThree here.\n");
+}
+
+#[cfg(feature = "speech")]
+#[test]
+fn clicking_a_sentence_on_the_slide_zoomed_and_panned_reads_from_it() {
+    let zoom = Zoom {
+        percent: 200,
+        x: 20,
+        y: 15,
+    };
+    let read = read_from_click(Look::Image, zoom, |app, _| second_sentence(app));
+    assert_eq!(read, "Two here.\nThree here.\n");
+}
+
+#[cfg(feature = "speech")]
+#[test]
+fn clicking_a_word_of_the_slides_text_reads_from_its_sentence() {
+    let read = read_from_click(Look::Text, Zoom::FIT, |_, buf| {
+        let i = (buf.content().iter())
+            .position(|c| c.symbol() == "T")
+            .unwrap();
+        buf.pos_of(i).into()
+    });
+    assert_eq!(read, "Two here.\nThree here.\n");
+}
+
+#[cfg(feature = "speech")]
+#[test]
+fn clicking_where_no_sentence_is_reads_nothing() {
+    let (_deck, mut app) = speaking(&["One here."], "cat > /dev/null");
+    app.schedule();
+    app.receive(fixture::next(&app.renderer));
+    screen(&app);
+    click(&mut app, Position::new(1, 1));
+    assert_eq!(app.speaker.page(), None);
+}
+
+#[test]
+fn clicking_a_slide_in_the_grid_picks_it_and_again_presents_it() {
+    let (_dir, mut app) = app(6);
+    press(&mut app, &[KeyCode::Char('g')]);
+    let slot = |app: &App, i: usize| {
+        let (_, slot) = app.slots(&app.grid()).nth(i).unwrap();
+        // Its far corner, inside its border.
+        Position::new(slot.right() - 1, slot.bottom() - 1)
+    };
+    let at = slot(&app, 4);
+    click(&mut app, at);
+    assert_eq!((app.cur, app.view == View::Grid), (4, true));
+    let at = slot(&app, 2);
+    click(&mut app, at);
+    assert_eq!((app.cur, app.view == View::Grid), (2, true));
+    click(&mut app, at);
+    assert_eq!((app.cur, app.view == View::Present), (2, true));
+}
+
+#[test]
+fn clicking_between_the_grid_s_slots_does_nothing() {
+    let (_dir, mut app) = app(3);
+    press(&mut app, &[KeyCode::Char('g')]);
+    let grid = app.grid();
+    let below = app.slots(&grid).map(|(_, s)| s.bottom()).max().unwrap();
+    click(&mut app, Position::new(grid.origin.0, below));
+    assert_eq!((app.cur, app.view == View::Grid), (0, true));
+}
+
 #[cfg(feature = "speech")]
 #[test]
 fn the_sentence_being_read_is_lit_on_the_slide_read() {

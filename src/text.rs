@@ -13,7 +13,12 @@
 //! and would otherwise show twice. Glyphs that are not set, such as rotated
 //! labels or lines past the bottom of the grid, stay in the image.
 //!
-//! Read aloud, the text leaves out formulas and tables, a pause in their
+//! Read aloud, the page is first cut into the columns it is set in, each
+//! read through before the next: where a gutter runs down a part of the
+//! page, the part is cut across it, and otherwise at its widest gap from top
+//! to bottom, each piece cut again the same way.
+//!
+//! The text read leaves out formulas and tables, a pause in their
 //! place. A glyph is a formula's when its font is a math font or its
 //! character is a mathematical one: pdfTeX's Type1 fonts give no names, so
 //! there a formula's plain letters are read. A line is a table's when rules
@@ -33,6 +38,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as Area;
 use ratatui::style::{Color, Modifier, Style};
 use std::collections::HashMap;
+use std::ops::Range;
+use std::sync::Arc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// A gap wider than this, in ems, from where the pen ends a glyph to where
@@ -57,6 +64,10 @@ const SMALL: f32 = 0.8;
 /// Words this far apart, in ems, are in columns of a table, where rules run
 /// above and below them; prose is never spaced so wide.
 const TABLE_GAP: f32 = 1.;
+/// A gap this wide, in ems, running down the whole of a part of the page is
+/// a gutter between columns. A list's labels stand half an em from their
+/// items, so are never a column of their own.
+const GUTTER: f32 = 1.;
 /// Thickest a drawn line is to be a rule, as a table's, in points.
 const RULE: f64 = 3.;
 /// How far a line being read is lit above and below its baseline, in ems.
@@ -133,6 +144,7 @@ struct Mark {
 }
 
 /// A run of glyphs with no word gap between them.
+#[derive(Clone)]
 struct Word {
     x0: f32,
     x1: f32,
@@ -148,6 +160,18 @@ struct Word {
     glyphs: Vec<usize>,
 }
 
+/// A word of the page, as the page is cut into columns.
+struct Piece {
+    /// Which of the page's lines, and which of its words.
+    line: usize,
+    word: usize,
+    x0: f32,
+    x1: f32,
+    y0: f32,
+    y1: f32,
+    size: f32,
+}
+
 /// A character set on the grid, in the colour the page gives it.
 #[derive(Clone, Copy, Debug)]
 pub struct Cell {
@@ -158,6 +182,9 @@ pub struct Cell {
     pub faint: bool,
     /// It is being read aloud.
     pub lit: bool,
+    /// The first glyph of its word, as the page has them: a word is read
+    /// aloud in one sentence.
+    pub glyph: usize,
 }
 
 /// Rows of cells, `None` where nothing is written. A wide character's
@@ -191,6 +218,14 @@ pub fn extract<'a>(
         across: marks.across,
         down: marks.down,
     })
+}
+
+/// The text of `page` of the PDF in `data`, if it has that page and it can
+/// be read.
+pub fn of(data: Arc<Vec<u8>>, page: usize) -> Option<Page> {
+    let pdf = Pdf::new(data).ok()?;
+    let (cache, settings) = (InterpreterCache::new(), InterpreterSettings::default());
+    crate::render::caught(|| extract(&pdf, page, &cache, &settings))
 }
 
 impl Page {
@@ -241,6 +276,7 @@ impl Page {
                     bold: word.heavy || word.size > LARGE * body,
                     faint: faint(first.rgb, first.back),
                     lit,
+                    glyph: word.glyphs[0],
                 };
                 let mut at = col;
                 for ch in word.text.chars() {
@@ -268,7 +304,7 @@ impl Page {
     /// The page's text to be read aloud, a sentence at a time, and a pause
     /// where a formula or a table is left out.
     pub fn spoken(&self) -> Vec<Spoken> {
-        self.sentences(&self.text_lines())
+        self.sentences(&self.reading_lines())
             .into_iter()
             .map(|s| s.map_or(Spoken::Pause, |s| Spoken::Text(s.text)))
             .collect()
@@ -276,7 +312,7 @@ impl Page {
 
     /// Sentence `k` of what is read aloud, to be lit as it is read.
     pub fn light(&self, k: usize) -> Lit {
-        let lines = self.text_lines();
+        let lines = self.reading_lines();
         let sentence = self.sentences(&lines).into_iter().flatten().nth(k);
         let mut glyphs = vec![false; self.glyphs.len()];
         for g in sentence.map(|s| s.glyphs).unwrap_or_default() {
@@ -305,12 +341,42 @@ impl Page {
         Lit { glyphs, boxes }
     }
 
+    /// The sentence read aloud that glyph `g` is read in, as `light`
+    /// counts them.
+    pub fn sentence_of(&self, g: usize) -> Option<usize> {
+        (self.read_sentences().into_iter()).position(|s| s.glyphs.contains(&g))
+    }
+
+    /// The sentences read aloud, as `light` counts them.
+    fn read_sentences(&self) -> Vec<Sentence> {
+        let lines = self.reading_lines();
+        self.sentences(&lines).into_iter().flatten().collect()
+    }
+
+    /// The sentence read aloud nearest (`x`, `y`), in page points, as
+    /// `light` counts them; none if none is within an em of it.
+    pub fn sentence_near(&self, x: f32, y: f32) -> Option<usize> {
+        let away = |g: &Mark| {
+            let dx = (g.start - x).max(x - g.end).max(0.);
+            let dy = (g.y0 - y).max(y - g.y1).max(0.);
+            dx.hypot(dy) / g.size
+        };
+        (self.read_sentences().into_iter().enumerate())
+            .map(|(k, s)| {
+                let near = s.glyphs.iter().map(|&g| away(&self.glyphs[g]));
+                (k, near.fold(f32::MAX, f32::min))
+            })
+            .filter(|&(_, d)| d <= 1.)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(k, _)| k)
+    }
+
     /// What is read aloud: sentences, and `None` where a pause goes. A
     /// title, an item or a paragraph ends a sentence too. Words of no
     /// letters nor digits, as bullets, are not read, nor a list's numbers,
     /// and an item one starts is a paragraph of its own. Small text, as a
     /// footline, and lines of no letters, as a page number, are left out.
-    /// The page's `lines` are as `text_lines` gives them.
+    /// The page's `lines` are as `reading_lines` gives them.
     fn sentences(&self, lines: &[(f32, Vec<Word>)]) -> Vec<Option<Sentence>> {
         let body = self.body_size();
         let mut said: Vec<Option<Sentence>> = Vec::new();
@@ -329,7 +395,7 @@ impl Page {
             if size < SMALL * body {
                 continue;
             }
-            if self.tabular(y, words) {
+            if self.tabular(y, words, lines) {
                 pause(&mut said);
                 continue;
             }
@@ -388,28 +454,61 @@ impl Page {
         said
     }
 
-    /// Whether a line is a table's: rules run above and below its words,
-    /// and they fall in columns, apart across a rule or a wide gap.
-    fn tabular(&self, y: f32, words: &[Word]) -> bool {
+    /// Whether a line of the page's `lines` is a table's: its words fall in
+    /// columns, and so do most lines between the rules nearest above and
+    /// below it. Prose between a page's own rules, above its header and its
+    /// footer, is not, though a superscript leaves a wide gap in a line.
+    fn tabular(&self, y: f32, words: &[Word], lines: &[(f32, Vec<Word>)]) -> bool {
+        if !self.columned(y, words) {
+            return false;
+        }
+        let size = words.iter().map(|w| w.size).fold(0., f32::max);
+        let (y, top) = (f64::from(y), f64::from(y - size / 2.));
+        let centre = |w: &Word| f64::from(w.x0 + w.x1) / 2.;
+        let over = |r: &&Rect| words.iter().any(|w| r.x0 <= centre(w) && centre(w) <= r.x1);
+        let rules = || self.across.iter().filter(over);
+        let above = rules()
+            .filter(|r| r.y1 <= top)
+            .max_by(|a, b| a.y1.total_cmp(&b.y1));
+        let below = rules()
+            .filter(|r| r.y0 >= y)
+            .min_by(|a, b| a.y0.total_cmp(&b.y0));
+        let (Some(above), Some(below)) = (above, below) else {
+            return false;
+        };
+        let (x0, x1) = (above.x0.max(below.x0), above.x1.min(below.x1));
+        let (mut rows, mut columned) = (0, 0);
+        for (ly, words) in lines {
+            if f64::from(*ly) <= above.y1 || f64::from(*ly) >= below.y0 {
+                continue;
+            }
+            // A line's words are in order across it.
+            let inside = |w: &Word| x0 <= centre(w) && centre(w) <= x1;
+            if let (Some(a), Some(b)) = (
+                words.iter().position(inside),
+                words.iter().rposition(inside),
+            ) {
+                rows += 1;
+                columned += usize::from(self.columned(*ly, &words[a..=b]));
+            }
+        }
+        2 * columned >= rows
+    }
+
+    /// Whether a line's words fall in columns, apart across a rule down or
+    /// a wide gap.
+    fn columned(&self, y: f32, words: &[Word]) -> bool {
         let y = f64::from(y);
-        let ruled = words.iter().any(|w| {
-            let x = f64::from(w.x0 + w.x1) / 2.;
-            let top = y - f64::from(w.size) / 2.;
-            let over = |r: &&Rect| r.x0 <= x && x <= r.x1;
-            let mut rules = self.across.iter().filter(over);
-            rules.clone().any(|r| r.y1 <= top) && rules.any(|r| r.y0 >= y)
-        });
-        ruled
-            && words.windows(2).any(|pair| {
-                let [a, b] = pair else { return false };
-                let top = y - f64::from(a.size.max(b.size)) / 2.;
-                let (left, right) = (f64::from(a.x1), f64::from(b.x0));
-                b.x0 - a.x1 > TABLE_GAP * a.size.max(b.size)
-                    || self.down.iter().any(|r| {
-                        let x = (r.x0 + r.x1) / 2.;
-                        r.y0 <= top && r.y1 >= y && left <= x && x <= right
-                    })
-            })
+        words.windows(2).any(|pair| {
+            let [a, b] = pair else { return false };
+            let top = y - f64::from(a.size.max(b.size)) / 2.;
+            let (left, right) = (f64::from(a.x1), f64::from(b.x0));
+            b.x0 - a.x1 > TABLE_GAP * a.size.max(b.size)
+                || self.down.iter().any(|r| {
+                    let x = (r.x0 + r.x1) / 2.;
+                    r.y0 <= top && r.y1 >= y && left <= x && x <= right
+                })
+        })
     }
 
     /// Note the colour around each glyph in `image`, a render of this page.
@@ -503,6 +602,39 @@ impl Page {
             .collect()
     }
 
+    /// Lines in the order they are read: each column through before the
+    /// next, a line across a gutter read in parts, one in each column.
+    fn reading_lines(&self) -> Vec<(f32, Vec<Word>)> {
+        let lines = self.text_lines();
+        let mut pieces = Vec::new();
+        for (line, (_, words)) in lines.iter().enumerate() {
+            for (i, w) in words.iter().enumerate() {
+                let g = || w.glyphs.iter().map(|&g| &self.glyphs[g]);
+                pieces.push(Piece {
+                    line,
+                    word: i,
+                    x0: w.x0,
+                    x1: w.x1,
+                    y0: g().map(|g| g.y0).fold(f32::MAX, f32::min),
+                    y1: g().map(|g| g.y1).fold(f32::MIN, f32::max),
+                    size: w.size,
+                });
+            }
+        }
+        let mut order = Vec::new();
+        cut(pieces, &self.across, &mut order);
+        let mut read: Vec<(usize, Range<usize>)> = Vec::new();
+        for p in order {
+            match read.last_mut() {
+                Some((line, words)) if *line == p.line && words.end == p.word => words.end += 1,
+                _ => read.push((p.line, p.word..p.word + 1)),
+            }
+        }
+        read.into_iter()
+            .map(|(line, words)| (lines[line].0, lines[line].1[words].to_vec()))
+            .collect()
+    }
+
     fn words(&self, line: &[usize]) -> Vec<Word> {
         let mut words: Vec<Word> = Vec::new();
         for &i in line {
@@ -559,6 +691,98 @@ fn place(words: &[Word], col_of: &impl Fn(f32) -> usize, cols: usize) -> Vec<(us
         (end, x1) = (col + len, w.x1);
     }
     spots
+}
+
+/// Put `pieces` onto `order` as they are read: cut apart at every gutter
+/// running down them, left to right, or else at their widest gap top to
+/// bottom, each part put in order the same way. Pieces neither cut parts
+/// are read line by line. A gap a rule among them runs across, as between
+/// a table's columns, is no gutter: the page's own rules, above its header
+/// or its footer, are not among the columns.
+fn cut(mut pieces: Vec<Piece>, rules: &[Rect], order: &mut Vec<Piece>) {
+    if pieces.len() > 1 {
+        let top = pieces.iter().map(|p| p.y0).fold(f32::MAX, f32::min);
+        let bottom = pieces.iter().map(|p| p.y1).fold(f32::MIN, f32::max);
+        let ruled = |x0: f32, x1: f32| {
+            rules.iter().any(|r| {
+                r.y0 >= f64::from(top)
+                    && r.y1 <= f64::from(bottom)
+                    && r.x0 <= f64::from(x0)
+                    && r.x1 >= f64::from(x1)
+            })
+        };
+        pieces.sort_by(|a, b| a.x0.total_cmp(&b.x0));
+        let mut gutters = Vec::new();
+        let (mut reach, mut size) = (f32::MIN, 0.);
+        for (i, p) in pieces.iter().enumerate() {
+            let since = gutters.last().copied().unwrap_or(0);
+            if i > 0
+                && p.x0 - reach > GUTTER * p.size.max(size)
+                && !ruled(reach, p.x0)
+                && side_by_side(&pieces[since..i], &pieces[i..])
+            {
+                gutters.push(i);
+            }
+            if p.x1 > reach {
+                (reach, size) = (p.x1, p.size);
+            }
+        }
+        if !gutters.is_empty() {
+            for column in split(pieces, &gutters) {
+                cut(column, rules, order);
+            }
+            return;
+        }
+        pieces.sort_by(|a, b| a.y0.total_cmp(&b.y0));
+        let mut widest: Option<(f32, usize)> = None;
+        let mut reach = f32::MIN;
+        for (i, p) in pieces.iter().enumerate() {
+            let gap = p.y0 - reach;
+            if i > 0 && gap > 0. && widest.is_none_or(|(w, _)| gap > w) {
+                widest = Some((gap, i));
+            }
+            reach = reach.max(p.y1);
+        }
+        if let Some((_, i)) = widest {
+            for part in split(pieces, &[i]) {
+                cut(part, rules, order);
+            }
+            return;
+        }
+    }
+    pieces.sort_by_key(|p| (p.line, p.word));
+    order.extend(pieces);
+}
+
+/// Whether `left` and `right` are columns side by side: each has lines at
+/// the height of lines of the other. A wide gap in one line, as before a
+/// formula, is no gutter, nor is the space beside a centred title or
+/// display. Heights, not baselines, are compared: columns centred on the
+/// page do not share their baselines.
+fn side_by_side(left: &[Piece], right: &[Piece]) -> bool {
+    let spans = |part: &[Piece]| {
+        let mut spans: HashMap<usize, (f32, f32)> = HashMap::new();
+        for p in part {
+            let span = spans.entry(p.line).or_insert((p.y0, p.y1));
+            *span = (span.0.min(p.y0), span.1.max(p.y1));
+        }
+        spans.into_values().collect::<Vec<_>>()
+    };
+    let (left, right) = (spans(left), spans(right));
+    let beside = |of: &[(f32, f32)], to: &[(f32, f32)]| {
+        of.iter()
+            .filter(|a| to.iter().any(|b| a.0 < b.1 && b.0 < a.1))
+            .count()
+    };
+    beside(&left, &right) >= 2 && beside(&right, &left) >= 2
+}
+
+/// `pieces` split before each index of `at`, in order.
+fn split(mut pieces: Vec<Piece>, at: &[usize]) -> Vec<Vec<Piece>> {
+    let mut parts: Vec<Vec<Piece>> = at.iter().rev().map(|&i| pieces.split_off(i)).collect();
+    parts.push(pieces);
+    parts.reverse();
+    parts
 }
 
 /// Whether `word` ends a sentence: it ends as one does, and is not an
