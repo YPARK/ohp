@@ -3,10 +3,11 @@
 //! Two shell commands read: a voice, which writes the text on its input as
 //! WAV audio on its output, as `piper -m voice.onnx -f -` or `espeak-ng
 //! --stdout`, and a player, which plays the WAV on its input, as `aplay -q`.
-//! Without them given, Piper is the voice if a voice for it is found where
-//! its voices go, and otherwise the first of each found is used. Each sentence is
-//! voiced ahead, while the one before it plays, so a voice slow to start
-//! leaves no gap, and the sentence playing is known to the moment.
+//! Without them given, one of Piper's voices is the voice if one is found
+//! where they go, spoken by sherpa-onnx or Piper, and otherwise the first of
+//! each found is used. Each sentence is voiced ahead, while the one before
+//! it plays, so a voice slow to start leaves no gap, and the sentence
+//! playing is known to the moment.
 //!
 //! A slide is read on a thread of its own, its text taken from the PDF there
 //! too. The commands run as R does, in sessions of their own, so stopping
@@ -142,28 +143,128 @@ fn found(path: &OsStr, known: &[(&str, &str)]) -> Option<String> {
 }
 
 #[cfg(feature = "speech")]
-/// Piper's voices in `dir`, by name: models with their config beside them.
+/// Piper's voices in `dir`, by name: models with their config beside them,
+/// in `dir` or in a directory of their own there, as sherpa-onnx's are.
 pub fn piper_models(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
+    let models = |dir: &Path| {
+        let entries = std::fs::read_dir(dir).into_iter().flatten().flatten();
+        entries.map(|entry| entry.path()).collect::<Vec<_>>()
     };
-    let mut models: Vec<PathBuf> = entries
-        .flatten()
-        .map(|entry| entry.path())
+    let mut found: Vec<PathBuf> = (models(dir).into_iter())
+        .flat_map(|path| {
+            if !path.is_dir() {
+                vec![path]
+            } else if path.extension().is_some_and(|e| e == "part") {
+                // One being unpacked is no voice yet.
+                Vec::new()
+            } else {
+                models(&path)
+            }
+        })
         .filter(|model| {
             model.extension().is_some_and(|e| e == "onnx")
                 && model.with_extension("onnx.json").is_file()
         })
         .collect();
-    models.sort();
-    models
+    found.sort_by(|a, b| (a.file_stem(), a).cmp(&(b.file_stem(), b)));
+    found
 }
 
 #[cfg(feature = "speech")]
-/// Piper speaking with `model`.
+/// Piper on the `PATH` speaking with `model`.
 pub fn piper_with(model: &Path) -> Option<String> {
-    let model = remote::quote(model.to_str()?);
-    Some(format!("piper -m {model} -f -"))
+    Some(format!("piper -m {} -f -", remote::quote(model.to_str()?)))
+}
+
+#[cfg(feature = "speech")]
+/// sherpa-onnx's release ohp installs, a program needing nothing but the
+/// libraries beside it, for this machine, if it has one.
+pub fn sherpa_build() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Some("osx-arm64"),
+        ("macos", "x86_64") => Some("osx-x64"),
+        ("linux", "x86_64") => Some("linux-x64"),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "speech")]
+/// Where ohp installs sherpa-onnx, beside Piper's voices in `dir`.
+pub fn sherpa_home(dir: &Path) -> PathBuf {
+    dir.join("sherpa-onnx")
+}
+
+#[cfg(feature = "speech")]
+/// sherpa-onnx's program speaking, as ohp installs it beside Piper's voices
+/// in `dir`.
+pub fn sherpa_installed(dir: &Path) -> PathBuf {
+    sherpa_program(&sherpa_home(dir))
+}
+
+#[cfg(feature = "speech")]
+/// The program speaking in sherpa-onnx's release, unpacked as `home`.
+pub fn sherpa_program(home: &Path) -> PathBuf {
+    home.join("bin/sherpa-onnx-offline-tts")
+}
+
+#[cfg(feature = "speech")]
+/// sherpa-onnx, `sherpa` its program, speaking with Piper's `model`, as
+/// sherpa-onnx gives its voices: with their tokens and eSpeak NG's data
+/// beside them. It takes the text as an argument, and writes WAV only to a
+/// file.
+pub fn sherpa_with(sherpa: &Path, model: &Path) -> Option<String> {
+    let at = |path: &Path| Some(remote::quote(path.to_str()?));
+    let (sherpa, voice) = (at(sherpa)?, at(model)?);
+    let tokens = at(&model.with_file_name("tokens.txt"))?;
+    let data = at(&model.with_file_name("espeak-ng-data"))?;
+    Some(format!(
+        "d=$(mktemp -d) || exit; t=$(cat); \
+         {sherpa} --vits-model={voice} --vits-tokens={tokens} --vits-data-dir={data} \
+         --output-filename=\"$d/s.wav\" -- \"$t\" >&2 && cat \"$d/s.wav\"; \
+         s=$?; rm -rf \"$d\"; exit $s"
+    ))
+}
+
+#[cfg(feature = "speech")]
+/// What speaks Piper's voices: sherpa-onnx as ohp installs it, and Piper on
+/// the `PATH`.
+#[derive(Clone, Debug, Default)]
+pub struct Engines {
+    pub sherpa: Option<PathBuf>,
+    pub piper: bool,
+}
+
+#[cfg(feature = "speech")]
+impl Engines {
+    /// Those installed, sherpa-onnx beside Piper's voices in `dir`.
+    pub fn found(dir: Option<&Path>) -> Engines {
+        Engines {
+            sherpa: dir.map(sherpa_installed).filter(|s| runnable(s)),
+            piper: installed("piper"),
+        }
+    }
+
+    pub fn any(&self) -> bool {
+        self.sherpa.is_some() || self.piper
+    }
+
+    /// The command speaking with `model`: sherpa-onnx, for a voice of its
+    /// own, its tokens beside it, or else Piper.
+    pub fn voice(&self, model: &Path) -> Option<String> {
+        let sherpa =
+            (self.sherpa.as_ref()).filter(|_| model.with_file_name("tokens.txt").is_file());
+        match sherpa {
+            Some(sherpa) => sherpa_with(sherpa, model),
+            None if self.piper => piper_with(model),
+            None => None,
+        }
+    }
+}
+
+#[cfg(all(feature = "speech", target_os = "macos"))]
+/// macOS's voice `name`, as `say -v '?'` lists it.
+pub fn say_in(name: &str) -> String {
+    SAY.replacen("say -f", &format!("say -v {} -f", remote::quote(name)), 1)
 }
 
 pub struct Speaker {
@@ -237,9 +338,9 @@ impl Speaker {
         (now != NONE).then_some(now)
     }
 
-    /// Read `page` of the PDF in `data` aloud, in place of any slide being
-    /// read.
-    pub fn read(&mut self, data: Arc<Vec<u8>>, page: usize) -> Result<(), String> {
+    /// Read `page` of the PDF in `data` aloud from its sentence `from` on,
+    /// as `text::Page::light` counts them, in place of any slide being read.
+    pub fn read(&mut self, data: Arc<Vec<u8>>, page: usize, from: usize) -> Result<(), String> {
         if !cfg!(feature = "speech") {
             return Err(NO_SPEECH.into());
         }
@@ -268,7 +369,7 @@ impl Speaker {
                     let _ = before.join();
                 }
                 // Nothing to do if the app is gone.
-                let _ = tx.send(reader.read(data, page));
+                let _ = tx.send(reader.read(data, page, from));
             })
             .map_err(|e| format!("cannot read aloud: {e}"))?;
         self.reading = Some(Reading {
@@ -324,15 +425,20 @@ struct Reader {
 }
 
 impl Reader {
-    /// Read `page` of `data` aloud, a sentence at a time, each voiced while
-    /// the one before plays, until it is read or `stop` is set. A slide with
-    /// no text is read at once.
-    fn read(&self, data: Arc<Vec<u8>>, page: usize) -> Result<(), String> {
+    /// Read `page` of `data` aloud from its sentence `from` on, a sentence
+    /// at a time, each voiced while the one before plays, until it is read
+    /// or `stop` is set. A slide with no text is read at once.
+    fn read(&self, data: Arc<Vec<u8>>, page: usize, from: usize) -> Result<(), String> {
         // Stopped while the reader before it ended, as slides turned fast.
         if self.stop.load(Ordering::Relaxed) {
             return Ok(());
         }
         let said = words(data, page)?;
+        let start = (said.iter().enumerate())
+            .filter(|(_, s)| matches!(s, Spoken::Text(_)))
+            .nth(from)
+            .map_or(said.len(), |(i, _)| i);
+        let said = &said[start..];
         let sentences: Vec<&String> = said
             .iter()
             .filter_map(|s| match s {
@@ -368,7 +474,7 @@ impl Reader {
                 .map_err(|e| e.to_string())?;
             // Taking the voiced, so voicing stops when they are no longer
             // played.
-            let read = self.play(&said, voiced);
+            let read = self.play(said, from, voiced);
             // Voicing what is left is of no use now.
             self.stop.store(true, Ordering::Relaxed);
             read
@@ -377,14 +483,15 @@ impl Reader {
         read
     }
 
-    /// Play each sentence of `said` as it is voiced, and pause where it
-    /// says to.
+    /// Play each sentence of `said`, the slide's from its sentence `from`
+    /// on, as it is voiced, and pause where it says to.
     fn play(
         &self,
         said: &[Spoken],
+        from: usize,
         voiced: Receiver<Result<PathBuf, String>>,
     ) -> Result<(), String> {
-        let mut k = 0;
+        let mut k = from;
         for part in said {
             if self.stop.load(Ordering::Relaxed) {
                 break;

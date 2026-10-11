@@ -21,6 +21,10 @@
 //! one as the last is read, until the end or `s` again. Turning to another
 //! slide while reading reads that one. `v` picks the voice it reads in,
 //! in a list over the slides, which offers Piper's voices to download too.
+//!
+//! A click on the presented slide reads it aloud from the sentence there,
+//! found from the word of text set in that cell, or else from the point of
+//! the slide the cell shows. A click in the grid presents the slide there.
 
 use crate::browse::{self, Browser};
 use crate::remote::Link;
@@ -29,8 +33,13 @@ use crate::speak::{self, Speaker};
 use crate::text;
 #[cfg(feature = "speech")]
 use crate::voices::{self, Voices};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Layout, Rect, Size};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
+    MouseEvent, MouseEventKind,
+};
+use ratatui::crossterm::execute;
+use ratatui::crossterm::style::Print;
+use ratatui::layout::{Constraint, Layout, Position, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
@@ -76,6 +85,10 @@ pub fn run(
     signaled: Arc<AtomicUsize>,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
+    // Taken, the terminal's own selecting needs Shift, or Option on macOS.
+    // Only presses and the wheel, as SGR codes: crossterm's capture would
+    // send every move of the mouse too, over ssh as well.
+    let _ = execute!(std::io::stdout(), Print("\x1b[?1000h\x1b[?1006h"));
     let result = (|| {
         let picker = pick();
         quiet_render_panics();
@@ -94,6 +107,7 @@ pub fn run(
         app.run(&mut terminal)?;
         app.clear_images()
     })();
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
 }
@@ -128,6 +142,8 @@ fn quiet_render_panics() {
             thread.name(),
             Some(render::THREAD | speak::THREAD | speak::VOICES_THREAD)
         ) {
+            // ratatui's hook, which this one wraps, restores all but this.
+            let _ = execute!(std::io::stdout(), DisableMouseCapture);
             prev(info);
         }
     }));
@@ -194,6 +210,8 @@ struct App {
     /// The slide last drawn when presenting, shown while its replacement
     /// at a new zoom renders.
     shown: Cell<Option<Job>>,
+    /// The presented slide on screen, and the cells it is drawn in.
+    drawn: Cell<Option<(Job, Rect)>>,
     /// Where slides are drawn: the screen above the status line.
     main: Rect,
     /// Finished slides, `None` where one could not be rendered.
@@ -258,6 +276,7 @@ impl App {
             grid_cols: None,
             zoom: Zoom::FIT,
             shown: Cell::new(None),
+            drawn: Cell::new(None),
             main: Rect::default(),
             slides: HashMap::new(),
             stale: HashMap::new(),
@@ -488,7 +507,13 @@ impl App {
 
     /// Read the current slide aloud, in place of any being read.
     fn speak(&mut self) {
-        if let Err(e) = self.speaker.read(self.deck.data.clone(), self.cur) {
+        self.speak_from(0);
+    }
+
+    /// Read the current slide aloud from its sentence `from` on, in place
+    /// of any being read.
+    fn speak_from(&mut self, from: usize) {
+        if let Err(e) = self.speaker.read(self.deck.data.clone(), self.cur, from) {
             self.notice = Some(e);
         }
         // The sentence lit was the last reading's, not one of this slide's.
@@ -575,9 +600,74 @@ impl App {
     fn handle(&mut self, ev: Event) {
         match ev {
             Event::Key(key) if key.kind != KeyEventKind::Release => self.key(key),
+            Event::Mouse(mouse) => self.mouse(mouse),
             Event::Resize(..) => self.dirty = true,
             _ => {}
         }
+    }
+
+    /// A click reads the presented slide aloud from the sentence clicked,
+    /// or picks the slide clicked in the grid, and presents it clicked
+    /// again, so a double click presents it. The wheel is the arrow keys,
+    /// as the terminal makes it when the mouse is not taken.
+    fn mouse(&mut self, mouse: MouseEvent) {
+        if self.listing() {
+            return;
+        }
+        let at = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.key(KeyCode::Down.into()),
+            MouseEventKind::ScrollUp => self.key(KeyCode::Up.into()),
+            MouseEventKind::Down(MouseButton::Left) => match self.view {
+                View::Present => {
+                    if let Some(k) = self.sentence_at(at) {
+                        self.notice = None;
+                        self.speak_from(k);
+                    }
+                }
+                View::Grid => {
+                    let grid = self.grid();
+                    let clicked = self.slots(&grid).find(|(_, slot)| slot.contains(at));
+                    if let Some((i, _)) = clicked {
+                        self.notice = None;
+                        if i == self.cur {
+                            self.view = View::Present;
+                        }
+                        self.cur = i;
+                        self.dirty = true;
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    /// The sentence of the presented slide shown at `at` on the screen, as
+    /// `text::Page::light` counts them: the one a word of the slide's text
+    /// set there is read in, or else the one nearest that point of it.
+    fn sentence_at(&self, at: Position) -> Option<usize> {
+        let (job, area) = self.drawn.get()?;
+        if !area.contains(at) {
+            return None;
+        }
+        let page = text::of(self.deck.data.clone(), job.key.page)?;
+        let (dx, dy) = (at.x - area.x, at.y - area.y);
+        if let Some(Some(Slide::Text { cells, .. })) = self.slides.get(&job)
+            && let Some(Some(cell)) = cells
+                .get(usize::from(dy))
+                .and_then(|row| row.get(usize::from(dx)))
+        {
+            return page.sentence_of(cell.glyph);
+        }
+        let font = self.picker.font_size();
+        let (fw, fh) = (f32::from(font.width), f32::from(font.height));
+        let key = job.key;
+        let scale = render::fit(key, (fw, fh), (page.width, page.height)) * key.zoom.scale();
+        // The middle of the cell, past the part of the slide panned off.
+        let point = |pan: u16, cell: u16, size: f32| {
+            (f32::from(pan) + f32::from(cell) + 0.5) * size / scale
+        };
+        page.sentence_near(point(key.zoom.x, dx, fw), point(key.zoom.y, dy, fh))
     }
 
     fn key(&mut self, key: KeyEvent) {
@@ -871,6 +961,7 @@ impl App {
 
     fn draw(&self, f: &mut Frame) {
         let (main, status) = split(f.area());
+        self.drawn.set(None);
         // Kitty's images are cells, which the list covers; others' are not.
         let covered = self.listing()
             && self.look == Look::Image
@@ -916,7 +1007,8 @@ impl App {
 
     /// The slide `job` renders, in `area`, which is its key's size; until it
     /// is rendered, the same slide as last presented or fitted. Returns the
-    /// job whose slide is drawn.
+    /// job whose slide is drawn, noted as `drawn` with its cells when
+    /// presenting.
     fn draw_slide(&self, f: &mut Frame, job: Job, area: Rect) -> Option<Job> {
         let fitted = Job {
             key: Key {
@@ -937,17 +1029,29 @@ impl App {
         .flatten()
         .filter(|j| j.key.size() == job.key.size())
         .find_map(|j| Some((j, self.slides.get(&j).or_else(|| self.stale.get(&j))?)));
-        match found.map(|(_, slide)| slide) {
-            Some(Some(Slide::Image(proto))) => {
-                f.render_widget(Image::new(proto), centred(area, proto.size()));
+        let drawn = match found {
+            Some((j, Some(Slide::Image(proto)))) => {
+                let area = centred(area, proto.size());
+                f.render_widget(Image::new(proto), area);
+                Some((j, area))
             }
-            Some(Some(Slide::Text { cells, backdrop })) => {
+            Some((j, Some(Slide::Text { cells, backdrop }))) => {
                 let area = centred(area, backdrop.size());
                 f.render_widget(Image::new(backdrop), area);
                 text::overlay(cells, area, f.buffer_mut());
+                Some((j, area))
             }
-            Some(None) => note(f, area, "cannot render this slide"),
-            None => note(f, area, "rendering…"),
+            Some((_, None)) => {
+                note(f, area, "cannot render this slide");
+                None
+            }
+            None => {
+                note(f, area, "rendering…");
+                None
+            }
+        };
+        if self.view == View::Present {
+            self.drawn.set(drawn);
         }
         found.map(|(j, _)| j)
     }
@@ -984,11 +1088,11 @@ impl App {
             ),
             View::Present => (
                 "present",
-                "n/p ←/→ next/prev · +/- zoom · g grid · t text · s speak · v voice · r reload · ^O open · q quit",
+                "n/p ←/→ next/prev · +/- zoom · g grid · t text · s speak · click speak from · v voice · r reload · ^O open · q quit",
             ),
             View::Grid => (
                 "grid",
-                "n/p arrows move · +/- zoom · g/enter present · t text · s speak · v voice · r reload · ^O open · q quit",
+                "n/p arrows click move · g/enter/double-click present · +/- zoom · t text · s speak · v voice · r reload · ^O open · q quit",
             ),
         };
         let look = match self.look {

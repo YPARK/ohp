@@ -195,7 +195,7 @@ impl Zoom {
         y: 0,
     };
 
-    fn scale(self) -> f32 {
+    pub fn scale(self) -> f32 {
         f32::from(self.percent) / 100.
     }
 }
@@ -447,7 +447,7 @@ pub fn caught<T>(f: impl FnOnce() -> Option<T>) -> Option<T> {
 
 /// The scale that fits a `page`-sized page into the pixels behind `key`'s
 /// cells of `font` size.
-fn fit(key: Key, font: (f32, f32), page: (f32, f32)) -> f32 {
+pub fn fit(key: Key, font: (f32, f32), page: (f32, f32)) -> f32 {
     let (bw, bh) = (f32::from(key.cols) * font.0, f32::from(key.rows) * font.1);
     (bw / page.0).min(bh / page.1)
 }
