@@ -410,6 +410,22 @@ impl App {
         self.read(self.deck.paths.clone(), self.deck.options.clone());
     }
 
+    /// Files just added, then the ones the deck already had, so the new
+    /// one is what comes up.
+    fn added_first(&self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        let had: HashSet<_> = self
+            .deck
+            .paths
+            .iter()
+            .filter_map(|p| browse::as_listed(p))
+            .collect();
+        let (mut fresh, kept): (Vec<_>, Vec<_>) = paths
+            .into_iter()
+            .partition(|path| browse::as_listed(path).is_none_or(|listed| !had.contains(&listed)));
+        fresh.extend(kept);
+        fresh
+    }
+
     /// Read `paths` on a thread of its own, to present in place of the deck.
     fn open(&mut self, paths: Vec<PathBuf>) {
         if self.loading.is_some() {
@@ -699,7 +715,7 @@ impl App {
                 browse::Outcome::Stay => {}
                 browse::Outcome::Open(paths) => {
                     self.browser = None;
-                    self.open(paths);
+                    self.open(self.added_first(paths));
                 }
                 browse::Outcome::Quit => self.browser = None,
             }

@@ -573,15 +573,18 @@ fn ctrl_o_over_several_files_starts_with_them_marked_to_add_to() {
     finish(&mut app);
     assert_eq!(app.deck.pages, 8);
 
-    // Enter on another adds it.
+    // Enter on another adds it, and shows it first.
     app.key(ctrl('o'));
     type_in(&mut app, "thi");
     press(&mut app, &[KeyCode::Enter]);
     finish(&mut app);
     assert_eq!(
         app.deck.paths,
-        [&pair[..], &[root.join("third.pdf")]].concat()
+        [&[root.join("third.pdf")], &pair[..]].concat()
     );
+    assert_eq!(app.cur, 0);
+    let status = app.status().to_string();
+    assert!(status.starts_with(" third.pdf"), "{status}");
 
     // Shift-tab unmarks them all, so enter opens just the one picked.
     app.key(ctrl('o'));
@@ -616,11 +619,13 @@ fn ctrl_o_opens_the_directory_of_the_file_on_screen() {
     assert_eq!(
         app.deck.paths,
         [
+            figs.join("extra.pdf"),
             slides.join("talk.pdf"),
-            figs.join("plot.pdf"),
-            figs.join("extra.pdf")
+            figs.join("plot.pdf")
         ]
     );
+    let status = app.status().to_string();
+    assert!(status.starts_with(" extra.pdf"), "{status}");
 }
 
 #[test]

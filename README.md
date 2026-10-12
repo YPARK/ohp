@@ -58,7 +58,8 @@ empty line goes up, and esc quits. Tab marks a file, or unmarks it, in
 any folder, and shift-tab unmarks them all; enter opens the files marked
 and the one picked together. While presenting, ctrl-o brings the same
 list up over the slides, in the directory of the file on screen, with a
-deck of several files marked, so enter on another adds it.
+deck of several files marked, so enter on another adds it, and that
+file is shown first.
 
 Several files given, or marked, are shown as one deck, in the order
 given: each page of a PDF as a slide, each image, PNG, JPEG, GIF, WebP or
