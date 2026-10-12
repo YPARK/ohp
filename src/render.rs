@@ -36,7 +36,7 @@ pub const THREAD: &str = "render";
 pub struct Deck {
     /// The files the deck is made of, most often one.
     pub paths: Vec<PathBuf>,
-    /// Which of `paths` each page is from; empty when all are from one.
+    /// Which of `paths` each page is from.
     pub from: Vec<usize>,
     pub data: Arc<Vec<u8>>,
     pub pages: usize,
@@ -168,16 +168,16 @@ pub fn sizes(pdf: &Pdf) -> Vec<(f32, f32)> {
 }
 
 /// A PDF made of files, what the status line should say about how, and
-/// which file each page is from, if they are several.
+/// which file each page is from, if they are several; else empty.
 type Made = (Vec<u8>, Option<String>, Vec<usize>);
 
 #[cfg(feature = "markdown")]
 fn typeset(paths: &[PathBuf], options: &Options) -> anyhow::Result<Made> {
-    let done = match paths {
-        [path] if markdown(path) => crate::typeset::typeset(path, options)?,
+    let (done, from) = match paths {
+        [path] if markdown(path) => (crate::typeset::typeset(path, options)?, Vec::new()),
         _ => crate::album::gather(paths, options)?,
     };
-    Ok((done.pdf, done.note, done.from))
+    Ok((done.pdf, done.note, from))
 }
 
 #[cfg(not(feature = "markdown"))]
@@ -216,6 +216,11 @@ impl Deck {
         if sizes.is_empty() {
             anyhow::bail!("{what} has no pages");
         }
+        let from = if from.is_empty() {
+            vec![0; sizes.len()]
+        } else {
+            from
+        };
         Ok(Deck {
             paths: paths.to_vec(),
             from,
@@ -229,7 +234,7 @@ impl Deck {
 
     /// Which of `paths` page `page` is from.
     pub fn source(&self, page: usize) -> usize {
-        self.from.get(page).copied().unwrap_or(0)
+        self.from[page]
     }
 
     /// When each of the deck's files last changed.

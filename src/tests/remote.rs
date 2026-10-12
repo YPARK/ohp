@@ -70,17 +70,17 @@ fn a_remote_pdf_is_copied_and_follows_changes() {
     assert_eq!(Deck::open(&remote.paths()[0]).unwrap().pages, 3);
 
     fixture::write(&odd, 5);
-    wait_for(&remote, 5);
+    wait_for(&remote, 0, 5);
 
     let copy = remote.paths()[0].to_path_buf();
     drop(remote);
     assert!(!copy.exists(), "the copy outlived ohp");
 }
 
-/// Wait up to ten seconds for the copy to have `pages` pages.
-fn wait_for(remote: &Remote, pages: usize) {
+/// Wait up to ten seconds for copy `i` to have `pages` pages.
+fn wait_for(remote: &Remote, i: usize, pages: usize) {
     let start = Instant::now();
-    while Deck::open(&remote.paths()[0]).map_or(0, |d| d.pages) != pages {
+    while Deck::open(&remote.paths()[i]).map_or(0, |d| d.pages) != pages {
         assert!(
             start.elapsed() < Duration::from_secs(10),
             "the copy never changed"
@@ -132,11 +132,7 @@ fn files_on_one_machine_come_over_one_connection_and_each_follows_changes() {
     assert_eq!((pages(0), pages(1)), (2, 3));
 
     fixture::write(b.path(), 5);
-    let start = Instant::now();
-    while pages(1) != 5 {
-        assert!(start.elapsed() < Duration::from_secs(10), "never copied");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait_for(&remote, 1, 5);
     assert_eq!(pages(0), 2);
 }
 
@@ -188,7 +184,7 @@ fn a_lost_connection_is_reported_and_remade() {
     assert!(remote.link().trouble().unwrap().contains("astrocyte"));
 
     fixture::write(far.path(), 5);
-    wait_for(&remote, 5);
+    wait_for(&remote, 0, 5);
     assert_eq!(remote.link().trouble(), None);
 }
 

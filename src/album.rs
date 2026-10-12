@@ -13,6 +13,7 @@ use crate::render::{self, Options, Stamp, Stopped};
 use crate::typeset::{self, Doc, Typeset};
 use anyhow::{Context, anyhow, bail};
 use hayro::hayro_syntax::Pdf;
+use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use image::metadata::Orientation;
 use image::{DynamicImage, GenericImageView, ImageDecoder, ImageFormat, ImageReader};
@@ -46,12 +47,6 @@ enum Kind {
     Pdf(Vec<(f32, f32)>),
     /// An image typst reads, of this many pixels across and down, upright.
     Image(u32, u32),
-    /// Pixels as typst takes them, `rgb8` or `rgba8`.
-    Pixels {
-        encoding: &'static str,
-        width: u32,
-        height: u32,
-    },
     /// A drawing, as large as it says it is.
     Svg,
 }
@@ -71,7 +66,7 @@ impl Shown {
             Kind::Pdf(_) => format!("/{n}.pdf"),
             Kind::Svg => format!("/{n}.svg"),
             // typst knows an image by what is in it.
-            Kind::Image(..) | Kind::Pixels { .. } => format!("/{n}"),
+            Kind::Image(..) => format!("/{n}"),
         };
         let id = markdown::string(&file);
         let fill = "width: 100%, height: 100%, fit: \"contain\"";
@@ -86,18 +81,6 @@ impl Shown {
             }
             &Kind::Image(width, height) => {
                 page(fitted(width, height), format!("image({id}, {fill})"))
-            }
-            &Kind::Pixels {
-                encoding,
-                width,
-                height,
-            } => {
-                let format =
-                    format!("(encoding: \"{encoding}\", width: {width}, height: {height})");
-                page(
-                    fitted(width, height),
-                    format!("image({id}, format: {format}, {fill})"),
-                );
             }
             Kind::Svg => {
                 let _ = writeln!(source, "#page(width: auto, height: auto, image({id}))");
@@ -114,8 +97,9 @@ fn fitted(width: u32, height: u32) -> (f32, f32) {
     (w * scale, h * scale)
 }
 
-/// The files a deck was made of, as they were shown, to show again while
-/// they are unchanged. Shared by the deck's reloads through its options.
+/// The files of the deck last made, as they were shown, to show again
+/// while they are unchanged: by its reloads, and by a deck picked with a
+/// file added, through the options they share.
 #[derive(Default)]
 pub struct Cache(Mutex<HashMap<PathBuf, (Stamp, Arc<Shown>)>>);
 
@@ -156,9 +140,10 @@ impl Cache {
     }
 }
 
-pub fn gather(paths: &[PathBuf], options: &Options) -> anyhow::Result<Typeset> {
+/// `paths` set into one PDF, and which of them each page is from.
+pub fn gather(paths: &[PathBuf], options: &Options) -> anyhow::Result<(Typeset, Vec<usize>)> {
     let mut notes = Vec::new();
-    // Each file shown: where it is among `paths`, its name, and it.
+    // Each file shown: where it is among `paths`, and it.
     let mut shown = Vec::new();
     for (i, path) in paths.iter().enumerate() {
         if options.stop.load(Ordering::Relaxed) {
@@ -168,7 +153,7 @@ pub fn gather(paths: &[PathBuf], options: &Options) -> anyhow::Result<Typeset> {
         match options.cache.show(path, options) {
             Ok(file) => {
                 notes.extend(file.note.as_ref().map(|note| format!("{name}: {note}")));
-                shown.push((i, name, file));
+                shown.push((i, file));
             }
             Err(e) if e.is::<Stopped>() => return Err(e),
             Err(e) => notes.push(format!("cannot show {name}: {e:#}")),
@@ -185,7 +170,7 @@ pub fn gather(paths: &[PathBuf], options: &Options) -> anyhow::Result<Typeset> {
         let mut files = Vec::new();
         let mut spans: Vec<Range<usize>> = Vec::new();
         let mut from = Vec::new();
-        for (n, (i, _, file)) in shown.iter().enumerate() {
+        for (n, (i, file)) in shown.iter().enumerate() {
             let start = source.len();
             files.push((file.set(n, &mut source), file.data.clone()));
             spans.push(start..source.len());
@@ -195,7 +180,7 @@ pub fn gather(paths: &[PathBuf], options: &Options) -> anyhow::Result<Typeset> {
         let errors = match typeset::compile(&world) {
             Ok(pdf) => {
                 let note = (!notes.is_empty()).then(|| notes.join("; "));
-                return Ok(Typeset { pdf, note, from });
+                return Ok((Typeset { pdf, note }, from));
             }
             Err(errors) => errors,
         };
@@ -213,8 +198,11 @@ pub fn gather(paths: &[PathBuf], options: &Options) -> anyhow::Result<Typeset> {
         bad.sort_by_key(|&(n, _)| std::cmp::Reverse(n));
         bad.dedup_by_key(|&mut (n, _)| n);
         for (n, message) in bad {
-            let (_, name, _) = shown.remove(n);
-            notes.push(format!("cannot show {name}: {message}"));
+            let (i, _) = shown.remove(n);
+            notes.push(format!(
+                "cannot show {}: {message}",
+                render::name(&paths[i])
+            ));
         }
     }
 }
@@ -276,18 +264,16 @@ fn raster(data: Arc<[u8]>, format: ImageFormat) -> anyhow::Result<Shown> {
     image.apply_orientation(orientation);
     let image = image.resize(IMAGE_PIXELS, IMAGE_PIXELS, FilterType::Triangle);
     let (width, height) = image.dimensions();
-    let (encoding, pixels) = if image.color().has_alpha() {
-        ("rgba8", image.into_rgba8().into_raw())
+    let mut data = Vec::new();
+    if image.color().has_alpha() {
+        image.write_to(&mut Cursor::new(&mut data), ImageFormat::Png)?;
     } else {
-        ("rgb8", image.into_rgb8().into_raw())
-    };
+        let jpeg = JpegEncoder::new_with_quality(&mut data, 90);
+        image.into_rgb8().write_with_encoder(jpeg)?;
+    }
     Ok(Shown {
-        data: pixels.into(),
-        kind: Kind::Pixels {
-            encoding,
-            width,
-            height,
-        },
+        data: data.into(),
+        kind: Kind::Image(width, height),
         note: None,
     })
 }

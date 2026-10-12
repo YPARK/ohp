@@ -69,11 +69,13 @@ fn a_photo_larger_than_a_screen_is_made_smaller_keeping_its_shape() {
     let dir = tempfile::tempdir().unwrap();
     let path = picture(dir.path(), "huge.png", 5000, 100);
     let shown = show(&path, &Options::default()).unwrap();
-    let Kind::Pixels { width, height, .. } = shown.kind else {
-        panic!("not made smaller");
+    let Kind::Image(width, height) = shown.kind else {
+        panic!("not an image");
     };
     assert_eq!(width, IMAGE_PIXELS);
     assert!(height.abs_diff(82) <= 1, "{height}");
+    // Kept compressed, not as its pixels.
+    assert_eq!(image::guess_format(&shown.data).unwrap(), ImageFormat::Jpeg);
     let deck = Deck::open(&path).unwrap();
     assert!((shape(deck.sizes[0]) - 50.).abs() < 1., "{:?}", deck.sizes);
 }

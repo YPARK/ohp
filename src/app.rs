@@ -433,11 +433,13 @@ impl App {
             .unwrap_or(Path::new("."));
         match Browser::new(dir) {
             Ok(mut browser) => {
-                if here && let Some(name) = paths[0].file_name() {
-                    browser.select(&name.to_string_lossy());
-                }
-                if here && paths.len() > 1 {
-                    browser.mark_all(paths);
+                if here {
+                    if let Some(name) = paths[0].file_name() {
+                        browser.select(&name.to_string_lossy());
+                    }
+                    if paths.len() > 1 {
+                        browser.mark_all(paths);
+                    }
                 }
                 self.browser = Some(browser);
             }

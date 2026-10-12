@@ -7,7 +7,7 @@ fn deck_reads_page_count_and_frame_size() {
     let dir = tempfile::tempdir().unwrap();
     let deck = Deck::open(&fixture::write(dir.path(), 5)).unwrap();
     assert_eq!(deck.pages, 5);
-    assert!(deck.from.is_empty());
+    assert_eq!(deck.from, vec![0; deck.pages]);
     assert_eq!(deck.source(4), 0);
     let (w, h) = deck.sizes[0];
     assert!((w - FRAME.0).abs() < 0.01 && (h - FRAME.1).abs() < 0.01);

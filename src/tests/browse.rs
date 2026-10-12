@@ -248,6 +248,22 @@ fn enter_on_a_file_marked_opens_the_marked_alone_and_shift_tab_unmarks_all() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_link_marked_is_the_link_listed_not_opened_twice() {
+    let dir = tree();
+    let root = dir.path().canonicalize().unwrap();
+    std::os::unix::fs::symlink(root.join("alpha.pdf"), root.join("latest.pdf")).unwrap();
+    let mut b = Browser::new(&root).unwrap();
+    // Named from elsewhere, as the deck presented may name it.
+    b.mark_all(&[dir.path().join("talks/../latest.pdf")]);
+    type_in(&mut b, "lat");
+    let Outcome::Open(paths) = press(&mut b, &[KeyCode::Enter]) else {
+        panic!("nothing opened");
+    };
+    assert_eq!(paths, [root.join("latest.pdf")]);
+}
+
 #[test]
 fn images_are_listed_with_the_slides() {
     let dir = tree();

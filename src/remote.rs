@@ -89,22 +89,27 @@ pub fn split(arg: &Path) -> Option<(&str, &str)> {
 /// place.
 pub fn open_all(ssh: &OsStr, args: &[PathBuf]) -> anyhow::Result<(Vec<Remote>, Vec<PathBuf>)> {
     let mut hosts: Vec<(&str, Vec<&str>)> = Vec::new();
-    for (host, path) in args.iter().filter_map(|arg| split(arg)) {
-        match hosts.iter_mut().find(|(h, _)| *h == host) {
-            Some((_, paths)) => paths.push(path),
-            None => hosts.push((host, vec![path])),
-        }
+    // Each argument's machine among `hosts` and file among its, if remote.
+    let mut at = Vec::new();
+    for arg in args {
+        at.push(split(arg).map(|(host, path)| {
+            let h = match hosts.iter().position(|(h, _)| *h == host) {
+                Some(h) => h,
+                None => {
+                    hosts.push((host, Vec::new()));
+                    hosts.len() - 1
+                }
+            };
+            hosts[h].1.push(path);
+            (h, hosts[h].1.len() - 1)
+        }));
     }
     let remotes = (hosts.iter())
         .map(|(host, paths)| Remote::open(ssh, host, paths))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let mut copies: Vec<_> = remotes.iter().map(|r| r.paths().iter()).collect();
-    let local = (args.iter())
-        .map(|arg| match split(arg) {
-            Some((host, _)) => {
-                let at = hosts.iter().position(|(h, _)| *h == host);
-                at.and_then(|at| copies[at].next()).expect("a copy").clone()
-            }
+    let local = (args.iter().zip(at))
+        .map(|(arg, at)| match at {
+            Some((h, k)) => remotes[h].paths()[k].clone(),
             None => arg.clone(),
         })
         .collect();
@@ -127,7 +132,7 @@ impl Remote {
             let copies = dir.path().join("copy").join(i.to_string());
             std::fs::create_dir_all(&copies)?;
             let name = Path::new(path).file_name().unwrap_or("slides.pdf".as_ref());
-            files.push(Copy {
+            files.push(Mirror {
                 path: quote_path(path),
                 part: dir.path().join(format!("part{i}")),
                 local: copies.join(name),
@@ -156,20 +161,17 @@ impl Remote {
             link: Link::default(),
             _dir: dir,
         };
-        let last = match stamps.next() {
-            Some(Ok(line)) => fetch.stamps(&line),
-            _ => None,
-        };
-        let Some(last) = last else {
+        let line = stamps.next().and_then(Result::ok);
+        let Some(last) = line.and_then(|line| fetch.stamps(&line)) else {
             let why = std::fs::read_to_string(&fetch.log).unwrap_or_default();
             bail!("ssh {host} failed: {}", why.trim());
         };
-        for (i, (stamp, path)) in last.iter().zip(paths).enumerate() {
+        for ((stamp, path), file) in last.iter().zip(paths).zip(&fetch.files) {
             if stamp == GONE {
                 bail!("{host}:{path} not found");
             }
             fetch
-                .run(i)
+                .run(file)
                 .with_context(|| format!("copying {host}:{path}"))?;
         }
         let watcher = Watcher {
@@ -229,8 +231,8 @@ impl Watcher {
                 let Some(now) = self.fetch.stamps(&line) else {
                     continue;
                 };
-                for (i, (now, last)) in now.into_iter().zip(&mut last).enumerate() {
-                    if now != *last && now != GONE && self.fetch.run(i).is_ok() {
+                for ((now, last), file) in now.into_iter().zip(&mut last).zip(&self.fetch.files) {
+                    if now != *last && now != GONE && self.fetch.run(file).is_ok() {
                         *last = now;
                     }
                 }
@@ -280,11 +282,11 @@ struct Fetch {
     /// What the master says on stderr.
     log: PathBuf,
     host: String,
-    files: Vec<Copy>,
+    files: Vec<Mirror>,
 }
 
 /// A remote file, and where it is copied.
-struct Copy {
+struct Mirror {
     /// Quoted for the remote shell.
     path: String,
     /// Where a copy is written before it is moved into place.
@@ -325,10 +327,9 @@ impl Fetch {
             .spawn()
     }
 
-    /// Copy file `i` to a file beside its local copy, then move it into
+    /// Copy `file` to a file beside its local copy, then move it into
     /// place, so the copy is never seen half written.
-    fn run(&self, i: usize) -> anyhow::Result<()> {
-        let file = &self.files[i];
+    fn run(&self, file: &Mirror) -> anyhow::Result<()> {
         // Never a connection of its own: one would ask for a password over
         // the slides.
         let out = Command::new(&self.ssh)

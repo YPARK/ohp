@@ -245,7 +245,14 @@ impl Browser {
     /// Mark `paths`, as the files of the deck presented, in place of any
     /// marked.
     pub fn mark_all(&mut self, paths: &[PathBuf]) {
-        self.marked = paths.iter().filter_map(|p| p.canonicalize().ok()).collect();
+        // As `path` names them: a link to a file is marked, not the file.
+        let listed = |p: &PathBuf| {
+            let dir = p.parent().filter(|d| !d.as_os_str().is_empty());
+            let dir = dir.unwrap_or(Path::new(".")).canonicalize().ok()?;
+            let path = dir.join(p.file_name()?);
+            path.exists().then_some(path)
+        };
+        self.marked = paths.iter().filter_map(listed).collect();
     }
 
     /// Go into the folder picked, or open the files marked and the one
