@@ -592,6 +592,37 @@ fn ctrl_o_over_several_files_starts_with_them_marked_to_add_to() {
     assert_eq!(app.deck.paths, [root.join("other.pdf")]);
 }
 
+#[cfg(feature = "markdown")]
+#[test]
+fn ctrl_o_opens_the_directory_of_the_file_on_screen() {
+    let (dir, mut app) = app(1);
+    let root = dir.path().canonicalize().unwrap();
+    let slides = root.join("slides");
+    let figs = root.join("figs");
+    std::fs::create_dir(&slides).unwrap();
+    std::fs::create_dir(&figs).unwrap();
+    let talk = write_named(&slides, "talk.pdf", 2);
+    let plot = write_named(&figs, "plot.pdf", 4);
+    write_named(&figs, "extra.pdf", 1);
+    app.open(vec![talk, plot]);
+    finish(&mut app);
+
+    // On plot.pdf, which is not the deck's first file, nor in its folder.
+    press(&mut app, &[KeyCode::Char('n'); 2]);
+    app.key(ctrl('o'));
+    type_in(&mut app, "ext");
+    press(&mut app, &[KeyCode::Enter]);
+    finish(&mut app);
+    assert_eq!(
+        app.deck.paths,
+        [
+            slides.join("talk.pdf"),
+            figs.join("plot.pdf"),
+            figs.join("extra.pdf")
+        ]
+    );
+}
+
 #[test]
 fn the_list_starts_on_the_file_presented() {
     let (dir, mut app) = app(3);

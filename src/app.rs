@@ -430,20 +430,22 @@ impl App {
         self.dirty = true;
     }
 
-    /// Open the list to pick another file from, in the deck's directory,
-    /// with a deck of several files marked, so enter adds the file picked.
+    /// Open the list to pick another file from, in the directory of the
+    /// file on screen, with a deck of several files marked, so enter adds
+    /// the file picked.
     fn browse(&mut self) {
         let paths = &self.deck.paths;
         // A file on another machine is copied to a temporary directory.
         let here = self.links.is_empty();
-        let dir = paths[0]
+        let current = &paths[self.deck.source(self.cur)];
+        let dir = current
             .parent()
             .filter(|dir| here && !dir.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         match Browser::new(dir) {
             Ok(mut browser) => {
                 if here {
-                    if let Some(name) = paths[0].file_name() {
+                    if let Some(name) = current.file_name() {
                         browser.select(&name.to_string_lossy());
                     }
                     if paths.len() > 1 {
