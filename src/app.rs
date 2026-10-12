@@ -119,8 +119,17 @@ fn pick() -> Picker {
         kitty_compression: over_ssh(),
         ..Default::default()
     };
+    let timeout = options.timeout;
+    let asked = Instant::now();
     let mut picker =
         Picker::from_query_stdio_with_options(options).unwrap_or_else(|_| Picker::halfblocks());
+    // Unanswered, as when tmux does not pass it on to the terminal, the
+    // query leaves a thread reading stdin, which would take the first key
+    // pressed. A status report, which tmux and every terminal answer, ends
+    // it.
+    if asked.elapsed() >= timeout {
+        let _ = execute!(std::io::stdout(), Print("\x1b[5n"));
+    }
     // Pads an image rounded a pixel short of its cells, as the slide's own white.
     picker.set_background_color(Some([255, 255, 255, 255]));
     picker
