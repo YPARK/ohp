@@ -46,13 +46,23 @@ ohp --text talk.pdf                  # slides as text, even where images can be 
 ohp user@host:~/talks/talk.pdf       # slides on another machine
 ohp talk.Rmd                         # R Markdown slides, chunks run by knitr
 ohp --paper a4 notes.md              # a markdown document, on A4 pages
+ohp plot.png                         # an image
+ohp intro.pdf figs/*.png photo.jpg   # several files, mixed, one after another
 ```
 
 In the list, typing narrows it to the names that match, and a path typed
 up to a `/`, as `../talks/` or `~/`, goes to that directory. Up and down
 move, enter opens a file or goes into a folder, left or backspace on an
-empty line goes up, and esc quits. While presenting, ctrl-o brings the
-same list up over the slides.
+empty line goes up, and esc quits. Tab marks a file, or unmarks it, in
+any folder; enter then opens the files marked together. While
+presenting, ctrl-o brings the same list up over the slides.
+
+Several files given, or marked, are shown as one deck, in the order
+given: each page of a PDF as a slide, each image, PNG, JPEG, GIF or WebP,
+as a slide its own shape, and markdown typeset as it is alone. A file
+that cannot be read is left out, and named in the status line; a change
+to any of them reloads the deck. Images, and several files together, are
+set by typst, so need the `markdown` feature, as in the default build.
 
 | Key | |
 |---|---|

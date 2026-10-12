@@ -189,8 +189,8 @@ struct Grid {
 enum Then {
     /// The file changed again while it was being read: read it once more.
     Reload,
-    /// A file picked while another was being read.
-    Open(PathBuf),
+    /// Files picked while another was being read.
+    Open(Vec<PathBuf>),
 }
 
 struct App {
@@ -220,15 +220,15 @@ struct App {
     stale: HashMap<Job, Option<Slide>>,
     /// Jobs queued or being done.
     requested: HashSet<Job>,
-    /// The PDF as last loaded.
-    stamp: Stamp,
-    /// A change seen on disk, waiting for the file to stop changing.
-    settling: Option<Stamp>,
+    /// The deck's files as last loaded.
+    stamp: Vec<Stamp>,
+    /// A change seen on disk, waiting for the files to stop changing.
+    settling: Option<Vec<Stamp>>,
     checked: Instant,
     /// The deck being read again, off this thread, and that thread.
     loading: Option<(Receiver<anyhow::Result<Deck>>, JoinHandle<()>)>,
-    /// The file being read in place of this one, if one is.
-    opening: Option<PathBuf>,
+    /// The files being read in place of these, if any are.
+    opening: Option<Vec<PathBuf>>,
     /// What to read once the read under way is done.
     then: Option<Then>,
     /// How files picked with Ctrl-O are read.
@@ -263,7 +263,7 @@ impl App {
         signaled: Arc<AtomicUsize>,
     ) -> Self {
         App {
-            stamp: render::stamp(&deck.path),
+            stamp: deck.stamps(),
             local: deck.options.clone(),
             deck,
             picker,
@@ -372,19 +372,19 @@ impl App {
             self.trouble = trouble;
             self.dirty = true;
         }
-        let now = render::stamp(&self.deck.path);
+        let now = self.deck.stamps();
         if now == self.stamp {
             self.settling = None;
-        } else if self.settling == Some(now) && render::finished(&self.deck.path) {
+        } else if self.settling.as_ref() == Some(&now) && self.deck.finished() {
             self.settling = None;
             self.stamp = now;
             self.reload();
-        } else if self.settling != Some(now) {
+        } else if self.settling.as_ref() != Some(&now) {
             self.settling = Some(now);
-            let what = if render::markdown(&self.deck.path) {
-                "file"
-            } else {
+            let what = if render::pdf(&self.deck.paths) {
                 "PDF"
+            } else {
+                "file"
             };
             self.notice = Some(format!("{what} changing…"));
             self.dirty = true;
@@ -398,24 +398,24 @@ impl App {
             self.then.get_or_insert(Then::Reload);
             return;
         }
-        self.read(self.deck.path.clone(), self.deck.options.clone());
+        self.read(self.deck.paths.clone(), self.deck.options.clone());
     }
 
-    /// Read `path` on a thread of its own, to present in place of the deck.
-    fn open(&mut self, path: PathBuf) {
+    /// Read `paths` on a thread of its own, to present in place of the deck.
+    fn open(&mut self, paths: Vec<PathBuf>) {
         if self.loading.is_some() {
-            self.then = Some(Then::Open(path));
+            self.then = Some(Then::Open(paths));
             return;
         }
-        self.opening = Some(path.clone());
-        self.read(path, self.local.clone());
+        self.opening = Some(paths.clone());
+        self.read(paths, self.local.clone());
     }
 
-    fn read(&mut self, path: PathBuf, options: Options) {
+    fn read(&mut self, paths: Vec<PathBuf>, options: Options) {
         let (tx, rx) = std::sync::mpsc::channel();
         // Nothing to do if the app is gone.
         let reader = std::thread::spawn(move || {
-            let _ = tx.send(Deck::open_with(&path, options));
+            let _ = tx.send(Deck::open_with(&paths, options));
         });
         self.loading = Some((rx, reader));
         self.dirty = true;
@@ -423,7 +423,7 @@ impl App {
 
     /// Open the list to pick another file from, in the deck's directory.
     fn browse(&mut self) {
-        let path = &self.deck.path;
+        let path = &self.deck.paths[0];
         // A file on another machine is copied to a temporary directory.
         let here = self.link.is_none();
         let dir = path
@@ -461,7 +461,7 @@ impl App {
             Ok((deck, renderer)) => {
                 if opening.is_some() {
                     self.speaker.stop();
-                    self.stamp = render::stamp(&deck.path);
+                    self.stamp = deck.stamps();
                     self.settling = None;
                     // Slides of another file: not to be shown for this one.
                     self.slides.clear();
@@ -492,7 +492,7 @@ impl App {
             }
             Err(e) => {
                 self.notice = Some(match opening {
-                    Some(path) => format!("cannot open {}: {e:#}", path.display()),
+                    Some(paths) => format!("cannot open {}: {e:#}", render::shown(&paths)),
                     None => format!("reload failed: {e:#}"),
                 });
             }
@@ -680,9 +680,9 @@ impl App {
         if let Some(browser) = &mut self.browser {
             match browser.key(key) {
                 browse::Outcome::Stay => {}
-                browse::Outcome::Open(path) => {
+                browse::Outcome::Open(paths) => {
                     self.browser = None;
-                    self.open(path);
+                    self.open(paths);
                 }
                 browse::Outcome::Quit => self.browser = None,
             }
@@ -776,7 +776,7 @@ impl App {
     fn clamp_pan(&mut self) {
         let font = self.picker.font_size();
         let (fw, fh) = (f32::from(font.width), f32::from(font.height));
-        let (pw, ph) = self.deck.page_size;
+        let (pw, ph) = self.deck.sizes[self.cur];
         let (cols, rows) = (self.main.width, self.main.height);
         let fit = (f32::from(cols) * fw / pw).min(f32::from(rows) * fh / ph);
         let scale = fit * f32::from(self.zoom.percent) / 100.;
@@ -834,7 +834,7 @@ impl App {
     fn grid_with(&self, cols: u16) -> Grid {
         let area = self.main;
         let font = self.picker.font_size();
-        let (pw, ph) = self.deck.page_size;
+        let (pw, ph) = self.deck.sizes[0];
         let slot_w = (area.width / cols).max(3);
         let inner_px = f32::from(slot_w - 2) * f32::from(font.width);
         let inner_h = (inner_px * ph / pw / f32::from(font.height)).ceil() as u16;
@@ -1125,8 +1125,8 @@ impl App {
         }
         if self.loading.is_some() {
             let what = match &self.opening {
-                Some(path) => format!("opening {}…", path.display()),
-                None if render::markdown(&self.deck.path) => "typesetting…".into(),
+                Some(paths) => format!("opening {}…", render::shown(paths)),
+                None if !render::pdf(&self.deck.paths) => "typesetting…".into(),
                 None => "reloading…".into(),
             };
             spans.push(Span::styled(format!("  {what}"), dim));

@@ -21,7 +21,7 @@ fn slides_are_one_page_each() {
     let deck = Deck::open(&path).unwrap();
     // The title, the part, and two slides.
     assert_eq!(deck.pages, 4);
-    let (w, h) = deck.page_size;
+    let (w, h) = deck.sizes[0];
     assert!(w > h, "{w}×{h}");
     assert_eq!(deck.name, "talk.md");
 }
@@ -32,13 +32,13 @@ fn a_document_fills_pages_of_its_paper() {
     let text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit.\n\n".repeat(120);
     let path = write(dir.path(), "notes.md", &text);
     let letter = Deck::open(&path).unwrap();
-    let (w, h) = letter.page_size;
+    let (w, h) = letter.sizes[0];
     assert!((w - 612.).abs() < 1. && (h - 792.).abs() < 1., "{w}×{h}");
     let small = Options {
         paper: Some("a6".into()),
         ..options(false)
     };
-    let a6 = Deck::open_with(&path, small).unwrap();
+    let a6 = Deck::open_with(&[path], small).unwrap();
     assert!(letter.pages > 1 && a6.pages > letter.pages);
 }
 

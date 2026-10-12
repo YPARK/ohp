@@ -8,6 +8,9 @@
 //! picked, or goes into the folder picked; backspace or left on an empty
 //! line goes up.
 //!
+//! Tab marks the file picked, or unmarks it, in any directory; enter then
+//! opens the files marked, in the order they were, as one deck.
+//!
 //! A directory is read once, when the query first names it, not on every
 //! key: it may be large, or on a slow network disk.
 
@@ -20,8 +23,8 @@ use ratatui::widgets::ListItem;
 use ratatui::{DefaultTerminal, Frame};
 use std::path::{Path, PathBuf};
 
-/// The file picked in `start`, or below or above it; `None` if none is.
-pub fn choose(start: &Path) -> anyhow::Result<Option<PathBuf>> {
+/// The files picked in `start`, or below or above it; `None` if none is.
+pub fn choose(start: &Path) -> anyhow::Result<Option<Vec<PathBuf>>> {
     let mut browser = Browser::new(start)?;
     let mut terminal = ratatui::init();
     let chosen = browser.run(&mut terminal);
@@ -39,7 +42,7 @@ struct Entry {
 
 pub enum Outcome {
     Stay,
-    Open(PathBuf),
+    Open(Vec<PathBuf>),
     Quit,
 }
 
@@ -50,23 +53,30 @@ pub struct Browser {
     menu: Menu,
     /// The directory last read, and what is in it or why it cannot be read.
     listing: Option<(PathBuf, Result<Vec<Entry>, String>)>,
+    /// The directory last read, as `marked` names its files.
+    here: PathBuf,
     /// What the query names in the directory it names, best match first.
     entries: Vec<Entry>,
+    /// Files marked to open together, in the order they were.
+    marked: Vec<PathBuf>,
 }
 
 impl Browser {
     pub fn new(start: &Path) -> anyhow::Result<Self> {
+        let dir = start.canonicalize()?;
         let mut browser = Browser {
-            dir: start.canonicalize()?,
+            here: dir.clone(),
+            dir,
             menu: Menu::default(),
             listing: None,
             entries: Vec::new(),
+            marked: Vec::new(),
         };
         browser.refresh();
         Ok(browser)
     }
 
-    fn run(&mut self, terminal: &mut DefaultTerminal) -> anyhow::Result<Option<PathBuf>> {
+    fn run(&mut self, terminal: &mut DefaultTerminal) -> anyhow::Result<Option<Vec<PathBuf>>> {
         loop {
             terminal.draw(|f| self.draw(f, f.area()))?;
             if let Event::Key(key) = event::read()?
@@ -74,7 +84,7 @@ impl Browser {
             {
                 match self.key(key) {
                     Outcome::Stay => {}
-                    Outcome::Open(path) => return Ok(Some(path)),
+                    Outcome::Open(paths) => return Ok(Some(paths)),
                     Outcome::Quit => return Ok(None),
                 }
             }
@@ -87,6 +97,7 @@ impl Browser {
             KeyCode::Char('o') if ctrl => return Outcome::Quit,
             KeyCode::Backspace | KeyCode::Left if self.menu.query.is_empty() => self.up(),
             KeyCode::Right | KeyCode::Tab if self.picked().is_some_and(|e| e.dir) => self.enter(),
+            KeyCode::Tab if self.picked().is_some() => self.mark(),
             _ => match self.menu.key(key, self.entries.len()) {
                 menu::Key::Typed('/') => self.slash(),
                 menu::Key::Typed(_) | menu::Key::Retyped => self.refresh(),
@@ -128,6 +139,7 @@ impl Browser {
         let stem = stem.to_lowercase();
         if self.listing.as_ref().is_none_or(|(at, _)| *at != dir) {
             let listed = list(&dir).map_err(|e| format!("{}: {e}", dir.display()));
+            self.here = dir.canonicalize().unwrap_or_else(|_| dir.clone());
             self.listing = Some((dir.clone(), listed));
         }
         self.entries.clear();
@@ -209,18 +221,38 @@ impl Browser {
         }
     }
 
+    /// The path of `entry`, as listed.
+    fn path(&self, entry: &Entry) -> PathBuf {
+        self.here.join(&entry.name)
+    }
+
+    /// Mark the file picked, or unmark it, and pick the next.
+    fn mark(&mut self) {
+        let Some(path) = self.picked().map(|e| self.path(e)) else {
+            return;
+        };
+        match self.marked.iter().position(|m| *m == path) {
+            Some(at) => {
+                self.marked.remove(at);
+            }
+            None => self.marked.push(path),
+        }
+        self.menu.key(KeyCode::Down.into(), self.entries.len());
+    }
+
     fn open(&mut self) -> Outcome {
         match self.picked() {
             Some(entry) if entry.dir => {
                 self.enter();
                 Outcome::Stay
             }
-            Some(entry) => Outcome::Open(self.split().0.join(&entry.name)),
+            _ if !self.marked.is_empty() => Outcome::Open(self.marked.clone()),
+            Some(entry) => Outcome::Open(vec![self.path(entry)]),
             // A file typed out in full, even one not listed.
             None => {
                 let path = resolve(&self.dir, &self.menu.query);
                 if path.is_file() {
-                    Outcome::Open(path)
+                    Outcome::Open(vec![path])
                 } else {
                     Outcome::Stay
                 }
@@ -240,17 +272,22 @@ impl Browser {
         let items = self.entries.iter().map(|e| {
             if e.dir {
                 ListItem::new(format!("   {}/", e.name)).style(Style::new().fg(Color::Blue))
+            } else if !self.marked.is_empty() && self.marked.contains(&self.path(e)) {
+                ListItem::new(format!(" + {}", e.name)).style(Style::new().fg(Color::Green))
             } else {
                 ListItem::new(format!("   {}", e.name))
             }
         });
-        let notes = match self.trouble() {
+        let mut notes = match self.trouble() {
             Some(trouble) => vec![menu::trouble(trouble)],
             None if self.entries.is_empty() => vec![Span::styled(" no match ", dim())],
             None => Vec::new(),
         };
-        let keys =
-            "type to narrow · a/b/ go to a path · ↑/↓ move · enter open · ←/→ up/into · esc cancel";
+        if !self.marked.is_empty() {
+            let marked = format!(" {} marked ", self.marked.len());
+            notes.push(Span::styled(marked, Style::new().fg(Color::Green)));
+        }
+        let keys = "type to narrow · a/b/ go to a path · ↑/↓ move · tab mark · enter open · ←/→ up/into · esc cancel";
         self.menu.draw(f, area, prompt, items, notes, keys);
     }
 }
@@ -297,7 +334,8 @@ fn slides(path: &Path) -> bool {
     let pdf = path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
-    pdf || cfg!(feature = "markdown") && crate::render::markdown(path)
+    let typeset = crate::render::markdown(path) || crate::render::image(path);
+    pdf || cfg!(feature = "markdown") && typeset
 }
 
 #[cfg(test)]

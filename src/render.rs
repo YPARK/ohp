@@ -34,12 +34,13 @@ use std::time::SystemTime;
 pub const THREAD: &str = "render";
 
 pub struct Deck {
-    pub path: PathBuf,
+    /// The files the deck is made of, most often one.
+    pub paths: Vec<PathBuf>,
     pub name: String,
     pub data: Arc<Vec<u8>>,
     pub pages: usize,
-    /// Width and height of the first page, in points.
-    pub page_size: (f32, f32),
+    /// Width and height of each page, in points.
+    pub sizes: Vec<(f32, f32)>,
     pub options: Options,
     /// What the status line should say about how the deck was made.
     pub note: Option<String>,
@@ -90,9 +91,10 @@ pub fn stamp(path: &Path) -> Stamp {
 
 /// Whether the file ends the way a finished PDF does. LaTeX may pause while
 /// writing one, so a file that stopped changing is not necessarily done.
-/// Markdown is written by an editor, all at once.
+/// Markdown is written by an editor, and an image by its program, all at
+/// once.
 pub fn finished(path: &Path) -> bool {
-    if markdown(path) {
+    if markdown(path) || image(path) {
         return path.is_file();
     }
     let Ok(mut file) = std::fs::File::open(path) else {
@@ -112,56 +114,111 @@ pub fn markdown(path: &Path) -> bool {
         .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "md" | "markdown" | "rmd"))
 }
 
+/// Whether `path` names an image, shown as a slide of its own.
+pub fn image(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp"
+        )
+    })
+}
+
+/// Whether `paths` is a PDF, read as it is rather than typeset.
+pub fn pdf(paths: &[PathBuf]) -> bool {
+    matches!(paths, [path] if !markdown(path) && !image(path))
+}
+
+/// `first`, and how many of `paths` follow it.
+fn and_more(first: impl std::fmt::Display, paths: &[PathBuf]) -> String {
+    match paths.len() {
+        0 | 1 => first.to_string(),
+        n => format!("{first} +{}", n - 1),
+    }
+}
+
+/// The first of `paths`, which are some, and how many follow it.
+pub fn shown(paths: &[PathBuf]) -> String {
+    and_more(paths[0].display(), paths)
+}
+
+/// The name of the file `path` names.
+pub fn name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into(),
+    )
+}
+
+/// Width and height of each of `pdf`'s pages, in points.
+pub fn sizes(pdf: &Pdf) -> Vec<(f32, f32)> {
+    pdf.pages().iter().map(Page::render_dimensions).collect()
+}
+
 #[cfg(feature = "markdown")]
-fn typeset(path: &Path, options: &Options) -> anyhow::Result<(Vec<u8>, Option<String>)> {
-    let done = crate::typeset::typeset(path, options)?;
+fn typeset(paths: &[PathBuf], options: &Options) -> anyhow::Result<(Vec<u8>, Option<String>)> {
+    let done = match paths {
+        [path] if markdown(path) => crate::typeset::typeset(path, options)?,
+        _ => crate::album::gather(paths, options)?,
+    };
     Ok((done.pdf, done.note))
 }
 
 #[cfg(not(feature = "markdown"))]
-fn typeset(path: &Path, _: &Options) -> anyhow::Result<(Vec<u8>, Option<String>)> {
-    anyhow::bail!(
-        "{} is markdown, and ohp was built without its `markdown` feature",
-        path.display()
-    )
+fn typeset(paths: &[PathBuf], _: &Options) -> anyhow::Result<(Vec<u8>, Option<String>)> {
+    let why = match paths {
+        [path] if markdown(path) => format!("{} is markdown", path.display()),
+        [path] => format!("{} is an image", path.display()),
+        _ => "showing several files together needs typst".into(),
+    };
+    anyhow::bail!("{why}, and ohp was built without its `markdown` feature")
 }
 
 impl Deck {
     #[cfg(test)]
     pub fn open(path: &Path) -> anyhow::Result<Self> {
-        Self::open_with(path, Options::default())
+        Self::open_with(&[path.to_path_buf()], Options::default())
     }
 
-    /// The deck in `path`: a PDF, or markdown typeset into one.
-    pub fn open_with(path: &Path, options: Options) -> anyhow::Result<Self> {
-        let (data, note) = if markdown(path) {
-            typeset(path, &options)?
-        } else {
+    /// The deck in `paths`: a PDF, or markdown typeset into one, or several
+    /// files, PDFs, images and markdown, set one after another into one.
+    pub fn open_with(paths: &[PathBuf], options: Options) -> anyhow::Result<Self> {
+        let [first, ..] = paths else {
+            anyhow::bail!("no file to present");
+        };
+        let (data, note) = if pdf(paths) {
             let data =
-                std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+                std::fs::read(first).with_context(|| format!("reading {}", first.display()))?;
             (data, None)
+        } else {
+            typeset(paths, &options)?
         };
         let data = Arc::new(data);
-        let pdf =
-            Pdf::new(data.clone()).map_err(|e| anyhow!("cannot open {}: {e:?}", path.display()))?;
-        let pages = pdf.pages();
-        let first = pages
-            .first()
-            .with_context(|| format!("{} has no pages", path.display()))?;
-        let page_size = first.render_dimensions();
-        let name = path.file_name().map_or_else(
-            || path.display().to_string(),
-            |n| n.to_string_lossy().into(),
-        );
+        let what = shown(paths);
+        let pdf = Pdf::new(data.clone()).map_err(|e| anyhow!("cannot open {what}: {e:?}"))?;
+        let sizes = sizes(&pdf);
+        if sizes.is_empty() {
+            anyhow::bail!("{what} has no pages");
+        }
         Ok(Deck {
-            path: path.to_path_buf(),
-            name,
-            pages: pages.len(),
-            page_size,
+            paths: paths.to_vec(),
+            name: and_more(name(first), paths),
+            pages: sizes.len(),
+            sizes,
             data,
             options,
             note,
         })
+    }
+
+    /// When each of the deck's files last changed.
+    pub fn stamps(&self) -> Vec<Stamp> {
+        self.paths.iter().map(|p| stamp(p)).collect()
+    }
+
+    /// Whether every one of the deck's files is written in full.
+    pub fn finished(&self) -> bool {
+        self.paths.iter().all(|p| finished(p))
     }
 }
 
@@ -541,7 +598,7 @@ fn unlit<'a>(
 }
 
 /// The page drawn `x_scale` and `y_scale` pixels a point, on white.
-fn raster<'a>(
+pub fn raster<'a>(
     page: &'a Page<'a>,
     cache: &RenderCache<'a>,
     settings: &InterpreterSettings,

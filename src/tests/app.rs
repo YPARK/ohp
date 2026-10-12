@@ -444,7 +444,7 @@ fn r_reloads_a_file_the_watch_has_already_seen() {
     let (dir, mut app) = app(3);
     fixture::write(dir.path(), 5);
     // As after a reload that failed: the change is taken, the old deck kept.
-    app.stamp = render::stamp(&app.deck.path);
+    app.stamp = app.deck.stamps();
     watch(&mut app);
     assert_eq!(app.deck.pages, 3);
 
@@ -520,11 +520,40 @@ fn ctrl_o_opens_another_file_in_place_of_this_one() {
     assert!(app.status().to_string().contains("opening"));
     finish(&mut app);
 
-    assert_eq!(app.deck.path, other.canonicalize().unwrap());
+    assert_eq!(app.deck.paths, [other.canonicalize().unwrap()]);
     assert_eq!(app.deck.pages, 5);
     assert_eq!(app.cur, 0);
     assert!(app.view == View::Present);
-    assert_eq!(app.stamp, render::stamp(&other));
+    assert_eq!(app.stamp, [render::stamp(&other)]);
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn ctrl_o_opens_the_files_marked_together() {
+    let (dir, mut app) = app(3);
+    write_named(dir.path(), "other.pdf", 5);
+    app.key(ctrl('o'));
+    type_in(&mut app, "oth");
+    press(&mut app, &[KeyCode::Tab]);
+    press(&mut app, &[KeyCode::Esc]);
+    type_in(&mut app, "deck");
+    press(&mut app, &[KeyCode::Tab, KeyCode::Enter]);
+    finish(&mut app);
+
+    let root = dir.path().canonicalize().unwrap();
+    assert_eq!(
+        app.deck.paths,
+        [root.join("other.pdf"), root.join("deck.pdf")]
+    );
+    assert_eq!(app.deck.pages, 8);
+    assert_eq!(app.deck.name, "other.pdf +1");
+
+    // A change to either is seen.
+    write_named(dir.path(), "other.pdf", 2);
+    watch(&mut app);
+    assert_eq!(app.notice.as_deref(), Some("file changing…"));
+    watch(&mut app);
+    assert_eq!(app.deck.pages, 5);
 }
 
 #[test]

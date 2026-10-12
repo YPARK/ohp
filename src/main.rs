@@ -7,6 +7,8 @@
 //!
 //! Markdown and R Markdown are typeset into a PDF first, by typst.
 
+#[cfg(feature = "markdown")]
+mod album;
 mod app;
 mod browse;
 #[cfg(feature = "markdown")]
@@ -64,13 +66,13 @@ use std::time::Duration;
 ///
 /// The file is reloaded whenever it changes on disk, so recompiling or
 /// saving it updates the slides in place; r reloads it at once. Ctrl-O
-/// picks another file to present.
+/// picks another file to present, or several, marked with tab.
 #[derive(Parser)]
 #[command(version)]
 struct Args {
     #[cfg_attr(
         feature = "markdown",
-        doc = "The slides: a PDF, `.md` or `.Rmd` file here, or on another machine"
+        doc = "The slides: a PDF, `.md` or `.Rmd` file, or an image, here, or on another machine"
     )]
     #[cfg_attr(
         not(feature = "markdown"),
@@ -79,7 +81,11 @@ struct Args {
     /// as `[user@]host:path`, copied over ssh and reloaded when it changes
     /// there. Without one, or given a directory, the file is picked from a
     /// list.
-    file: Option<PathBuf>,
+    #[cfg_attr(
+        feature = "markdown",
+        doc = "Several files here, PDFs, images and markdown mixed, are shown one after another as one deck."
+    )]
+    files: Vec<PathBuf>,
     /// Start with slides as text, even where the terminal shows images.
     #[arg(long)]
     text: bool,
@@ -148,18 +154,27 @@ pub fn shell_status(signal: usize) -> u8 {
 
 fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
     let args = Args::parse();
-    let file = match &args.file {
-        Some(file) if !file.is_dir() => file.clone(),
-        given => match browse::choose(given.as_deref().unwrap_or(".".as_ref()))? {
-            Some(file) => file,
-            None => return Ok(()),
-        },
+    let files = match args.files.as_slice() {
+        [] => browse::choose(".".as_ref())?,
+        [dir] if dir.is_dir() => browse::choose(dir)?,
+        files => Some(files.to_vec()),
     };
-    let remote = match remote::split(&file) {
-        Some((host, path)) => Some(remote::Remote::open("ssh".as_ref(), host, path)?),
-        None => None,
+    let Some(files) = files else {
+        return Ok(());
     };
-    let path = remote.as_ref().map_or(file.as_path(), |r| r.path());
+    let remote = match files.as_slice() {
+        [file] => remote::split(file)
+            .map(|(host, path)| remote::Remote::open("ssh".as_ref(), host, path))
+            .transpose()?,
+        files if files.iter().any(|f| remote::split(f).is_some()) => {
+            anyhow::bail!("slides on another machine are shown one file at a time")
+        }
+        _ => None,
+    };
+    let files = match &remote {
+        Some(remote) => vec![remote.path().to_path_buf()],
+        None => files,
+    };
     // Files picked later are here. Clones share one stop, which a signal sets.
     let local = options(&args);
     let options = render::Options {
@@ -169,7 +184,7 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
     };
     #[cfg(all(unix, any(feature = "markdown", feature = "speech")))]
     process::signals::install(&options.stop, signaled)?;
-    let deck = render::Deck::open_with(path, options);
+    let deck = render::Deck::open_with(&files, options);
     // Stopped while the deck was read: no screen to show.
     if signaled.load(Ordering::Relaxed) != 0 {
         return Ok(());

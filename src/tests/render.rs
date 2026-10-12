@@ -8,7 +8,7 @@ fn deck_reads_page_count_and_frame_size() {
     let deck = Deck::open(&fixture::write(dir.path(), 5)).unwrap();
     assert_eq!(deck.pages, 5);
     assert_eq!(deck.name, "deck.pdf");
-    let (w, h) = deck.page_size;
+    let (w, h) = deck.sizes[0];
     assert!((w - FRAME.0).abs() < 0.01 && (h - FRAME.1).abs() < 0.01);
 }
 
