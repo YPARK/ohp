@@ -71,15 +71,15 @@ const MAX_WORKERS: usize = 4;
 const WATCH_EVERY: Duration = Duration::from_millis(250);
 
 /// `text` starts with slides as text even where images can be shown.
-/// `link` is the connection the slides come over, for slides on another
-/// machine.
+/// `links` are the connections the slides come over, one a machine, for
+/// slides on others.
 /// `local` is how files picked with Ctrl-O, which are here, are read.
 /// `signaled` is set when a signal asks ohp to stop.
 /// `speaker` reads the slides aloud.
 pub fn run(
     deck: Deck,
     text: bool,
-    link: Option<Link>,
+    links: Vec<Link>,
     local: Options,
     speaker: Speaker,
     signaled: Arc<AtomicUsize>,
@@ -101,7 +101,7 @@ pub fn run(
         };
         let mut app = App::new(deck, picker, renderer, workers, look, signaled);
         app.notice = app.deck.note.clone();
-        app.link = link;
+        app.links = links;
         app.local = local;
         app.speaker = speaker;
         app.run(&mut terminal)?;
@@ -119,8 +119,17 @@ fn pick() -> Picker {
         kitty_compression: over_ssh(),
         ..Default::default()
     };
+    let timeout = options.timeout;
+    let asked = Instant::now();
     let mut picker =
         Picker::from_query_stdio_with_options(options).unwrap_or_else(|_| Picker::halfblocks());
+    // Unanswered, as when tmux does not pass it on to the terminal, the
+    // query leaves a thread reading stdin, which would take the first key
+    // pressed. A status report, which tmux and every terminal answer, ends
+    // it.
+    if asked.elapsed() >= timeout {
+        let _ = execute!(std::io::stdout(), Print("\x1b[5n"));
+    }
     // Pads an image rounded a pixel short of its cells, as the slide's own white.
     picker.set_background_color(Some([255, 255, 255, 255]));
     picker
@@ -189,8 +198,8 @@ struct Grid {
 enum Then {
     /// The file changed again while it was being read: read it once more.
     Reload,
-    /// A file picked while another was being read.
-    Open(PathBuf),
+    /// Files picked while another was being read.
+    Open(Vec<PathBuf>),
 }
 
 struct App {
@@ -220,15 +229,15 @@ struct App {
     stale: HashMap<Job, Option<Slide>>,
     /// Jobs queued or being done.
     requested: HashSet<Job>,
-    /// The PDF as last loaded.
-    stamp: Stamp,
-    /// A change seen on disk, waiting for the file to stop changing.
-    settling: Option<Stamp>,
+    /// The deck's files as last loaded.
+    stamp: Vec<Stamp>,
+    /// A change seen on disk, waiting for the files to stop changing.
+    settling: Option<Vec<Stamp>>,
     checked: Instant,
     /// The deck being read again, off this thread, and that thread.
     loading: Option<(Receiver<anyhow::Result<Deck>>, JoinHandle<()>)>,
-    /// The file being read in place of this one, if one is.
-    opening: Option<PathBuf>,
+    /// The files being read in place of these, if any are.
+    opening: Option<Vec<PathBuf>>,
     /// What to read once the read under way is done.
     then: Option<Then>,
     /// How files picked with Ctrl-O are read.
@@ -239,8 +248,8 @@ struct App {
     signaled: Arc<AtomicUsize>,
     /// Shown in the status line until the next key press.
     notice: Option<String>,
-    link: Option<Link>,
-    /// What is wrong with `link`, shown in the status line until it is not.
+    links: Vec<Link>,
+    /// What is wrong with `links`, shown in the status line until it is not.
     trouble: Option<String>,
     speaker: Speaker,
     /// The sentence being read aloud, lit on the slide, as last seen: the
@@ -263,7 +272,7 @@ impl App {
         signaled: Arc<AtomicUsize>,
     ) -> Self {
         App {
-            stamp: render::stamp(&deck.path),
+            stamp: deck.stamps(),
             local: deck.options.clone(),
             deck,
             picker,
@@ -289,7 +298,7 @@ impl App {
             browser: None,
             signaled,
             notice: None,
-            link: None,
+            links: Vec::new(),
             trouble: None,
             speaker: Speaker::new(None, None),
             lit: None,
@@ -367,24 +376,24 @@ impl App {
             return;
         }
         self.checked = Instant::now();
-        let trouble = self.link.as_ref().and_then(Link::trouble);
+        let trouble = self.links.iter().find_map(Link::trouble);
         if trouble != self.trouble {
             self.trouble = trouble;
             self.dirty = true;
         }
-        let now = render::stamp(&self.deck.path);
+        let now = self.deck.stamps();
         if now == self.stamp {
             self.settling = None;
-        } else if self.settling == Some(now) && render::finished(&self.deck.path) {
+        } else if self.settling.as_ref() == Some(&now) && self.deck.finished() {
             self.settling = None;
             self.stamp = now;
             self.reload();
-        } else if self.settling != Some(now) {
+        } else if self.settling.as_ref() != Some(&now) {
             self.settling = Some(now);
-            let what = if render::markdown(&self.deck.path) {
-                "file"
-            } else {
+            let what = if render::pdf(&self.deck.paths) {
                 "PDF"
+            } else {
+                "file"
             };
             self.notice = Some(format!("{what} changing…"));
             self.dirty = true;
@@ -398,42 +407,66 @@ impl App {
             self.then.get_or_insert(Then::Reload);
             return;
         }
-        self.read(self.deck.path.clone(), self.deck.options.clone());
+        self.read(self.deck.paths.clone(), self.deck.options.clone());
     }
 
-    /// Read `path` on a thread of its own, to present in place of the deck.
-    fn open(&mut self, path: PathBuf) {
+    /// Files just added, then the ones the deck already had, so the new
+    /// one is what comes up.
+    fn added_first(&self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        let had: HashSet<_> = self
+            .deck
+            .paths
+            .iter()
+            .filter_map(|p| browse::as_listed(p))
+            .collect();
+        let (mut fresh, kept): (Vec<_>, Vec<_>) = paths
+            .into_iter()
+            .partition(|path| browse::as_listed(path).is_none_or(|listed| !had.contains(&listed)));
+        fresh.extend(kept);
+        fresh
+    }
+
+    /// Read `paths` on a thread of its own, to present in place of the deck.
+    fn open(&mut self, paths: Vec<PathBuf>) {
         if self.loading.is_some() {
-            self.then = Some(Then::Open(path));
+            self.then = Some(Then::Open(paths));
             return;
         }
-        self.opening = Some(path.clone());
-        self.read(path, self.local.clone());
+        self.opening = Some(paths.clone());
+        self.read(paths, self.local.clone());
     }
 
-    fn read(&mut self, path: PathBuf, options: Options) {
+    fn read(&mut self, paths: Vec<PathBuf>, options: Options) {
         let (tx, rx) = std::sync::mpsc::channel();
         // Nothing to do if the app is gone.
         let reader = std::thread::spawn(move || {
-            let _ = tx.send(Deck::open_with(&path, options));
+            let _ = tx.send(Deck::open_with(&paths, options));
         });
         self.loading = Some((rx, reader));
         self.dirty = true;
     }
 
-    /// Open the list to pick another file from, in the deck's directory.
+    /// Open the list to pick another file from, in the directory of the
+    /// file on screen, with a deck of several files marked, so enter adds
+    /// the file picked.
     fn browse(&mut self) {
-        let path = &self.deck.path;
+        let paths = &self.deck.paths;
         // A file on another machine is copied to a temporary directory.
-        let here = self.link.is_none();
-        let dir = path
+        let here = self.links.is_empty();
+        let current = &paths[self.deck.source(self.cur)];
+        let dir = current
             .parent()
             .filter(|dir| here && !dir.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         match Browser::new(dir) {
             Ok(mut browser) => {
-                if here && let Some(name) = path.file_name() {
-                    browser.select(&name.to_string_lossy());
+                if here {
+                    if let Some(name) = current.file_name() {
+                        browser.select(&name.to_string_lossy());
+                    }
+                    if paths.len() > 1 {
+                        browser.mark_all(paths);
+                    }
                 }
                 self.browser = Some(browser);
             }
@@ -461,7 +494,7 @@ impl App {
             Ok((deck, renderer)) => {
                 if opening.is_some() {
                     self.speaker.stop();
-                    self.stamp = render::stamp(&deck.path);
+                    self.stamp = deck.stamps();
                     self.settling = None;
                     // Slides of another file: not to be shown for this one.
                     self.slides.clear();
@@ -469,7 +502,7 @@ impl App {
                     (self.cur, self.top) = (0, 0);
                     self.zoom = Zoom::FIT;
                     self.view = View::Present;
-                    self.link = None;
+                    self.links.clear();
                     self.trouble = None;
                     // A reload asked for was of the file this replaces.
                     self.then = self.then.take().filter(|then| *then != Then::Reload);
@@ -492,7 +525,7 @@ impl App {
             }
             Err(e) => {
                 self.notice = Some(match opening {
-                    Some(path) => format!("cannot open {}: {e:#}", path.display()),
+                    Some(paths) => format!("cannot open {}: {e:#}", render::shown(&paths)),
                     None => format!("reload failed: {e:#}"),
                 });
             }
@@ -680,9 +713,9 @@ impl App {
         if let Some(browser) = &mut self.browser {
             match browser.key(key) {
                 browse::Outcome::Stay => {}
-                browse::Outcome::Open(path) => {
+                browse::Outcome::Open(paths) => {
                     self.browser = None;
-                    self.open(path);
+                    self.open(self.added_first(paths));
                 }
                 browse::Outcome::Quit => self.browser = None,
             }
@@ -727,7 +760,10 @@ impl App {
             KeyCode::Char('-' | '_') => self.zoom_slide(-1),
             KeyCode::Char('0') if self.view == View::Present => self.zoom = Zoom::FIT,
             // Even unchanged: a chunk may read files ohp does not watch.
-            KeyCode::Char('r') => self.reload(),
+            KeyCode::Char('r') => {
+                self.deck.options.forget();
+                self.reload();
+            }
             KeyCode::Char('s') if self.speaker.reading() => self.speaker.stop(),
             KeyCode::Char('s') => self.speak(),
             KeyCode::Char('v') => self.choose_voice(),
@@ -776,7 +812,7 @@ impl App {
     fn clamp_pan(&mut self) {
         let font = self.picker.font_size();
         let (fw, fh) = (f32::from(font.width), f32::from(font.height));
-        let (pw, ph) = self.deck.page_size;
+        let (pw, ph) = self.deck.sizes[self.cur];
         let (cols, rows) = (self.main.width, self.main.height);
         let fit = (f32::from(cols) * fw / pw).min(f32::from(rows) * fh / ph);
         let scale = fit * f32::from(self.zoom.percent) / 100.;
@@ -834,7 +870,7 @@ impl App {
     fn grid_with(&self, cols: u16) -> Grid {
         let area = self.main;
         let font = self.picker.font_size();
-        let (pw, ph) = self.deck.page_size;
+        let (pw, ph) = self.deck.sizes[0];
         let slot_w = (area.width / cols).max(3);
         let inner_px = f32::from(slot_w - 2) * f32::from(font.width);
         let inner_h = (inner_px * ph / pw / f32::from(font.height)).ceil() as u16;
@@ -1107,14 +1143,22 @@ impl App {
         if let Some(note) = self.voices.note() {
             speaking.push_str(&note);
         }
+        let paths = &self.deck.paths;
+        let file = self.deck.source(self.cur);
         let mut spans = vec![
             Span::styled(
-                format!(" {} ", self.deck.name),
+                format!(" {} ", render::name(&paths[file])),
                 Style::new().add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(" {}/{} ", self.cur + 1, self.deck.pages)),
-            Span::styled(format!(" {view}{look}{speaking}"), dim),
         ];
+        if paths.len() > 1 {
+            spans.push(Span::styled(
+                format!(" file {}/{} ·", file + 1, paths.len()),
+                dim,
+            ));
+        }
+        spans.push(Span::styled(format!(" {view}{look}{speaking}"), dim));
         let waiting = self
             .visible()
             .into_iter()
@@ -1125,8 +1169,8 @@ impl App {
         }
         if self.loading.is_some() {
             let what = match &self.opening {
-                Some(path) => format!("opening {}…", path.display()),
-                None if render::markdown(&self.deck.path) => "typesetting…".into(),
+                Some(paths) => format!("opening {}…", render::shown(paths)),
+                None if !render::pdf(&self.deck.paths) => "typesetting…".into(),
                 None => "reloading…".into(),
             };
             spans.push(Span::styled(format!("  {what}"), dim));

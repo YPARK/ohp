@@ -1,6 +1,6 @@
 [package]
 name = "ohp"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
@@ -16,9 +16,15 @@ default = ["markdown", "speech"]
 speech = ["dep:libc", "dep:signal-hook", "dep:serde_json"]
 # Markdown and R Markdown, typeset by typst. Typst's evaluator grows its
 # stack through `psm`, which assembles one small file with the C toolchain.
-# Citations are read with typst's own bibliography crates.
+# Citations are read with typst's own bibliography crates. Images, and
+# several files shown together, are set by typst too; ohp measures images,
+# and makes large ones smaller, with the codecs typst reads them with.
 markdown = [
     "dep:hayagriva",
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
     "dep:libc",
     "dep:signal-hook",
     "dep:percent-encoding",

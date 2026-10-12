@@ -45,8 +45,8 @@ fn type_in(b: &mut Browser, text: &str) {
 
 fn opened(outcome: Outcome) -> PathBuf {
     match outcome {
-        Outcome::Open(path) => path,
-        _ => panic!("nothing opened"),
+        Outcome::Open(paths) if paths.len() == 1 => paths[0].clone(),
+        _ => panic!("not one file opened"),
     }
 }
 
@@ -186,6 +186,96 @@ fn a_file_typed_in_full_opens_unlisted() {
     assert!(b.entries.is_empty());
     let path = opened(press(&mut b, &[KeyCode::Enter]));
     assert_eq!(path, root.join("readme.txt"));
+}
+
+#[test]
+fn tab_marks_files_across_folders_and_enter_opens_them_in_order() {
+    let dir = tree();
+    let root = dir.path().canonicalize().unwrap();
+    let mut b = Browser::new(&root).unwrap();
+    type_in(&mut b, "beta");
+    press(&mut b, &[KeyCode::Tab]);
+    press(&mut b, &[KeyCode::Esc]);
+    type_in(&mut b, "talks/int");
+    press(&mut b, &[KeyCode::Tab, KeyCode::Esc]);
+    type_in(&mut b, "../al");
+    assert_eq!(names(&b), ["alpha.pdf", "talks"]);
+    // Marking moves down; tab again unmarks.
+    press(&mut b, &[KeyCode::Tab]);
+    assert_eq!(picked(&b), "talks");
+    press(
+        &mut b,
+        &[KeyCode::Up, KeyCode::Tab, KeyCode::Up, KeyCode::Tab],
+    );
+    // A folder picked is still gone into.
+    press(&mut b, &[KeyCode::Esc]);
+    type_in(&mut b, "notes");
+    assert!(matches!(press(&mut b, &[KeyCode::Enter]), Outcome::Stay));
+    assert_eq!(b.dir, root.join("notes"));
+    press(&mut b, &[KeyCode::Left]);
+    type_in(&mut b, "readme.txt");
+    let Outcome::Open(paths) = press(&mut b, &[KeyCode::Enter]) else {
+        panic!("nothing opened");
+    };
+    // The marked, then the one picked.
+    assert_eq!(
+        paths,
+        [
+            root.join("beta.PDF"),
+            root.join("talks/intro.pdf"),
+            root.join("alpha.pdf"),
+            root.join("readme.txt")
+        ]
+    );
+}
+
+#[test]
+fn enter_on_a_file_marked_opens_the_marked_alone_and_shift_tab_unmarks_all() {
+    let dir = tree();
+    let root = dir.path().canonicalize().unwrap();
+    let mut b = Browser::new(&root).unwrap();
+    b.mark_all(&[root.join("beta.PDF"), root.join("alpha.pdf")]);
+    type_in(&mut b, "alp");
+    let Outcome::Open(paths) = press(&mut b, &[KeyCode::Enter]) else {
+        panic!("nothing opened");
+    };
+    assert_eq!(paths, [root.join("beta.PDF"), root.join("alpha.pdf")]);
+
+    press(&mut b, &[KeyCode::BackTab]);
+    assert_eq!(
+        opened(press(&mut b, &[KeyCode::Enter])),
+        root.join("alpha.pdf")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_marked_is_the_link_listed_not_opened_twice() {
+    let dir = tree();
+    let root = dir.path().canonicalize().unwrap();
+    std::os::unix::fs::symlink(root.join("alpha.pdf"), root.join("latest.pdf")).unwrap();
+    let mut b = Browser::new(&root).unwrap();
+    // Named from elsewhere, as the deck presented may name it.
+    b.mark_all(&[dir.path().join("talks/../latest.pdf")]);
+    type_in(&mut b, "lat");
+    let Outcome::Open(paths) = press(&mut b, &[KeyCode::Enter]) else {
+        panic!("nothing opened");
+    };
+    assert_eq!(paths, [root.join("latest.pdf")]);
+}
+
+#[test]
+fn images_are_listed_with_the_slides() {
+    let dir = tree();
+    std::fs::write(dir.path().join("photo.JPG"), b"").unwrap();
+    let mut b = Browser::new(dir.path()).unwrap();
+    type_in(&mut b, "pho");
+    let want: &[&str] = if cfg!(feature = "markdown") {
+        &["photo.JPG"]
+    } else {
+        &[]
+    };
+    assert_eq!(names(&b), want);
 }
 
 #[test]

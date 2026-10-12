@@ -46,13 +46,30 @@ ohp --text talk.pdf                  # slides as text, even where images can be 
 ohp user@host:~/talks/talk.pdf       # slides on another machine
 ohp talk.Rmd                         # R Markdown slides, chunks run by knitr
 ohp --paper a4 notes.md              # a markdown document, on A4 pages
+ohp plot.png                         # an image
+ohp intro.pdf figs/*.png photo.jpg   # several files, mixed, one after another
+ohp host:talk.pdf host:fig.png       # several on another machine
 ```
 
 In the list, typing narrows it to the names that match, and a path typed
 up to a `/`, as `../talks/` or `~/`, goes to that directory. Up and down
 move, enter opens a file or goes into a folder, left or backspace on an
-empty line goes up, and esc quits. While presenting, ctrl-o brings the
-same list up over the slides.
+empty line goes up, and esc quits. Tab marks a file, or unmarks it, in
+any folder, and shift-tab unmarks them all; enter opens the files marked
+and the one picked together. While presenting, ctrl-o brings the same
+list up over the slides, in the directory of the file on screen, with a
+deck of several files marked, so enter on another adds it, and that
+file is shown first.
+
+Several files given, or marked, are shown as one deck, in the order
+given: each page of a PDF as a slide, each image, PNG, JPEG, GIF, WebP or
+SVG, as a slide its own shape, and markdown typeset as it is alone. The
+status line names the file the slide is from. A photo larger than a
+screen shows, past 4096 pixels across or down, is made that small first.
+A file that cannot be read is left out, and named in the status line. A
+change to any of them reloads the deck, reading again only the files
+changed, and `r` all of them. Images, and several files together, are
+set by typst, so need the `markdown` feature, as in the default build.
 
 | Key | |
 |---|---|
@@ -249,9 +266,11 @@ of a slide.
 the system `ssh` into a temporary file and kept in step with the original,
 so running LaTeX, or saving the markdown, there updates the slides here.
 Markdown from another machine is not knitted, and images it links to by a
-relative path are not shown. One ssh connection watches
-the file and every copy goes through it, so a password is asked for once,
-before the slides take over the terminal.
+relative path are not shown. Several files may be on other machines, and
+mixed with files here, as `ohp host:talk.pdf host:figs/a.png notes.md`.
+One ssh connection a machine watches its files and every copy goes
+through it, so a password is asked for once a machine, before the slides
+take over the terminal.
 
 If the connection is lost, the status line says so and ohp reconnects by
 itself. It never asks for a password once the slides are up, so this needs

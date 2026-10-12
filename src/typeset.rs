@@ -199,7 +199,7 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
     })
 }
 
-fn compile(world: &Doc) -> Result<Vec<u8>, Vec<SourceDiagnostic>> {
+pub fn compile(world: &Doc) -> Result<Vec<u8>, Vec<SourceDiagnostic>> {
     let compiled = typst::compile::<PagedDocument>(world).output;
     // typst memoises across compiles in a global cache; what reloads stop
     // using would otherwise be kept for as long as ohp runs.
@@ -222,14 +222,14 @@ static FONTS: LazyLock<(LazyHash<FontBook>, Vec<Font>)> = LazyLock::new(|| {
 
 /// One typst document, the images it shows and the formulas LaTeX rendered
 /// for it; it reads nothing else.
-struct Doc {
+pub struct Doc {
     main: Source,
     files: HashMap<FileId, FileResult<Bytes>>,
 }
 
 impl Doc {
     /// `loaded` keeps the images read, for the next try at the document.
-    fn new(
+    pub fn new(
         source: String,
         images: &[Picture],
         rendered: &[(String, Arc<[u8]>)],

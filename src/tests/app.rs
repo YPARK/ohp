@@ -444,7 +444,7 @@ fn r_reloads_a_file_the_watch_has_already_seen() {
     let (dir, mut app) = app(3);
     fixture::write(dir.path(), 5);
     // As after a reload that failed: the change is taken, the old deck kept.
-    app.stamp = render::stamp(&app.deck.path);
+    app.stamp = app.deck.stamps();
     watch(&mut app);
     assert_eq!(app.deck.pages, 3);
 
@@ -520,11 +520,112 @@ fn ctrl_o_opens_another_file_in_place_of_this_one() {
     assert!(app.status().to_string().contains("opening"));
     finish(&mut app);
 
-    assert_eq!(app.deck.path, other.canonicalize().unwrap());
+    assert_eq!(app.deck.paths, [other.canonicalize().unwrap()]);
     assert_eq!(app.deck.pages, 5);
     assert_eq!(app.cur, 0);
     assert!(app.view == View::Present);
-    assert_eq!(app.stamp, render::stamp(&other));
+    assert_eq!(app.stamp, [render::stamp(&other)]);
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn ctrl_o_opens_the_files_marked_together() {
+    let (dir, mut app) = app(3);
+    write_named(dir.path(), "other.pdf", 5);
+    app.key(ctrl('o'));
+    type_in(&mut app, "oth");
+    press(&mut app, &[KeyCode::Tab]);
+    press(&mut app, &[KeyCode::Esc]);
+    type_in(&mut app, "deck");
+    press(&mut app, &[KeyCode::Tab, KeyCode::Enter]);
+    finish(&mut app);
+
+    let root = dir.path().canonicalize().unwrap();
+    assert_eq!(
+        app.deck.paths,
+        [root.join("other.pdf"), root.join("deck.pdf")]
+    );
+    assert_eq!(app.deck.pages, 8);
+    // The status line names the file the slide is from.
+    let status = app.status().to_string();
+    assert!(status.starts_with(" other.pdf  1/8  file 1/2"), "{status}");
+    press(&mut app, &[KeyCode::Char('n'); 5]);
+    let status = app.status().to_string();
+    assert!(status.starts_with(" deck.pdf  6/8  file 2/2"), "{status}");
+
+    // A change to either is seen.
+    write_named(dir.path(), "other.pdf", 2);
+    watch(&mut app);
+    assert_eq!(app.notice.as_deref(), Some("file changing…"));
+    watch(&mut app);
+    assert_eq!(app.deck.pages, 5);
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn ctrl_o_over_several_files_starts_with_them_marked_to_add_to() {
+    let (dir, mut app) = app(3);
+    write_named(dir.path(), "other.pdf", 5);
+    write_named(dir.path(), "third.pdf", 1);
+    let root = dir.path().canonicalize().unwrap();
+    let pair = vec![root.join("deck.pdf"), root.join("other.pdf")];
+    app.open(pair.clone());
+    finish(&mut app);
+    assert_eq!(app.deck.pages, 8);
+
+    // Enter on another adds it, and shows it first.
+    app.key(ctrl('o'));
+    type_in(&mut app, "thi");
+    press(&mut app, &[KeyCode::Enter]);
+    finish(&mut app);
+    assert_eq!(
+        app.deck.paths,
+        [&[root.join("third.pdf")], &pair[..]].concat()
+    );
+    assert_eq!(app.cur, 0);
+    let status = app.status().to_string();
+    assert!(status.starts_with(" third.pdf"), "{status}");
+
+    // Shift-tab unmarks them all, so enter opens just the one picked.
+    app.key(ctrl('o'));
+    press(&mut app, &[KeyCode::BackTab]);
+    type_in(&mut app, "oth");
+    press(&mut app, &[KeyCode::Enter]);
+    finish(&mut app);
+    assert_eq!(app.deck.paths, [root.join("other.pdf")]);
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn ctrl_o_opens_the_directory_of_the_file_on_screen() {
+    let (dir, mut app) = app(1);
+    let root = dir.path().canonicalize().unwrap();
+    let slides = root.join("slides");
+    let figs = root.join("figs");
+    std::fs::create_dir(&slides).unwrap();
+    std::fs::create_dir(&figs).unwrap();
+    let talk = write_named(&slides, "talk.pdf", 2);
+    let plot = write_named(&figs, "plot.pdf", 4);
+    write_named(&figs, "extra.pdf", 1);
+    app.open(vec![talk, plot]);
+    finish(&mut app);
+
+    // On plot.pdf, which is not the deck's first file, nor in its folder.
+    press(&mut app, &[KeyCode::Char('n'); 2]);
+    app.key(ctrl('o'));
+    type_in(&mut app, "ext");
+    press(&mut app, &[KeyCode::Enter]);
+    finish(&mut app);
+    assert_eq!(
+        app.deck.paths,
+        [
+            figs.join("extra.pdf"),
+            slides.join("talk.pdf"),
+            figs.join("plot.pdf")
+        ]
+    );
+    let status = app.status().to_string();
+    assert!(status.starts_with(" extra.pdf"), "{status}");
 }
 
 #[test]
