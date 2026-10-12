@@ -36,7 +36,8 @@ pub const THREAD: &str = "render";
 pub struct Deck {
     /// The files the deck is made of, most often one.
     pub paths: Vec<PathBuf>,
-    pub name: String,
+    /// Which of `paths` each page is from; empty when all are from one.
+    pub from: Vec<usize>,
     pub data: Arc<Vec<u8>>,
     pub pages: usize,
     /// Width and height of each page, in points.
@@ -69,6 +70,10 @@ pub struct Options {
     /// Set to stop typesetting under way, as a knitr run; shared by the
     /// options' clones, so by every reload of a deck.
     pub stop: Arc<AtomicBool>,
+    /// The files of a deck of several, as shown, kept for its reloads;
+    /// shared as `stop` is.
+    #[cfg(feature = "markdown")]
+    pub cache: Arc<crate::album::Cache>,
 }
 
 impl Default for Options {
@@ -77,7 +82,18 @@ impl Default for Options {
             paper: None,
             knit: true,
             stop: Arc::default(),
+            #[cfg(feature = "markdown")]
+            cache: Arc::default(),
         }
+    }
+}
+
+impl Options {
+    /// Read every file again at the next reload, though unchanged: one may
+    /// read others ohp does not watch, as markdown its bibliography.
+    pub fn forget(&self) {
+        #[cfg(feature = "markdown")]
+        self.cache.clear();
     }
 }
 
@@ -119,7 +135,7 @@ pub fn image(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         matches!(
             e.to_ascii_lowercase().as_str(),
-            "png" | "jpg" | "jpeg" | "gif" | "webp"
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg"
         )
     })
 }
@@ -129,17 +145,13 @@ pub fn pdf(paths: &[PathBuf]) -> bool {
     matches!(paths, [path] if !markdown(path) && !image(path))
 }
 
-/// `first`, and how many of `paths` follow it.
-fn and_more(first: impl std::fmt::Display, paths: &[PathBuf]) -> String {
-    match paths.len() {
-        0 | 1 => first.to_string(),
-        n => format!("{first} +{}", n - 1),
-    }
-}
-
 /// The first of `paths`, which are some, and how many follow it.
 pub fn shown(paths: &[PathBuf]) -> String {
-    and_more(paths[0].display(), paths)
+    let first = paths[0].display();
+    match paths.len() {
+        1 => first.to_string(),
+        n => format!("{first} +{}", n - 1),
+    }
 }
 
 /// The name of the file `path` names.
@@ -155,17 +167,21 @@ pub fn sizes(pdf: &Pdf) -> Vec<(f32, f32)> {
     pdf.pages().iter().map(Page::render_dimensions).collect()
 }
 
+/// A PDF made of files, what the status line should say about how, and
+/// which file each page is from, if they are several.
+type Made = (Vec<u8>, Option<String>, Vec<usize>);
+
 #[cfg(feature = "markdown")]
-fn typeset(paths: &[PathBuf], options: &Options) -> anyhow::Result<(Vec<u8>, Option<String>)> {
+fn typeset(paths: &[PathBuf], options: &Options) -> anyhow::Result<Made> {
     let done = match paths {
         [path] if markdown(path) => crate::typeset::typeset(path, options)?,
         _ => crate::album::gather(paths, options)?,
     };
-    Ok((done.pdf, done.note))
+    Ok((done.pdf, done.note, done.from))
 }
 
 #[cfg(not(feature = "markdown"))]
-fn typeset(paths: &[PathBuf], _: &Options) -> anyhow::Result<(Vec<u8>, Option<String>)> {
+fn typeset(paths: &[PathBuf], _: &Options) -> anyhow::Result<Made> {
     let why = match paths {
         [path] if markdown(path) => format!("{} is markdown", path.display()),
         [path] => format!("{} is an image", path.display()),
@@ -186,10 +202,10 @@ impl Deck {
         let [first, ..] = paths else {
             anyhow::bail!("no file to present");
         };
-        let (data, note) = if pdf(paths) {
+        let (data, note, from) = if pdf(paths) {
             let data =
                 std::fs::read(first).with_context(|| format!("reading {}", first.display()))?;
-            (data, None)
+            (data, None, Vec::new())
         } else {
             typeset(paths, &options)?
         };
@@ -202,13 +218,18 @@ impl Deck {
         }
         Ok(Deck {
             paths: paths.to_vec(),
-            name: and_more(name(first), paths),
+            from,
             pages: sizes.len(),
             sizes,
             data,
             options,
             note,
         })
+    }
+
+    /// Which of `paths` page `page` is from.
+    pub fn source(&self, page: usize) -> usize {
+        self.from.get(page).copied().unwrap_or(0)
     }
 
     /// When each of the deck's files last changed.

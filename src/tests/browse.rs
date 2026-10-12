@@ -217,13 +217,34 @@ fn tab_marks_files_across_folders_and_enter_opens_them_in_order() {
     let Outcome::Open(paths) = press(&mut b, &[KeyCode::Enter]) else {
         panic!("nothing opened");
     };
+    // The marked, then the one picked.
     assert_eq!(
         paths,
         [
             root.join("beta.PDF"),
             root.join("talks/intro.pdf"),
-            root.join("alpha.pdf")
+            root.join("alpha.pdf"),
+            root.join("readme.txt")
         ]
+    );
+}
+
+#[test]
+fn enter_on_a_file_marked_opens_the_marked_alone_and_shift_tab_unmarks_all() {
+    let dir = tree();
+    let root = dir.path().canonicalize().unwrap();
+    let mut b = Browser::new(&root).unwrap();
+    b.mark_all(&[root.join("beta.PDF"), root.join("alpha.pdf")]);
+    type_in(&mut b, "alp");
+    let Outcome::Open(paths) = press(&mut b, &[KeyCode::Enter]) else {
+        panic!("nothing opened");
+    };
+    assert_eq!(paths, [root.join("beta.PDF"), root.join("alpha.pdf")]);
+
+    press(&mut b, &[KeyCode::BackTab]);
+    assert_eq!(
+        opened(press(&mut b, &[KeyCode::Enter])),
+        root.join("alpha.pdf")
     );
 }
 

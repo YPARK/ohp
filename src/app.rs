@@ -71,15 +71,15 @@ const MAX_WORKERS: usize = 4;
 const WATCH_EVERY: Duration = Duration::from_millis(250);
 
 /// `text` starts with slides as text even where images can be shown.
-/// `link` is the connection the slides come over, for slides on another
-/// machine.
+/// `links` are the connections the slides come over, one a machine, for
+/// slides on others.
 /// `local` is how files picked with Ctrl-O, which are here, are read.
 /// `signaled` is set when a signal asks ohp to stop.
 /// `speaker` reads the slides aloud.
 pub fn run(
     deck: Deck,
     text: bool,
-    link: Option<Link>,
+    links: Vec<Link>,
     local: Options,
     speaker: Speaker,
     signaled: Arc<AtomicUsize>,
@@ -101,7 +101,7 @@ pub fn run(
         };
         let mut app = App::new(deck, picker, renderer, workers, look, signaled);
         app.notice = app.deck.note.clone();
-        app.link = link;
+        app.links = links;
         app.local = local;
         app.speaker = speaker;
         app.run(&mut terminal)?;
@@ -239,8 +239,8 @@ struct App {
     signaled: Arc<AtomicUsize>,
     /// Shown in the status line until the next key press.
     notice: Option<String>,
-    link: Option<Link>,
-    /// What is wrong with `link`, shown in the status line until it is not.
+    links: Vec<Link>,
+    /// What is wrong with `links`, shown in the status line until it is not.
     trouble: Option<String>,
     speaker: Speaker,
     /// The sentence being read aloud, lit on the slide, as last seen: the
@@ -289,7 +289,7 @@ impl App {
             browser: None,
             signaled,
             notice: None,
-            link: None,
+            links: Vec::new(),
             trouble: None,
             speaker: Speaker::new(None, None),
             lit: None,
@@ -367,7 +367,7 @@ impl App {
             return;
         }
         self.checked = Instant::now();
-        let trouble = self.link.as_ref().and_then(Link::trouble);
+        let trouble = self.links.iter().find_map(Link::trouble);
         if trouble != self.trouble {
             self.trouble = trouble;
             self.dirty = true;
@@ -421,19 +421,23 @@ impl App {
         self.dirty = true;
     }
 
-    /// Open the list to pick another file from, in the deck's directory.
+    /// Open the list to pick another file from, in the deck's directory,
+    /// with a deck of several files marked, so enter adds the file picked.
     fn browse(&mut self) {
-        let path = &self.deck.paths[0];
+        let paths = &self.deck.paths;
         // A file on another machine is copied to a temporary directory.
-        let here = self.link.is_none();
-        let dir = path
+        let here = self.links.is_empty();
+        let dir = paths[0]
             .parent()
             .filter(|dir| here && !dir.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         match Browser::new(dir) {
             Ok(mut browser) => {
-                if here && let Some(name) = path.file_name() {
+                if here && let Some(name) = paths[0].file_name() {
                     browser.select(&name.to_string_lossy());
+                }
+                if here && paths.len() > 1 {
+                    browser.mark_all(paths);
                 }
                 self.browser = Some(browser);
             }
@@ -469,7 +473,7 @@ impl App {
                     (self.cur, self.top) = (0, 0);
                     self.zoom = Zoom::FIT;
                     self.view = View::Present;
-                    self.link = None;
+                    self.links.clear();
                     self.trouble = None;
                     // A reload asked for was of the file this replaces.
                     self.then = self.then.take().filter(|then| *then != Then::Reload);
@@ -727,7 +731,10 @@ impl App {
             KeyCode::Char('-' | '_') => self.zoom_slide(-1),
             KeyCode::Char('0') if self.view == View::Present => self.zoom = Zoom::FIT,
             // Even unchanged: a chunk may read files ohp does not watch.
-            KeyCode::Char('r') => self.reload(),
+            KeyCode::Char('r') => {
+                self.deck.options.forget();
+                self.reload();
+            }
             KeyCode::Char('s') if self.speaker.reading() => self.speaker.stop(),
             KeyCode::Char('s') => self.speak(),
             KeyCode::Char('v') => self.choose_voice(),
@@ -1107,14 +1114,22 @@ impl App {
         if let Some(note) = self.voices.note() {
             speaking.push_str(&note);
         }
+        let paths = &self.deck.paths;
+        let file = self.deck.source(self.cur);
         let mut spans = vec![
             Span::styled(
-                format!(" {} ", self.deck.name),
+                format!(" {} ", render::name(&paths[file])),
                 Style::new().add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(" {}/{} ", self.cur + 1, self.deck.pages)),
-            Span::styled(format!(" {view}{look}{speaking}"), dim),
         ];
+        if paths.len() > 1 {
+            spans.push(Span::styled(
+                format!(" file {}/{} ·", file + 1, paths.len()),
+                dim,
+            ));
+        }
+        spans.push(Span::styled(format!(" {view}{look}{speaking}"), dim));
         let waiting = self
             .visible()
             .into_iter()

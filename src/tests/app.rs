@@ -546,7 +546,12 @@ fn ctrl_o_opens_the_files_marked_together() {
         [root.join("other.pdf"), root.join("deck.pdf")]
     );
     assert_eq!(app.deck.pages, 8);
-    assert_eq!(app.deck.name, "other.pdf +1");
+    // The status line names the file the slide is from.
+    let status = app.status().to_string();
+    assert!(status.starts_with(" other.pdf  1/8  file 1/2"), "{status}");
+    press(&mut app, &[KeyCode::Char('n'); 5]);
+    let status = app.status().to_string();
+    assert!(status.starts_with(" deck.pdf  6/8  file 2/2"), "{status}");
 
     // A change to either is seen.
     write_named(dir.path(), "other.pdf", 2);
@@ -554,6 +559,37 @@ fn ctrl_o_opens_the_files_marked_together() {
     assert_eq!(app.notice.as_deref(), Some("file changing…"));
     watch(&mut app);
     assert_eq!(app.deck.pages, 5);
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn ctrl_o_over_several_files_starts_with_them_marked_to_add_to() {
+    let (dir, mut app) = app(3);
+    write_named(dir.path(), "other.pdf", 5);
+    write_named(dir.path(), "third.pdf", 1);
+    let root = dir.path().canonicalize().unwrap();
+    let pair = vec![root.join("deck.pdf"), root.join("other.pdf")];
+    app.open(pair.clone());
+    finish(&mut app);
+    assert_eq!(app.deck.pages, 8);
+
+    // Enter on another adds it.
+    app.key(ctrl('o'));
+    type_in(&mut app, "thi");
+    press(&mut app, &[KeyCode::Enter]);
+    finish(&mut app);
+    assert_eq!(
+        app.deck.paths,
+        [&pair[..], &[root.join("third.pdf")]].concat()
+    );
+
+    // Shift-tab unmarks them all, so enter opens just the one picked.
+    app.key(ctrl('o'));
+    press(&mut app, &[KeyCode::BackTab]);
+    type_in(&mut app, "oth");
+    press(&mut app, &[KeyCode::Enter]);
+    finish(&mut app);
+    assert_eq!(app.deck.paths, [root.join("other.pdf")]);
 }
 
 #[test]

@@ -66,7 +66,8 @@ use std::time::Duration;
 ///
 /// The file is reloaded whenever it changes on disk, so recompiling or
 /// saving it updates the slides in place; r reloads it at once. Ctrl-O
-/// picks another file to present, or several, marked with tab.
+/// picks another file to present, or several, marked with tab, or adds one
+/// to a deck of several.
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -83,7 +84,7 @@ struct Args {
     /// list.
     #[cfg_attr(
         feature = "markdown",
-        doc = "Several files here, PDFs, images and markdown mixed, are shown one after another as one deck."
+        doc = "Several files, here or not, PDFs, images and markdown mixed, are shown one after another as one deck."
     )]
     files: Vec<PathBuf>,
     /// Start with slides as text, even where the terminal shows images.
@@ -162,24 +163,12 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
     let Some(files) = files else {
         return Ok(());
     };
-    let remote = match files.as_slice() {
-        [file] => remote::split(file)
-            .map(|(host, path)| remote::Remote::open("ssh".as_ref(), host, path))
-            .transpose()?,
-        files if files.iter().any(|f| remote::split(f).is_some()) => {
-            anyhow::bail!("slides on another machine are shown one file at a time")
-        }
-        _ => None,
-    };
-    let files = match &remote {
-        Some(remote) => vec![remote.path().to_path_buf()],
-        None => files,
-    };
+    let (remotes, files) = remote::open_all("ssh".as_ref(), &files)?;
     // Files picked later are here. Clones share one stop, which a signal sets.
     let local = options(&args);
     let options = render::Options {
         // The data a remote file's chunks read is on the other machine.
-        knit: local.knit && remote.is_none(),
+        knit: local.knit && remotes.is_empty(),
         ..local.clone()
     };
     #[cfg(all(unix, any(feature = "markdown", feature = "speech")))]
@@ -189,11 +178,11 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
     if signaled.load(Ordering::Relaxed) != 0 {
         return Ok(());
     }
-    let link = remote.as_ref().map(remote::Remote::link);
+    let links = remotes.iter().map(remote::Remote::link).collect();
     app::run(
         deck?,
         args.text,
-        link,
+        links,
         local,
         speaker(&args),
         signaled.clone(),

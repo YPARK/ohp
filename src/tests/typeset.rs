@@ -23,7 +23,6 @@ fn slides_are_one_page_each() {
     assert_eq!(deck.pages, 4);
     let (w, h) = deck.sizes[0];
     assert!(w > h, "{w}×{h}");
-    assert_eq!(deck.name, "talk.md");
 }
 
 #[test]

@@ -1,9 +1,9 @@
 //! Slides on another machine, named as scp names them: `[user@]host:path`.
 //!
 //! The PDF is copied over ssh into a local file and kept in step with the
-//! original, so it reloads as a local one does. One ssh connection watches
-//! the file and every copy goes through it, so a password is asked for once,
-//! before the slides take over the terminal.
+//! original, so it reloads as a local one does. One ssh connection a machine
+//! watches its files and every copy goes through it, so a password is asked
+//! for once, before the slides take over the terminal.
 
 use anyhow::{Context, bail};
 use std::ffi::{OsStr, OsString};
@@ -17,9 +17,10 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use tempfile::TempDir;
 
-/// Prints the file's modification time and length each second, or `gone`.
-/// GNU stat takes `-c`, BSD stat `-f`.
-const WATCH: &str = r#"while :; do stat -c %Y.%s "$f" 2>/dev/null || stat -f %m.%z "$f" 2>/dev/null || echo gone; sleep 1; done"#;
+/// Prints each second a line of each file's modification time and length,
+/// or `gone`, for the files that are its arguments. GNU stat takes `-c`,
+/// BSD stat `-f`.
+const WATCH: &str = r#"while :; do l=; for f; do s=$(stat -c %Y.%s "$f" 2>/dev/null || stat -f %m.%z "$f" 2>/dev/null || echo gone); l="$l $s"; done; echo $l; sleep 1; done"#;
 
 const GONE: &str = "gone";
 
@@ -41,8 +42,9 @@ const SSH: [&str; 7] = [
 
 type Stamps = Lines<BufReader<ChildStdout>>;
 
+/// Files on one machine, copied here.
 pub struct Remote {
-    path: PathBuf,
+    paths: Vec<PathBuf>,
     master: Arc<Mutex<Master>>,
     /// Dropped to stop the watcher waiting to reconnect.
     stop: Option<Sender<()>>,
@@ -51,7 +53,7 @@ pub struct Remote {
     _dir: TempDir,
 }
 
-/// The ssh connection that watches the file and carries every copy.
+/// The ssh connection that watches the files and carries every copy.
 struct Master {
     child: Option<Child>,
     /// Set as ohp closes, after which no new connection is made.
@@ -82,27 +84,61 @@ pub fn split(arg: &Path) -> Option<(&str, &str)> {
     (!host.is_empty() && !host.contains('/') && !path.is_empty()).then_some((host, path))
 }
 
+/// The files `args` names on other machines copied here, through `ssh`,
+/// one connection a machine; and `args` with each such file's copy in its
+/// place.
+pub fn open_all(ssh: &OsStr, args: &[PathBuf]) -> anyhow::Result<(Vec<Remote>, Vec<PathBuf>)> {
+    let mut hosts: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (host, path) in args.iter().filter_map(|arg| split(arg)) {
+        match hosts.iter_mut().find(|(h, _)| *h == host) {
+            Some((_, paths)) => paths.push(path),
+            None => hosts.push((host, vec![path])),
+        }
+    }
+    let remotes = (hosts.iter())
+        .map(|(host, paths)| Remote::open(ssh, host, paths))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut copies: Vec<_> = remotes.iter().map(|r| r.paths().iter()).collect();
+    let local = (args.iter())
+        .map(|arg| match split(arg) {
+            Some((host, _)) => {
+                let at = hosts.iter().position(|(h, _)| *h == host);
+                at.and_then(|at| copies[at].next()).expect("a copy").clone()
+            }
+            None => arg.clone(),
+        })
+        .collect();
+    Ok((remotes, local))
+}
+
 impl Remote {
-    /// Copy `host:path` here and keep the copy up to date, through `ssh`.
-    pub fn open(ssh: &OsStr, host: &str, path: &str) -> anyhow::Result<Self> {
+    /// Copy `paths` on `host` here and keep the copies up to date, through
+    /// `ssh`.
+    pub fn open(ssh: &OsStr, host: &str, paths: &[&str]) -> anyhow::Result<Self> {
         // Not under $TMPDIR, which can be long: ssh binds the control socket
         // at its path plus a suffix, and a socket's path may be no longer
         // than 104 bytes on macOS.
         let dir = tempfile::Builder::new().prefix("ohp").tempdir_in("/tmp")?;
-        // The copy keeps the remote file's name, so it is named on the status
-        // line, in a directory of its own, so no name can clash with the
-        // files ohp keeps beside it.
-        let copies = dir.path().join("copy");
-        std::fs::create_dir(&copies)?;
-        let name = Path::new(path).file_name().unwrap_or("slides.pdf".as_ref());
+        // Each copy keeps the remote file's name, so it is named on the
+        // status line, in a directory of its own, so no name can clash with
+        // another's or with the files ohp keeps beside them.
+        let mut files = Vec::new();
+        for (i, path) in paths.iter().enumerate() {
+            let copies = dir.path().join("copy").join(i.to_string());
+            std::fs::create_dir_all(&copies)?;
+            let name = Path::new(path).file_name().unwrap_or("slides.pdf".as_ref());
+            files.push(Copy {
+                path: quote_path(path),
+                part: dir.path().join(format!("part{i}")),
+                local: copies.join(name),
+            });
+        }
         let fetch = Fetch {
             ssh: ssh.to_owned(),
             socket: dir.path().join("ssh"),
             log: dir.path().join("ssh.log"),
             host: host.into(),
-            path: quote_path(path),
-            part: dir.path().join("part"),
-            local: copies.join(name),
+            files,
         };
         let mut child = fetch
             .master(false)
@@ -110,7 +146,7 @@ impl Remote {
         let mut stamps = BufReader::new(child.stdout.take().expect("piped")).lines();
         let (stop, stopped) = mpsc::channel();
         let mut remote = Remote {
-            path: fetch.local.clone(),
+            paths: fetch.files.iter().map(|f| f.local.clone()).collect(),
             master: Arc::new(Mutex::new(Master {
                 child: Some(child),
                 stopped: false,
@@ -121,16 +157,21 @@ impl Remote {
             _dir: dir,
         };
         let last = match stamps.next() {
-            Some(Ok(stamp)) if stamp == GONE => bail!("{host}:{path} not found"),
-            Some(Ok(stamp)) => stamp,
-            _ => {
-                let why = std::fs::read_to_string(&fetch.log).unwrap_or_default();
-                bail!("ssh {host} failed: {}", why.trim());
-            }
+            Some(Ok(line)) => fetch.stamps(&line),
+            _ => None,
         };
-        fetch
-            .run()
-            .with_context(|| format!("copying {host}:{path}"))?;
+        let Some(last) = last else {
+            let why = std::fs::read_to_string(&fetch.log).unwrap_or_default();
+            bail!("ssh {host} failed: {}", why.trim());
+        };
+        for (i, (stamp, path)) in last.iter().zip(paths).enumerate() {
+            if stamp == GONE {
+                bail!("{host}:{path} not found");
+            }
+            fetch
+                .run(i)
+                .with_context(|| format!("copying {host}:{path}"))?;
+        }
         let watcher = Watcher {
             fetch,
             master: remote.master.clone(),
@@ -141,9 +182,9 @@ impl Remote {
         Ok(remote)
     }
 
-    /// The local copy.
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// The local copies, in the order their files were named.
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.paths
     }
 
     /// The state of the connection, for the status line.
@@ -171,7 +212,7 @@ impl Drop for Remote {
     }
 }
 
-/// Copies the file whenever it changes, and reconnects when the connection
+/// Copies each file whenever it changes, and reconnects when the connection
 /// is lost.
 struct Watcher {
     fetch: Fetch,
@@ -181,12 +222,17 @@ struct Watcher {
 }
 
 impl Watcher {
-    fn run(self, mut stamps: Stamps, mut last: String) {
+    fn run(self, mut stamps: Stamps, mut last: Vec<String>) {
         loop {
-            for now in stamps.by_ref().map_while(Result::ok) {
+            for line in stamps.by_ref().map_while(Result::ok) {
                 self.link.set(None);
-                if now != last && now != GONE && self.fetch.run().is_ok() {
-                    last = now;
+                let Some(now) = self.fetch.stamps(&line) else {
+                    continue;
+                };
+                for (i, (now, last)) in now.into_iter().zip(&mut last).enumerate() {
+                    if now != *last && now != GONE && self.fetch.run(i).is_ok() {
+                        *last = now;
+                    }
                 }
             }
             self.link.set(Some(format!(
@@ -227,13 +273,18 @@ impl Watcher {
     }
 }
 
-/// Copies the remote file over the master connection.
+/// Copies the remote files over the master connection.
 struct Fetch {
     ssh: OsString,
     socket: PathBuf,
     /// What the master says on stderr.
     log: PathBuf,
     host: String,
+    files: Vec<Copy>,
+}
+
+/// A remote file, and where it is copied.
+struct Copy {
     /// Quoted for the remote shell.
     path: String,
     /// Where a copy is written before it is moved into place.
@@ -242,13 +293,19 @@ struct Fetch {
 }
 
 impl Fetch {
+    /// The stamps of a line the watch printed, one a file, if it is whole.
+    fn stamps(&self, line: &str) -> Option<Vec<String>> {
+        let stamps: Vec<String> = line.split_whitespace().map(String::from).collect();
+        (stamps.len() == self.files.len()).then_some(stamps)
+    }
+
     fn control(&self) -> OsString {
         let mut option = OsString::from("ControlPath=");
         option.push(&self.socket);
         option
     }
 
-    /// Start the master connection, printing the file's stamp each second.
+    /// Start the master connection, printing the files' stamps each second.
     /// `batch` never asks for a password: once the slides are up it would
     /// be asked over them.
     fn master(&self, batch: bool) -> std::io::Result<Child> {
@@ -259,17 +316,19 @@ impl Fetch {
         if batch {
             ssh.args(["-o", "BatchMode=yes"]);
         }
+        let paths: Vec<&str> = self.files.iter().map(|f| f.path.as_str()).collect();
         ssh.arg(&self.host)
-            .arg(remote(&format!("f={}; {WATCH}", self.path)))
+            .arg(remote(&format!("set -- {}; {WATCH}", paths.join(" "))))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(File::create(&self.log)?)
             .spawn()
     }
 
-    /// Copy to a file beside the local copy, then move it into place, so
-    /// the copy is never seen half written.
-    fn run(&self) -> anyhow::Result<()> {
+    /// Copy file `i` to a file beside its local copy, then move it into
+    /// place, so the copy is never seen half written.
+    fn run(&self, i: usize) -> anyhow::Result<()> {
+        let file = &self.files[i];
         // Never a connection of its own: one would ask for a password over
         // the slides.
         let out = Command::new(&self.ssh)
@@ -277,14 +336,14 @@ impl Fetch {
             .args(["-o", "ControlMaster=no", "-o", "BatchMode=yes", "-o"])
             .arg(self.control())
             .arg(&self.host)
-            .arg(remote(&format!("exec cat {}", self.path)))
+            .arg(remote(&format!("exec cat {}", file.path)))
             .stdin(Stdio::null())
-            .stdout(File::create(&self.part)?)
+            .stdout(File::create(&file.part)?)
             .output()?;
         if !out.status.success() {
             bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
         }
-        std::fs::rename(&self.part, &self.local)?;
+        std::fs::rename(&file.part, &file.local)?;
         Ok(())
     }
 }

@@ -40,6 +40,8 @@ const RETRIES: usize = 5;
 pub struct Typeset {
     pub pdf: Vec<u8>,
     pub note: Option<String>,
+    /// Which of the files set each page is from; empty when one was.
+    pub from: Vec<usize>,
 }
 
 /// `name` if typst knows it as a paper size.
@@ -120,7 +122,11 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
                     .chain(doc.warnings)
                     .collect();
                 let note = (!notes.is_empty()).then(|| notes.join("; "));
-                return Ok(Typeset { pdf, note });
+                return Ok(Typeset {
+                    pdf,
+                    note,
+                    from: Vec::new(),
+                });
             }
             Err(errors) => {
                 failure = errors[0].message.to_string();
@@ -196,6 +202,7 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
     Ok(Typeset {
         pdf,
         note: Some(notes.join("; ")),
+        from: Vec::new(),
     })
 }
 

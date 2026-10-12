@@ -28,7 +28,7 @@ fn pdfs_and_images_mixed_are_one_deck_each_page_its_shape() {
     ];
     let deck = Deck::open_with(&paths, Options::default()).unwrap();
     assert_eq!(deck.pages, 5);
-    assert_eq!(deck.name, "tall.png +2");
+    assert_eq!(deck.from, [0, 1, 1, 1, 2]);
     assert!(deck.note.is_none(), "{:?}", deck.note);
     let shapes: Vec<f32> = deck.sizes.iter().copied().map(shape).collect();
     let want = [0.5, shape(FRAME), shape(FRAME), shape(FRAME), 2.];
@@ -61,8 +61,75 @@ fn one_image_is_a_deck_of_a_slide() {
     let dir = tempfile::tempdir().unwrap();
     let deck = Deck::open(&picture(dir.path(), "photo.png", 40, 30)).unwrap();
     assert_eq!(deck.pages, 1);
-    assert_eq!(deck.name, "photo.png");
     assert!((shape(deck.sizes[0]) - 4. / 3.).abs() < 0.01);
+}
+
+#[test]
+fn a_photo_larger_than_a_screen_is_made_smaller_keeping_its_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = picture(dir.path(), "huge.png", 5000, 100);
+    let shown = show(&path, &Options::default()).unwrap();
+    let Kind::Pixels { width, height, .. } = shown.kind else {
+        panic!("not made smaller");
+    };
+    assert_eq!(width, IMAGE_PIXELS);
+    assert!(height.abs_diff(82) <= 1, "{height}");
+    let deck = Deck::open(&path).unwrap();
+    assert!((shape(deck.sizes[0]) - 50.).abs() < 1., "{:?}", deck.sizes);
+}
+
+#[test]
+fn a_drawing_is_set_its_own_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let svg = fixture::write_text(
+        dir.path(),
+        "plot.svg",
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="100"><rect width="300" height="100" fill="red"/></svg>"#,
+    );
+    let paths = [svg, fixture::write(dir.path(), 1)];
+    let deck = Deck::open_with(&paths, Options::default()).unwrap();
+    assert_eq!(deck.from, [0, 1]);
+    assert!((shape(deck.sizes[0]) - 3.).abs() < 0.01, "{:?}", deck.sizes);
+}
+
+#[test]
+fn an_image_typst_cannot_decode_is_left_out_and_the_rest_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let whole = picture(dir.path(), "whole.png", 300, 300);
+    let bytes = std::fs::read(&whole).unwrap();
+    // Its header is whole, so it is measured, but not its pixels.
+    let cut = dir.path().join("cut.png");
+    std::fs::write(&cut, &bytes[..bytes.len() / 2]).unwrap();
+    let paths = [cut, fixture::write(dir.path(), 2)];
+    let deck = Deck::open_with(&paths, Options::default()).unwrap();
+    assert_eq!(deck.from, [1, 1]);
+    let note = deck.note.unwrap();
+    assert!(note.starts_with("cannot show cut.png"), "{note}");
+}
+
+#[test]
+fn a_file_unchanged_is_not_read_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = picture(dir.path(), "a.png", 10, 10);
+    let options = Options::default();
+    let first = options.cache.show(&path, &options).unwrap();
+    assert!(Arc::ptr_eq(
+        &first,
+        &options.cache.show(&path, &options).unwrap()
+    ));
+
+    picture(dir.path(), "a.png", 20, 10);
+    let changed = options.cache.show(&path, &options).unwrap();
+    assert!(!Arc::ptr_eq(&first, &changed));
+
+    options.forget();
+    assert!(!Arc::ptr_eq(
+        &changed,
+        &options.cache.show(&path, &options).unwrap()
+    ));
+
+    options.cache.keep(&[]);
+    assert!(options.cache.0.lock().unwrap().is_empty());
 }
 
 #[test]

@@ -8,8 +8,9 @@
 //! picked, or goes into the folder picked; backspace or left on an empty
 //! line goes up.
 //!
-//! Tab marks the file picked, or unmarks it, in any directory; enter then
-//! opens the files marked, in the order they were, as one deck.
+//! Tab marks the file picked, or unmarks it, in any directory, and
+//! shift-tab unmarks them all; enter opens the files marked, in the order
+//! they were, and then the one picked, as one deck.
 //!
 //! A directory is read once, when the query first names it, not on every
 //! key: it may be large, or on a slow network disk.
@@ -98,6 +99,7 @@ impl Browser {
             KeyCode::Backspace | KeyCode::Left if self.menu.query.is_empty() => self.up(),
             KeyCode::Right | KeyCode::Tab if self.picked().is_some_and(|e| e.dir) => self.enter(),
             KeyCode::Tab if self.picked().is_some() => self.mark(),
+            KeyCode::BackTab => self.marked.clear(),
             _ => match self.menu.key(key, self.entries.len()) {
                 menu::Key::Typed('/') => self.slash(),
                 menu::Key::Typed(_) | menu::Key::Retyped => self.refresh(),
@@ -240,23 +242,34 @@ impl Browser {
         self.menu.key(KeyCode::Down.into(), self.entries.len());
     }
 
+    /// Mark `paths`, as the files of the deck presented, in place of any
+    /// marked.
+    pub fn mark_all(&mut self, paths: &[PathBuf]) {
+        self.marked = paths.iter().filter_map(|p| p.canonicalize().ok()).collect();
+    }
+
+    /// Go into the folder picked, or open the files marked and the one
+    /// picked after them.
     fn open(&mut self) -> Outcome {
-        match self.picked() {
+        let picked = match self.picked() {
             Some(entry) if entry.dir => {
                 self.enter();
-                Outcome::Stay
+                return Outcome::Stay;
             }
-            _ if !self.marked.is_empty() => Outcome::Open(self.marked.clone()),
-            Some(entry) => Outcome::Open(vec![self.path(entry)]),
+            Some(entry) => Some(self.path(entry)),
             // A file typed out in full, even one not listed.
-            None => {
-                let path = resolve(&self.dir, &self.menu.query);
-                if path.is_file() {
-                    Outcome::Open(vec![path])
-                } else {
-                    Outcome::Stay
-                }
-            }
+            None => Some(resolve(&self.dir, &self.menu.query)).filter(|p| p.is_file()),
+        };
+        let mut paths = self.marked.clone();
+        if let Some(path) = picked
+            && !paths.contains(&path)
+        {
+            paths.push(path);
+        }
+        if paths.is_empty() {
+            Outcome::Stay
+        } else {
+            Outcome::Open(paths)
         }
     }
 
@@ -287,7 +300,7 @@ impl Browser {
             let marked = format!(" {} marked ", self.marked.len());
             notes.push(Span::styled(marked, Style::new().fg(Color::Green)));
         }
-        let keys = "type to narrow · a/b/ go to a path · ↑/↓ move · tab mark · enter open · ←/→ up/into · esc cancel";
+        let keys = "type to narrow · a/b/ go to a path · ↑/↓ move · tab mark · shift-tab unmark all · enter open · ←/→ up/into · esc cancel";
         self.menu.draw(f, area, prompt, items, notes, keys);
     }
 }
