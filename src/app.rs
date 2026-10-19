@@ -1220,7 +1220,7 @@ impl App {
     fn draw_summary(&self, f: &mut Frame, area: Rect) {
         let Some(panel) = self.panel else { return };
         let title = match panel {
-            Panel::Slide => format!(" summary · {} {} ", self.slide_word(), self.cur + 1),
+            Panel::Slide => format!(" summary · {} {} ", self.slide_word(self.cur), self.cur + 1),
             Panel::Whole => " summary · whole file ".into(),
         };
         let view = self.summary(panel);
@@ -1241,7 +1241,7 @@ impl App {
             for (page, sentence) in &view.key {
                 let mut line = vec![Span::styled("▌ ", mark)];
                 if panel == Panel::Whole {
-                    let at = format!("{} {} · ", self.slide_word(), page + 1);
+                    let at = format!("{} {} · ", self.slide_word(*page), page + 1);
                     line.push(Span::styled(at, dim));
                 }
                 line.push(Span::raw(sentence.as_str()));
@@ -1275,10 +1275,13 @@ impl App {
         }
     }
 
-    /// What the deck's pages are called: slides, or pages of a document.
-    fn slide_word(&self) -> &'static str {
-        let (w, h) = self.deck.sizes[self.cur];
-        if w > h { "slide" } else { "page" }
+    /// What page `page` of the deck is called, by its shape: a slide, or a
+    /// page of a document. A deck of several files may have both.
+    fn slide_word(&self, page: usize) -> &'static str {
+        match self.deck.sizes.get(page) {
+            Some((w, h)) if w > h => "slide",
+            _ => "page",
+        }
     }
 
     fn draw_grid(&self, f: &mut Frame) {

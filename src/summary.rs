@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Name of the thread summing up, so its panics can be told apart.
 pub const THREAD: &str = "summary";
@@ -63,6 +63,8 @@ const PAGE_KEY: usize = 3;
 const WHOLE_KEY: usize = 5;
 /// Pages after the one on screen summed up while it is read.
 const AHEAD: usize = 2;
+/// Longest ohp waits, quitting, for summing up to stop.
+const QUIT_WAIT: Duration = Duration::from_secs(1);
 /// Fewest words of a key sentence: fewer are a piece of one, as the end of
 /// a sentence broken across a column.
 const KEY_WORDS: usize = 4;
@@ -749,7 +751,16 @@ impl Drop for Summarizer {
             state.recheck();
         }
         self.shared.1.notify_all();
-        if let Some(thread) = self.thread.take() {
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        // A download, or an answer, stops at once; loading a model does
+        // not, and is left to end with ohp rather than keep it waiting.
+        let since = Instant::now();
+        while !thread.is_finished() && since.elapsed() < QUIT_WAIT {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if thread.is_finished() {
             let _ = thread.join();
         }
     }

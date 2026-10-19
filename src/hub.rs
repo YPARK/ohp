@@ -95,6 +95,9 @@ pub fn list(repo: &str, stop: &AtomicBool) -> Result<Listing, String> {
 /// Fetch `url`, of `repo`, to `to`, sending the token if there is one, and
 /// taking up where it stopped a fetch cut short if `resume`.
 fn get(repo: &str, url: &str, to: &Path, resume: bool, stop: &AtomicBool) -> Result<(), String> {
+    if !crate::speak::installed("curl") {
+        return Err("install curl to download models from Hugging Face".into());
+    }
     let header = token().map(|t| format!("Authorization: Bearer {t}"));
     let how = Fetch {
         header: header.as_deref(),
