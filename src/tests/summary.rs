@@ -231,7 +231,8 @@ fn how_far_a_summary_has_come_is_shown() {
 
 #[test]
 fn another_model_sums_up_all_again() {
-    let mut summarizer = Summarizer::new(None);
+    let qwen3b = Weights::from(&SUGGESTED[0]);
+    let mut summarizer = Summarizer::new(Some(qwen3b.clone()));
     {
         let mut state = lock(&summarizer.shared);
         state.pages.insert(0, Ok(Arc::default()));
@@ -239,7 +240,7 @@ fn another_model_sums_up_all_again() {
             .known
             .insert(vec!["It says one thing.".into()], Arc::default());
     }
-    summarizer.set_weights(Weights::default());
+    summarizer.set_weights(qwen3b);
     assert_eq!(lock(&summarizer.shared).pages.len(), 1, "the same model");
     let round = lock(&summarizer.shared).round;
     summarizer.set_weights(Weights::from(&SUGGESTED[1]));

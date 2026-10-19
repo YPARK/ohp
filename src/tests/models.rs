@@ -20,7 +20,7 @@ fn kept() -> Vec<(String, String)> {
 
 #[test]
 fn suggested_models_come_first_then_those_kept() {
-    let entries = entries(&kept(), &Weights::default());
+    let entries = entries(&kept(), &qwen3b());
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(
         names,
@@ -56,7 +56,7 @@ fn type_in(list: &mut List, text: &str) {
 
 #[test]
 fn typing_narrows_the_list_or_names_a_repo_of_the_hubs() {
-    let mut list = List::new(entries(&kept(), &Weights::default()), Weights::default());
+    let mut list = List::new(entries(&kept(), &qwen3b()), qwen3b());
     assert_eq!(list.picked().unwrap().name, "qwen2.5-3b", "the one in use");
     type_in(&mut list, "llama");
     assert_eq!(list.picked().unwrap().name, "llama3.2-3b");
@@ -82,10 +82,7 @@ fn typing_narrows_the_list_or_names_a_repo_of_the_hubs() {
 #[test]
 fn enter_picks_the_model_and_esc_cancels() {
     let mut models = Models {
-        list: Some(List::new(
-            entries(&[], &Weights::default()),
-            Weights::default(),
-        )),
+        list: Some(List::new(entries(&[], &qwen3b()), qwen3b())),
     };
     assert_eq!(models.key(KeyEvent::from(KeyCode::Down)), None);
     assert_eq!(
@@ -93,7 +90,12 @@ fn enter_picks_the_model_and_esc_cancels() {
         Some(Weights::from(&SUGGESTED[1]))
     );
     assert!(!models.is_open());
-    models.open(&Weights::default());
+    models.open(&qwen3b());
     assert_eq!(models.key(KeyEvent::from(KeyCode::Esc)), None);
     assert!(!models.is_open());
+}
+
+/// Qwen2.5-3B, the default on macOS but not elsewhere.
+fn qwen3b() -> Weights {
+    Weights::from(&SUGGESTED[0])
 }
