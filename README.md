@@ -273,7 +273,9 @@ of a slide.
 `k` sums up the slide or page on screen, in a column beside it, and marks
 on it, in green, the one to three sentences that carry its key takeaways,
 listed under the summary too. The column follows the slides as they turn,
-summing up each one turned to. `K` sums up the whole file there instead,
+summing up each one turned to; while one is read, the two after it are
+summed up too, so turning to them shows theirs at once. `K` sums up the
+whole file there instead,
 and marks its three to five key sentences on whatever pages they are.
 Either key again, or the other, closes the column or switches it.
 
@@ -283,11 +285,12 @@ Metal on macOS and on the CPU elsewhere: a GGUF file of its weights,
 quantised to 4 bits, from [Hugging Face](https://huggingface.co)'s Hub.
 The first `k` downloads it, once, with `curl`, into Hugging Face's own
 cache, `~/.cache/huggingface/hub` (or `$HF_HUB_CACHE`, or `hub` in
-`$HF_HOME`), as its libraries lay it out, so a model one of them
+`$HF_HOME`, or in `$XDG_CACHE_HOME/huggingface`), as its libraries lay it out, so a model one of them
 downloaded is used without downloading it again, and one ohp downloaded is
-theirs too. A download cut short is taken up where it stopped. While it
-downloads, while the model loads, reads the page and writes, a bar in the
-column shows how far it has come, and the status line its percent.
+theirs too. A download cut short, or given up as another model is picked
+or the column closed, is taken up where it stopped. While it downloads,
+reads the page and writes, a bar in the column shows how far it has come,
+and the status line its percent; while it loads, the column says so.
 
 `m` picks the model, in a list over the slides: those below, then any GGUF
 file in the cache. Type to narrow the list, or type a repo of the Hub's,
@@ -322,9 +325,13 @@ leaving out references, running heads and sentences that say what one
 picked already does. Where that model cannot be had, as offline, the
 sentences' words are weighed instead, by TF-IDF. About two thousand tokens
 of them, in order and with their pages, are summed up as a page is: in
-about twenty seconds on an M4, however long the file. Summaries are kept
-until ohp quits, by the text summed up, so a page a reload leaves as it was
-is not summed up again, unless another model is picked.
+about twenty seconds on an M4, however long the file.
+
+Summaries are kept, by the model and the text summed up, in
+`~/.cache/ohp/summaries` (or `$XDG_CACHE_HOME/ohp/summaries`), so a page,
+or a file, summed up before, as one a reload leaves as it was, or a paper
+opened again, is shown at once, with no model loaded. To forget them,
+`rm -rf ~/.cache/ohp/summaries`.
 
 ## Slides on another machine
 

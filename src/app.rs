@@ -28,8 +28,9 @@
 //!
 //! `k` sums up the slide on screen, in a column beside the slides, and
 //! marks its key sentences on it; the column follows the slides as they
-//! turn. `K` sums up the whole file there instead, every slide summed up
-//! and marked on the way. Either again closes the column.
+//! turn. `K` sums up the whole file there instead, and marks its key
+//! sentences on whatever slides they are. Either again closes the column.
+//! `m` picks the model that sums up, in a list over the slides.
 
 use crate::browse::{self, Browser};
 #[cfg(feature = "summary")]

@@ -250,11 +250,27 @@ fn weight(sentence: &str, first: bool) -> f32 {
     if CUES.iter().any(|cue| lower.contains(cue)) {
         weight *= CUED;
     }
-    let pointing = ["figure", "fig.", "table", "supplement"];
-    if pointing.iter().any(|p| lower.contains(p)) {
+    let pointing = [
+        "figure",
+        "figures",
+        "fig",
+        "figs",
+        "table",
+        "tables",
+        "supplement",
+        "supplementary",
+    ];
+    if said(&lower).any(|w| pointing.contains(&w)) {
         weight *= POINTING;
     }
     weight
+}
+
+/// The words of `lower`, a sentence in lower case, as they are written.
+fn said(lower: &str) -> impl Iterator<Item = &str> {
+    lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
 }
 
 /// The words of `sentence` that tell it apart: of three letters or more,
@@ -274,7 +290,7 @@ fn reference(sentence: &str) -> bool {
         .filter(|n| n.len() == 4 && (n.starts_with("19") || n.starts_with("20")))
         .count();
     let lower = sentence.to_lowercase();
-    years >= 2 || lower.contains("doi") || lower.contains("http")
+    years >= 2 || said(&lower).any(|w| ["doi", "http", "https"].contains(&w))
 }
 
 fn normalised(mut v: Sparse) -> Sparse {

@@ -48,6 +48,17 @@ fn findings_come_before_details_pointing_to_figures() {
 }
 
 #[test]
+fn words_are_read_whole_not_as_parts_of_others() {
+    assert!(!reference("Doing so, cells were sorted by marker genes."));
+    assert!(reference("Lee K. Sorted cells, doi:10.1000/xyz."));
+    assert!(reference("Sorted cells are at https://example.org/cells."));
+    let plain = weight("Stable cells were suitable for sorting.", false);
+    assert_eq!(plain, 1.);
+    assert_eq!(weight("Cells were sorted (Fig. 2).", false), POINTING);
+    assert_eq!(weight("Table 1 lists the cells.", false), POINTING);
+}
+
+#[test]
 fn pieces_of_sentences_are_not_picked() {
     let pages = pages(&[&[
         "by inosine, guanosine and adenosine or by cyclic AMP alone.",

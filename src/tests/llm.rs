@@ -91,6 +91,23 @@ fn reads_a_long_prompt_in_good_time() {
     })
     .expect("answers");
     eprintln!("read about 1800 tokens in {:?}", started.elapsed());
+    let started = Instant::now();
+    let mut seen = 0;
+    llm.answer(
+        "You are helpful.",
+        "Write a long story about cells.",
+        200,
+        |step| {
+            seen = written(step).unwrap_or(seen);
+            true
+        },
+    )
+    .expect("answers");
+    let secs = started.elapsed().as_secs_f32();
+    eprintln!(
+        "wrote {seen} tokens in {secs:.2}s: {:.1} a second",
+        seen as f32 / secs
+    );
     assert!(steps.len() > 10, "{steps:?}");
     assert!(steps.windows(2).all(|w| w[0].0 < w[1].0));
 }

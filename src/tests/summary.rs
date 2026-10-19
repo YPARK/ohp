@@ -346,10 +346,28 @@ fn sums_up_a_real_page_and_the_whole() {
     );
     assert!(!view.text.is_empty());
     let start = Instant::now();
+    while summarizer.page(1).busy.is_some() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    eprintln!("page 2, summed up ahead, in {:?}", start.elapsed());
+    summarizer.want(Some(1));
+    assert!(summarizer.page(1).busy.is_none(), "ready when turned to");
+    let start = Instant::now();
     summarizer.want(None);
     summarizer.want_whole(true);
-    while summarizer.whole().busy.is_some() {
-        std::thread::sleep(Duration::from_millis(100));
+    let mut phase = String::new();
+    while let Some(busy) = summarizer.whole().busy {
+        let now = busy
+            .what
+            .split(" · ")
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        if now != phase {
+            eprintln!("{:>6.2}s {now}", start.elapsed().as_secs_f32());
+            phase = now;
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
     let view = summarizer.whole();
     eprintln!(
@@ -367,4 +385,82 @@ fn a_piece_of_a_sentence_is_never_a_key_one() {
     let summary = summary("SUMMARY: Mapped.\nKEY: 1, 2", &sentences, &|k| k, 3);
     let key: Vec<usize> = summary.key.iter().map(|k| k.sentence).collect();
     assert_eq!(key, vec![1]);
+}
+
+#[test]
+fn the_pages_after_the_one_on_screen_are_summed_up_after_it() {
+    let mut state = state(4);
+    state.wanted = Some(1);
+    assert_eq!(state.next(), Some(Task::Page(1)));
+    state.pages.insert(1, Ok(Arc::default()));
+    assert_eq!(state.next(), Some(Task::Page(2)));
+    state.whole_wanted = true;
+    assert_eq!(state.next(), Some(Task::Whole), "the file before them");
+    state.whole = Some(Ok(Arc::default()));
+    state.pages.insert(2, Ok(Arc::default()));
+    assert_eq!(state.next(), Some(Task::Page(3)));
+    state.pages.insert(3, Ok(Arc::default()));
+    assert_eq!(state.next(), None, "none past the last");
+    state.wanted = None;
+    state.pages.clear();
+    state.whole = Some(Ok(Arc::default()));
+    assert_eq!(state.next(), None, "none unless one is on screen");
+}
+
+#[test]
+fn what_is_no_longer_wanted_is_told_to_give_up() {
+    let mut state = state(9);
+    let abandon = Arc::new(AtomicBool::new(false));
+    let given_up = || abandon.load(Ordering::Relaxed);
+    state.wanted = Some(3);
+    state.pages.insert(3, Ok(Arc::default()));
+    state.running = Some(Running {
+        task: Task::Page(4),
+        round: state.round,
+        abandon: abandon.clone(),
+    });
+    state.recheck();
+    assert!(!given_up(), "summed up ahead");
+    state.wanted = Some(4);
+    state.recheck();
+    assert!(!given_up(), "turned to, it goes on");
+    state.wanted = Some(7);
+    state.recheck();
+    assert!(given_up(), "turned past");
+    abandon.store(false, Ordering::Relaxed);
+    state.wanted = Some(4);
+    state.anew();
+    state.recheck();
+    assert!(given_up(), "another model, or deck");
+}
+
+#[test]
+fn summaries_are_kept_by_model_and_text() {
+    let said = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let (ab, a, b) = (said(&["A.", "B."]), said(&["A."]), said(&["B."]));
+    let name = |weights: &Weights, what, pages: &[&Vec<String>]| {
+        kept_name(weights, what, pages.iter().map(|p| p.as_slice()))
+    };
+    let qwen = Weights::default();
+    let once = name(&qwen, "page", &[&ab]);
+    assert_eq!(once, name(&qwen, "page", &[&ab]));
+    assert!(once.ends_with(".json") && once.len() == 21);
+    assert_ne!(once, name(&Weights::from(&SUGGESTED[1]), "page", &[&ab]));
+    assert_ne!(once, name(&qwen, "whole", &[&ab]));
+    assert_ne!(once, name(&qwen, "page", &[&a, &b]), "pages apart");
+}
+
+#[cfg(feature = "summary")]
+#[test]
+fn a_summary_kept_is_read_back_as_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let summary = Summary {
+        text: "It counts.\nTo three.".into(),
+        key: vec![key(2, 5, "It says \"three\" things.")],
+    };
+    assert_eq!(recall(dir.path(), "x.json"), None);
+    keep(&dir.path().join("made"), "x.json", &summary);
+    assert_eq!(recall(&dir.path().join("made"), "x.json"), Some(summary));
+    std::fs::write(dir.path().join("bad.json"), "{\"text\": 3}").unwrap();
+    assert_eq!(recall(dir.path(), "bad.json"), None);
 }

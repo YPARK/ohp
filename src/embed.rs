@@ -59,18 +59,24 @@ impl Embedder {
     }
 
     /// `sentences` embedded, a batch at a time, `each` told how many are
-    /// after each; `None` once `each` returns false.
+    /// after each; `None` once `each` returns false. Sentences of a length
+    /// are embedded together: a batch is as long as its longest.
     pub fn embed(
         &self,
         sentences: &[&str],
         mut each: impl FnMut(usize) -> bool,
     ) -> Result<Option<Vec<Vec<f32>>>, String> {
-        let mut vectors = Vec::with_capacity(sentences.len());
-        for batch in sentences.chunks(BATCH) {
-            if !each(vectors.len()) {
+        let mut order: Vec<usize> = (0..sentences.len()).collect();
+        order.sort_by_key(|&i| sentences[i].len());
+        let mut vectors = vec![Vec::new(); sentences.len()];
+        for (done, batch) in order.chunks(BATCH).enumerate() {
+            if !each(done * BATCH) {
                 return Ok(None);
             }
-            vectors.extend(self.batch(batch)?);
+            let said: Vec<&str> = batch.iter().map(|&i| sentences[i]).collect();
+            for (&i, vector) in batch.iter().zip(self.batch(&said)?) {
+                vectors[i] = vector;
+            }
         }
         Ok(Some(vectors))
     }
