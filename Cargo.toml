@@ -1,6 +1,6 @@
 [package]
 name = "ohp"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
@@ -11,7 +11,22 @@ keywords = ["pdf", "beamer", "slides", "tui", "markdown"]
 categories = ["command-line-utilities", "visualization"]
 
 [features]
-default = ["markdown", "speech"]
+default = ["markdown", "speech", "summary"]
+# Pages summed up, and their key sentences lit, by a language model run in
+# ohp with candle, on Metal on macOS; the sentences a file is summed up
+# from picked with a small embedding model. Both are downloaded once from
+# Hugging Face's Hub, with curl, into its own cache. candle's tokenizers
+# read regular expressions with Oniguruma, whose C the system toolchain
+# builds.
+summary = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:libc",
+    "dep:serde_json",
+    "dep:signal-hook",
+    "dep:tokenizers",
+]
 # Slides read aloud by a speech program, run as R is, in a session of its own.
 speech = ["dep:libc", "dep:signal-hook", "dep:serde_json"]
 # Markdown and R Markdown, typeset by typst. Typst's evaluator grows its
@@ -39,6 +54,9 @@ markdown = [
 
 [dependencies]
 anyhow = "1.0"
+candle-core = { version = "0.10.2", optional = true }
+candle-nn = { version = "0.10.2", optional = true }
+candle-transformers = { version = "0.10.2", optional = true }
 clap = { version = "4.6", features = ["derive", "env"] }
 hayagriva = { version = "0.10.1", optional = true }
 hayro = "0.7.1"
@@ -51,6 +69,7 @@ ratatui-image = { version = "11.1", default-features = false, features = ["cross
 serde_json = { version = "1", optional = true }
 serde_yaml = { version = "0.9", optional = true }
 tempfile = "3.27.0"
+tokenizers = { version = "0.22.2", default-features = false, optional = true }
 typst = { version = "0.15.1", optional = true }
 typst-assets = { version = "0.15.1", features = ["fonts"], optional = true }
 typst-layout = { version = "0.15.1", optional = true }
@@ -62,3 +81,8 @@ unicode-width = "0.2"
 libc = { version = "0.2", optional = true }
 # To stop them on Ctrl-C, which no longer reaches their process group.
 signal-hook = { version = "0.4", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The language model runs on the GPU, through Metal.
+candle-core = { version = "0.10.2", features = ["metal"], optional = true }
+candle-transformers = { version = "0.10.2", features = ["metal"], optional = true }

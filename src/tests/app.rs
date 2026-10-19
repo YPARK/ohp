@@ -25,6 +25,7 @@ fn job(key: Key, look: Look) -> Job {
         key,
         look,
         lit: None,
+        marked: Picked::default(),
     }
 }
 
@@ -343,7 +344,7 @@ fn a_text_slide_is_drawn_over_its_backdrop() {
     use ratatui::backend::TestBackend;
     let (_dir, mut app) = app_with(&fixture::hello(), Look::Text);
     let mut terminal = ratatui::Terminal::new(TestBackend::new(80, 24)).unwrap();
-    app.main = split(Rect::new(0, 0, 80, 24)).0;
+    app.main = split(Rect::new(0, 0, 80, 24), false).0;
     app.schedule();
     app.receive(fixture::next(&app.renderer));
     terminal.draw(|f| app.draw(f)).unwrap();
@@ -951,4 +952,31 @@ fn the_sentence_being_read_is_lit_on_the_slide_read() {
     app.read_along();
     assert_eq!(app.lit, None);
     assert_eq!(app.job(app.presented()).lit, None);
+}
+
+#[cfg(feature = "summary")]
+#[test]
+fn k_shows_the_slide_s_summary_beside_it_and_k_again_hides_it() {
+    let (_dir, mut app) = app(2);
+    app.summarizer = Summarizer::new(Some(summary::Weights::File("/no/model.gguf".into())));
+    press(&mut app, &[KeyCode::Char('k')]);
+    assert_eq!(app.panel, Some(Panel::Slide));
+    press(&mut app, &[KeyCode::Char('K')]);
+    assert_eq!(app.panel, Some(Panel::Whole));
+    press(&mut app, &[KeyCode::Char('k')]);
+    assert_eq!(app.panel, Some(Panel::Slide));
+    press(&mut app, &[KeyCode::Char('k')]);
+    assert_eq!(app.panel, None);
+    assert!(app.job(app.presented()).marked.is_empty());
+}
+
+#[test]
+fn a_summary_takes_a_column_beside_the_slides() {
+    let screen = Rect::new(0, 0, 140, 40);
+    let (main, side, status) = split(screen, true);
+    assert_eq!((main.width + side.width, side.x), (140, main.width));
+    assert!((SIDE.0..=SIDE.1).contains(&side.width));
+    assert_eq!((main.height, side.height, status.y), (39, 39, 39));
+    let (main, side, _) = split(screen, false);
+    assert_eq!((main.width, side.area()), (140, 0));
 }

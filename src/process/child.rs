@@ -115,7 +115,7 @@ pub fn last_line(log: &std::path::Path, keep: impl Fn(&str) -> bool) -> Option<S
 /// Run `command`, what it writes on its error output to `log`, until it is
 /// done or `stop` is set: whether it ran to its end, or why it failed, as
 /// it wrote last.
-#[cfg(feature = "speech")]
+#[cfg(any(feature = "speech", feature = "summary"))]
 pub fn run_logged(
     mut command: Command,
     log: &std::path::Path,

@@ -115,14 +115,14 @@ pub fn r_here() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-#[cfg(any(feature = "markdown", feature = "speech"))]
+#[cfg(any(feature = "markdown", feature = "speech", feature = "summary"))]
 /// A `sleep` this test run alone starts, so no other run's is taken for
 /// it: a time with the run's id in it.
 pub fn marked_sleep(whole: u32) -> String {
     format!("sleep {whole}.{}", std::process::id())
 }
 
-#[cfg(any(feature = "markdown", feature = "speech"))]
+#[cfg(any(feature = "markdown", feature = "speech", feature = "summary"))]
 /// Whether, within a few seconds, no process is left whose command ends in
 /// `command`: one killed takes a moment to go.
 pub fn gone(command: &str) -> bool {
@@ -136,7 +136,7 @@ pub fn started(command: &str) -> bool {
     within_seconds(|| running(command))
 }
 
-#[cfg(any(feature = "markdown", feature = "speech"))]
+#[cfg(any(feature = "markdown", feature = "speech", feature = "summary"))]
 /// Whether `done` holds within a few seconds.
 pub fn within_seconds(done: impl Fn() -> bool) -> bool {
     let start = std::time::Instant::now();
@@ -146,7 +146,7 @@ pub fn within_seconds(done: impl Fn() -> bool) -> bool {
     done()
 }
 
-#[cfg(any(feature = "markdown", feature = "speech"))]
+#[cfg(any(feature = "markdown", feature = "speech", feature = "summary"))]
 /// Whether a process whose command ends in `command` is running.
 fn running(command: &str) -> bool {
     // A dot is any character to pgrep, and the end is anchored, so no

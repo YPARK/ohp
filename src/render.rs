@@ -312,6 +312,8 @@ pub struct Job {
     pub look: Look,
     /// The sentence being read aloud, lit on the slide.
     pub lit: Option<usize>,
+    /// The slide's key sentences, marked on it, as its summary picks them.
+    pub marked: text::Picked,
 }
 
 pub enum Slide {
@@ -420,15 +422,24 @@ fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, kept: &Kept, tx: &Se
         };
         let slide = caught(|| match job.look {
             Look::Image => {
-                // Where the sentence read aloud is, in page points.
-                let lit = job
-                    .lit
-                    .and_then(|k| {
-                        let page = text_of(&mut text, &pdf, job.key.page, &fonts, &settings)?;
-                        Some(page.light(k).boxes)
-                    })
-                    .unwrap_or_default();
-                let image = rasterise(&pdf, &cache, &settings, picker, job.key, &lit, kept)?;
+                // Where the sentence read aloud is, and the key sentences,
+                // in page points.
+                let (mut lit, mut marked) = (Vec::new(), Vec::new());
+                if (job.lit.is_some() || !job.marked.is_empty())
+                    && let Some(page) = text_of(&mut text, &pdf, job.key.page, &fonts, &settings)
+                {
+                    lit = job.lit.map(|k| page.light(k).boxes).unwrap_or_default();
+                    marked = page.mark(job.marked).boxes;
+                }
+                let image = rasterise(
+                    &pdf,
+                    &cache,
+                    &settings,
+                    picker,
+                    job.key,
+                    (&lit, &marked),
+                    kept,
+                )?;
                 let image = DynamicImage::ImageRgba8(image);
                 let proto = picker.new_protocol(image, job.key.size(), Resize::Fit(None));
                 proto.ok().map(Slide::Image)
@@ -493,6 +504,7 @@ fn read<'a>(
     let x_scale = 4. * f32::from(size.width) / w;
     let y_scale = 8. * f32::from(size.height) / h;
     let lit = job.lit.map(|k| text.light(k).glyphs).unwrap_or_default();
+    let marked = text.mark(job.marked).glyphs;
     let image = unlit(
         kept,
         key.page,
@@ -500,10 +512,10 @@ fn read<'a>(
         cache,
         settings,
         (x_scale, y_scale),
-        lit.contains(&true),
+        lit.contains(&true) || marked.contains(&true),
     )?;
     let mut image = Arc::unwrap_or_clone(image);
-    let cells = text.set_over(&mut image, size.width, size.height, &lit);
+    let cells = text.set_over(&mut image, (size.width, size.height), &lit, &marked);
 
     let shown = Size::new(size.width.min(key.cols), size.height.min(key.rows));
     let x = key.zoom.x.min(size.width - shown.width);
@@ -536,15 +548,15 @@ pub fn fit(key: Key, font: (f32, f32), page: (f32, f32)) -> f32 {
 }
 
 /// Page `key.page` as large as fits the pixels behind `key`'s cells, on
-/// white, `lit` lit; when zoomed, the part of it enlarged that the box
-/// shows.
+/// white, the boxes `lit` lit and `marked` marked; when zoomed, the part
+/// of it enlarged that the box shows.
 fn rasterise<'a>(
     pdf: &'a Pdf,
     cache: &RenderCache<'a>,
     settings: &InterpreterSettings,
     picker: &Picker,
     key: Key,
-    lit: &[kurbo::Rect],
+    (lit, marked): (&[kurbo::Rect], &[kurbo::Rect]),
     kept: &Kept,
 ) -> Option<RgbaImage> {
     let page = pdf.pages().get(key.page)?;
@@ -564,11 +576,11 @@ fn rasterise<'a>(
         cache,
         settings,
         (drawn, drawn),
-        !lit.is_empty(),
+        !lit.is_empty() || !marked.is_empty(),
     )?;
     if key.zoom == Zoom::FIT {
         let mut image = Arc::unwrap_or_clone(whole);
-        light(&mut image, lit, drawn, (0, 0));
+        light(&mut image, (lit, marked), drawn, (0, 0));
         return Some(image);
     }
     // The box, in the pixels drawn.
@@ -586,7 +598,7 @@ fn rasterise<'a>(
     let (y, ch) = cut(y, bh, whole.height());
     // Only the part shown is copied and lit, not the whole page drawn.
     let mut part = imageops::crop_imm(&*whole, x, y, cw, ch).to_image();
-    light(&mut part, lit, drawn, (x, y));
+    light(&mut part, (lit, marked), drawn, (x, y));
     if k >= 1. {
         return Some(part);
     }
@@ -651,24 +663,41 @@ pub fn raster<'a>(
     )
 }
 
-/// Light the boxes in `lit`, in page points, on `image`: the part from
-/// pixel `at` of the page drawn `scale` pixels a point. The light
-/// multiplies what is there, so text stays as dark as it was.
-fn light(image: &mut RgbaImage, lit: &[kurbo::Rect], scale: f32, at: (u32, u32)) {
+/// Light the boxes in `lit`, and mark those in `marked`, in page points, on
+/// `image`: the part from pixel `at` of the page drawn `scale` pixels a
+/// point. The light multiplies what is there, so text stays as dark as it
+/// was; a pixel both lit and marked is lit only.
+fn light(
+    image: &mut RgbaImage,
+    (lit, marked): (&[kurbo::Rect], &[kurbo::Rect]),
+    scale: f32,
+    at: (u32, u32),
+) {
+    if lit.is_empty() && marked.is_empty() {
+        return;
+    }
     let (w, h) = image.dimensions();
     let px = |v: f64, from: u32, max: u32| {
         ((v * f64::from(scale)).max(0.) as u32)
             .saturating_sub(from)
             .min(max)
     };
-    for r in lit {
-        let (x0, x1) = (px(r.x0, at.0, w), px(r.x1, at.0, w));
-        let (y0, y1) = (px(r.y0, at.1, h), px(r.y1, at.1, h));
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let p = image.get_pixel_mut(x, y);
-                for (c, l) in p.0.iter_mut().zip(text::LIGHT) {
-                    *c = (u16::from(*c) * u16::from(l) / 255) as u8;
+    // Boxes overlap, as a line's ascent reaches the descent above it.
+    let mut done = vec![false; (w * h) as usize];
+    for (boxes, colour) in [(lit, text::LIGHT), (marked, text::MARK)] {
+        for r in boxes {
+            let (x0, x1) = (px(r.x0, at.0, w), px(r.x1, at.0, w));
+            let (y0, y1) = (px(r.y0, at.1, h), px(r.y1, at.1, h));
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let done = &mut done[(y * w + x) as usize];
+                    if std::mem::replace(done, true) {
+                        continue;
+                    }
+                    let p = image.get_pixel_mut(x, y);
+                    for (c, l) in p.0.iter_mut().zip(colour) {
+                        *c = (u16::from(*c) * u16::from(l) / 255) as u8;
+                    }
                 }
             }
         }

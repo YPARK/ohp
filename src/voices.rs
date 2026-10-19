@@ -17,8 +17,8 @@
 //! beside Piper's voices. Once it is, the list opens again, on the voices
 //! to download.
 
+use crate::fetch::{fetch, part, run};
 use crate::menu::{self, Menu, dim, rank};
-use crate::process::child;
 use crate::speak;
 use ratatui::Frame;
 use ratatui::crossterm::event::KeyEvent;
@@ -29,7 +29,9 @@ use ratatui::widgets::ListItem;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
@@ -190,13 +192,6 @@ fn list_macos() -> Task<Vec<Voice>> {
     })
 }
 
-/// `path` as it is while being made.
-fn part(path: &Path) -> PathBuf {
-    let mut part = path.as_os_str().to_owned();
-    part.push(".part");
-    PathBuf::from(part)
-}
-
 /// Unpack `archive`, a `.tar.bz2` of one directory, as `into`.
 fn untar(archive: &Path, into: &Path, stop: &AtomicBool) -> Result<(), String> {
     std::fs::create_dir_all(into).map_err(|e| format!("cannot make {}: {e}", into.display()))?;
@@ -207,17 +202,6 @@ fn untar(archive: &Path, into: &Path, stop: &AtomicBool) -> Result<(), String> {
         .arg(into)
         .args(["--strip-components", "1"]);
     run(tar, into, stop)
-}
-
-/// Run `command` on no input, its output dropped, until it is done or
-/// `stop` is set; what it says when it fails is logged beside `at` until
-/// then.
-fn run(mut command: Command, at: &Path, stop: &AtomicBool) -> Result<(), String> {
-    command.stdin(Stdio::null()).stdout(Stdio::null());
-    let log = at.with_extension("log");
-    let ran = child::run_logged(command, &log, stop);
-    let _ = std::fs::remove_file(&log);
-    if ran? { Ok(()) } else { Err("stopped".into()) }
 }
 
 /// Install sherpa-onnx's release at `url` beside Piper's voices in `dir`:
@@ -342,17 +326,6 @@ fn language() -> String {
         .map(|l| l.to_string_lossy().into_owned())
         .find(|l| !l.is_empty())
         .unwrap_or_default()
-}
-
-/// Fetch `url` to `to` with curl, until it is done or `stop` is set. A
-/// fetch that cannot connect, or stalls, fails rather than waits for ever.
-fn fetch(url: &str, to: &Path, stop: &AtomicBool) -> Result<(), String> {
-    let mut curl = Command::new("curl");
-    curl.args(["-fsSL", "--connect-timeout", "30"])
-        .args(["--speed-limit", "1000", "--speed-time", "30", "-o"])
-        .arg(to)
-        .arg(url);
-    run(curl, to, stop)
 }
 
 /// Work on a thread of its own, stopped and waited for when dropped.

@@ -22,7 +22,7 @@ use crate::render;
 use crate::text::{self, Spoken};
 use hayro::hayro_interpret::{InterpreterCache, InterpreterSettings};
 use hayro::hayro_syntax::Pdf;
-#[cfg(feature = "speech")]
+#[cfg(any(feature = "speech", feature = "summary"))]
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "speech")]
@@ -93,7 +93,7 @@ pub fn others() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-#[cfg(feature = "speech")]
+#[cfg(any(feature = "speech", feature = "summary"))]
 /// Whether `name` is a program on the `PATH`.
 pub fn installed(name: &str) -> bool {
     on(&std::env::var_os("PATH").unwrap_or_default(), name)
@@ -112,13 +112,13 @@ pub fn given_or(given: Option<String>, or: impl FnOnce() -> Option<String>) -> O
     given.filter(|c| !c.trim().is_empty()).or_else(or)
 }
 
-#[cfg(feature = "speech")]
+#[cfg(any(feature = "speech", feature = "summary"))]
 /// Whether `name` is a program on `path`.
 fn on(path: &OsStr, name: &str) -> bool {
     std::env::split_paths(path).any(|dir| runnable(&dir.join(name)))
 }
 
-#[cfg(feature = "speech")]
+#[cfg(any(feature = "speech", feature = "summary"))]
 /// Whether `file` is a program: a file, and on unix, one allowed to run.
 fn runnable(file: &Path) -> bool {
     let Ok(meta) = std::fs::metadata(file) else {
