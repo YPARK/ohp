@@ -72,22 +72,17 @@ pub struct Listing {
 /// `repo`'s files at its main revision, as the Hub's API lists them.
 pub fn list(repo: &str, stop: &AtomicBool) -> Result<Listing, String> {
     let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let get = |url: &str, name: &str| {
+    let read = |url: &str, name: &str| {
         let to = dir.path().join(name);
-        let header = token().map(|t| format!("Authorization: Bearer {t}"));
-        let how = Fetch {
-            header: header.as_deref(),
-            resume: false,
-        };
-        fetch::fetch_with(url, &to, &how, stop).map_err(|e| trouble(repo, &e))?;
+        get(repo, url, &to, false, stop)?;
         std::fs::read_to_string(&to).map_err(|e| e.to_string())
     };
-    let revision = get(
+    let revision = read(
         &format!("{HUB}/api/models/{repo}/revision/main"),
         "revision.json",
     )?;
     let commit = commit(&revision)?;
-    let tree = get(
+    let tree = read(
         &format!("{HUB}/api/models/{repo}/tree/{commit}?recursive=true"),
         "tree.json",
     )?;
@@ -95,6 +90,17 @@ pub fn list(repo: &str, stop: &AtomicBool) -> Result<Listing, String> {
         files: files(&tree)?,
         commit,
     })
+}
+
+/// Fetch `url`, of `repo`, to `to`, sending the token if there is one, and
+/// taking up where it stopped a fetch cut short if `resume`.
+fn get(repo: &str, url: &str, to: &Path, resume: bool, stop: &AtomicBool) -> Result<(), String> {
+    let header = token().map(|t| format!("Authorization: Bearer {t}"));
+    let how = Fetch {
+        header: header.as_deref(),
+        resume,
+    };
+    fetch::fetch_with(url, to, &how, stop).map_err(|e| trouble(repo, &e))
 }
 
 /// Why `repo` cannot be had from the Hub, as curl said `why`.
@@ -207,9 +213,7 @@ pub fn blob(cache: &Path, repo: &str, remote: &Remote) -> PathBuf {
 
 /// The blob at `blob` as it is while being downloaded.
 pub fn incomplete(blob: &Path) -> PathBuf {
-    let mut part = blob.as_os_str().to_owned();
-    part.push(".incomplete");
-    PathBuf::from(part)
+    fetch::suffixed(blob, ".incomplete")
 }
 
 /// Download `remote`, a file of `repo` at `commit`, into `cache`: its blob,
@@ -234,12 +238,7 @@ pub fn download(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("cannot make {}: {e}", parent.display()))?;
         let url = format!("{HUB}/{repo}/resolve/{commit}/{}", remote.path);
-        let header = token().map(|t| format!("Authorization: Bearer {t}"));
-        let how = Fetch {
-            header: header.as_deref(),
-            resume: true,
-        };
-        fetch::fetch_with(&url, &part, &how, stop).map_err(|e| trouble(repo, &e))?;
+        get(repo, &url, &part, true, stop)?;
         if !whole(&part) {
             let len = std::fs::metadata(&part).map_or(0, |m| m.len());
             return Err(format!(

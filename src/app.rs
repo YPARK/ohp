@@ -1218,13 +1218,11 @@ impl App {
     /// is being done towards it.
     fn draw_summary(&self, f: &mut Frame, area: Rect) {
         let Some(panel) = self.panel else { return };
-        let (title, view) = match panel {
-            Panel::Slide => (
-                format!(" summary · {} {} ", self.slide_word(), self.cur + 1),
-                self.summarizer.page(self.cur),
-            ),
-            Panel::Whole => (" summary · whole file ".into(), self.summarizer.whole()),
+        let title = match panel {
+            Panel::Slide => format!(" summary · {} {} ", self.slide_word(), self.cur + 1),
+            Panel::Whole => " summary · whole file ".into(),
         };
+        let view = self.summary(panel);
         let dim = Style::new().fg(Color::DarkGray);
         let block = Block::bordered().border_style(dim).title(Span::styled(
             title,
@@ -1266,6 +1264,14 @@ impl App {
             .wrap(Wrap { trim: false })
             .block(block);
         f.render_widget(summary, area);
+    }
+
+    /// What to show of `panel`'s summary.
+    fn summary(&self, panel: Panel) -> summary::View {
+        match panel {
+            Panel::Slide => self.summarizer.page(self.cur),
+            Panel::Whole => self.summarizer.whole(),
+        }
     }
 
     /// What the deck's pages are called: slides, or pages of a document.
@@ -1325,11 +1331,7 @@ impl App {
         if let Some(note) = self.voices.note() {
             speaking.push_str(&note);
         }
-        let busy = match self.panel {
-            Some(Panel::Slide) => self.summarizer.page(self.cur).busy,
-            Some(Panel::Whole) => self.summarizer.whole().busy,
-            None => None,
-        };
+        let busy = self.panel.and_then(|panel| self.summary(panel).busy);
         if let Some(done) = busy.and_then(|b| b.done) {
             speaking.push_str(&format!(" · summing up {:.0}%", done * 100.));
         }

@@ -101,7 +101,8 @@ pub struct Llm {
     context: usize,
 }
 
-fn text(e: impl Display) -> String {
+/// What `e` says, as a model's troubles are told.
+pub fn text(e: impl Display) -> String {
     e.to_string()
 }
 
@@ -183,9 +184,7 @@ impl Llm {
             if !each(Step::Reading(i * CHUNK, tokens.len())) {
                 return Ok(String::new());
             }
-            let input = Tensor::new(chunk, &self.device)
-                .and_then(|t| t.unsqueeze(0))
-                .map_err(text)?;
+            let input = self.input(chunk)?;
             logits = Some(self.weights.forward(&input, i * CHUNK).map_err(text)?);
         }
         let Some(mut logits) = logits else {
@@ -212,14 +211,19 @@ impl Llm {
             if !each(Step::Writing(&answer, tokens.len() - start)) {
                 break;
             }
-            let input = Tensor::new(&[next], &self.device)
-                .and_then(|t| t.unsqueeze(0))
-                .map_err(text)?;
+            let input = self.input(&[next])?;
             logits = (self.weights)
                 .forward(&input, tokens.len() - 1)
                 .map_err(text)?;
         }
         Ok(answer)
+    }
+
+    /// `tokens` as the model reads them, a batch of one.
+    fn input(&self, tokens: &[u32]) -> Result<Tensor, String> {
+        (Tensor::new(tokens, &self.device))
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(text)
     }
 }
 

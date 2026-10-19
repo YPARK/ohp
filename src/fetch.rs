@@ -2,18 +2,21 @@
 //! are, and the programs that unpack them, run until done or stopped.
 
 use crate::process::child;
-use std::path::Path;
-#[cfg(feature = "speech")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
 
 #[cfg(feature = "speech")]
 /// `path` as it is while being made.
 pub fn part(path: &Path) -> PathBuf {
-    let mut part = path.as_os_str().to_owned();
-    part.push(".part");
-    PathBuf::from(part)
+    suffixed(path, ".part")
+}
+
+/// `path` with `suffix` after its name, as `.part`.
+pub fn suffixed(path: &Path, suffix: &str) -> PathBuf {
+    let mut with = path.as_os_str().to_owned();
+    with.push(suffix);
+    PathBuf::from(with)
 }
 
 /// Run `command` on no input, its output dropped, until it is done or

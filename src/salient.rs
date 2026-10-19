@@ -89,7 +89,7 @@ impl Vectors {
     fn cosine(&self, i: usize, j: usize) -> f32 {
         match self {
             Vectors::Words(v) => dot(&v[i], &v[j]),
-            Vectors::Meanings(v) => v[i].iter().zip(&v[j]).map(|(a, b)| a * b).sum(),
+            Vectors::Meanings(v) => dense_dot(&v[i], &v[j]),
         }
     }
 
@@ -118,8 +118,10 @@ impl Vectors {
                     .sum::<f32>()
                     .sqrt()
                     .max(f32::EPSILON);
-                let cosine = |v: &Vec<f32>| v.iter().zip(&centre).map(|(a, c)| a * c).sum::<f32>();
-                vectors.iter().map(|v| cosine(v) / norm).collect()
+                vectors
+                    .iter()
+                    .map(|v| dense_dot(v, &centre) / norm)
+                    .collect()
             }
         }
     }
@@ -288,6 +290,10 @@ fn dot(a: &Sparse, b: &Sparse) -> f32 {
     a.iter()
         .filter_map(|(word, w)| Some(w * b.get(word)?))
         .sum()
+}
+
+fn dense_dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(a, b)| a * b).sum()
 }
 
 #[cfg(test)]

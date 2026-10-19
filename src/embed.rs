@@ -4,6 +4,7 @@
 //! scaled to length one, so the dot product of two is their cosine. It runs
 //! where the language model does, on the GPU on macOS, before it.
 
+use crate::llm::{self, text};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config};
@@ -26,32 +27,30 @@ pub struct Embedder {
     device: Device,
 }
 
-fn text(e: impl Display) -> String {
-    e.to_string()
+/// Why the model cannot be loaded, as `e` says.
+fn why(e: impl Display) -> String {
+    format!("cannot load {REPO}: {e}")
 }
 
 impl Embedder {
     /// The model in `dir`, which has its `FILES`.
     pub fn load(dir: &Path) -> Result<Embedder, String> {
-        let why = |e: &dyn Display| format!("cannot load {REPO}: {e}");
-        let config = std::fs::read_to_string(dir.join(FILES[0])).map_err(|e| why(&e))?;
-        let config: Config = serde_json::from_str(&config).map_err(|e| why(&e))?;
-        let mut tokenizer = Tokenizer::from_file(dir.join(FILES[1])).map_err(|e| why(&e))?;
+        let config = std::fs::read_to_string(dir.join(FILES[0])).map_err(why)?;
+        let config: Config = serde_json::from_str(&config).map_err(why)?;
+        let mut tokenizer = Tokenizer::from_file(dir.join(FILES[1])).map_err(why)?;
         tokenizer.with_padding(Some(PaddingParams::default()));
         let truncation = TruncationParams {
             max_length: MOST_TOKENS,
             ..TruncationParams::default()
         };
-        tokenizer
-            .with_truncation(Some(truncation))
-            .map_err(|e| why(&e))?;
-        let device = crate::llm::device();
+        tokenizer.with_truncation(Some(truncation)).map_err(why)?;
+        let device = llm::device();
         let weights = [dir.join(FILES[2])];
         // SAFETY: the weights are a file of the cache's, not written while
         // ohp runs.
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&weights, DType::F32, &device) }
-            .map_err(|e| why(&e))?;
-        let model = BertModel::load(vb, &config).map_err(|e| why(&e))?;
+            .map_err(why)?;
+        let model = BertModel::load(vb, &config).map_err(why)?;
         Ok(Embedder {
             model,
             tokenizer,

@@ -94,8 +94,7 @@ fn entries(kept: &[(String, String)], current: &Weights) -> Vec<Entry> {
             repo: repo.clone(),
             file: Some(file.clone()),
         };
-        let gguf = file.to_ascii_lowercase().ends_with(".gguf");
-        if gguf && !entries.iter().any(|e| e.weights == weights) {
+        if summary::is_gguf(file) && !entries.iter().any(|e| e.weights == weights) {
             entries.push(Entry {
                 name: weights.name(),
                 about: repo.clone(),

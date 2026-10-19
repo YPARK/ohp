@@ -673,15 +673,15 @@ fn light(
     scale: f32,
     at: (u32, u32),
 ) {
+    if lit.is_empty() && marked.is_empty() {
+        return;
+    }
     let (w, h) = image.dimensions();
     let px = |v: f64, from: u32, max: u32| {
         ((v * f64::from(scale)).max(0.) as u32)
             .saturating_sub(from)
             .min(max)
     };
-    if lit.is_empty() && marked.is_empty() {
-        return;
-    }
     // Boxes overlap, as a line's ascent reaches the descent above it.
     let mut done = vec![false; (w * h) as usize];
     for (boxes, colour) in [(lit, text::LIGHT), (marked, text::MARK)] {

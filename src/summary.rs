@@ -220,7 +220,7 @@ pub fn hub_named(s: &str) -> Option<Weights> {
             let rest = ["resolve/main/", "blob/main/", "tree/main/"]
                 .iter()
                 .fold(rest, |rest, at| rest.strip_prefix(at).unwrap_or(rest));
-            if !rest.to_ascii_lowercase().ends_with(".gguf") {
+            if !is_gguf(rest) {
                 return None;
             }
             Some(rest.to_string())
@@ -230,6 +230,11 @@ pub fn hub_named(s: &str) -> Option<Weights> {
         repo: format!("{owner}/{name}"),
         file,
     })
+}
+
+/// Whether `file` is a GGUF file, by its name, in any case.
+pub fn is_gguf(file: &str) -> bool {
+    file.to_ascii_lowercase().ends_with(".gguf")
 }
 
 /// Quantisations to take, most liked first: 4 bits a weight is apt and
@@ -740,6 +745,17 @@ impl Asked<'_> {
             }
         })
     }
+
+    /// `llm`'s answer to `prompt`, towards `task`, as long as it is still
+    /// to be; `None` if given up.
+    fn answer(&self, llm: &mut Llm, task: Task, prompt: &str) -> Option<Result<String, String>> {
+        let (mut given_up, mut since) = (false, None);
+        let answer = llm.answer(SYSTEM, prompt, task.most(), |step| {
+            given_up = !self.step(task, step, &mut since);
+            !given_up
+        });
+        (!given_up).then_some(answer)
+    }
 }
 
 /// The models, once loaded.
@@ -827,16 +843,7 @@ fn sum_page(asked: &Asked, loader: &mut Loader, page: usize) -> Option<Result<Su
         Err(e) => return Some(Err(e)),
     };
     let numbered: Vec<(usize, &str)> = sentences.iter().map(|s| (page, s.as_str())).collect();
-    let prompt = prompt(&numbered, false);
-    let task = Task::Page(page);
-    let (mut given_up, mut since) = (false, None);
-    let answer = llm.answer(SYSTEM, &prompt, PAGE_ANSWER, |step| {
-        given_up = !asked.step(task, step, &mut since);
-        !given_up
-    });
-    if given_up {
-        return None;
-    }
+    let answer = asked.answer(llm, Task::Page(page), &prompt(&numbered, false))?;
     let summary = answer.map(|answer| summary(&answer, &numbered, &|k| k, PAGE_KEY));
     if let Ok(summary) = &summary {
         let kept = Arc::new(summary.clone());
@@ -888,15 +895,7 @@ fn sum_whole(asked: &Asked, loader: &mut Loader) -> Option<Result<Summary, Strin
     let numbered: Vec<(usize, &str)> = (picked.iter())
         .map(|&(p, k)| (p, pages[p][k].as_str()))
         .collect();
-    let prompt = prompt(&numbered, true);
-    let (mut given_up, mut since) = (false, None);
-    let answer = llm.answer(SYSTEM, &prompt, WHOLE_ANSWER, |step| {
-        given_up = !asked.step(Task::Whole, step, &mut since);
-        !given_up
-    });
-    if given_up {
-        return None;
-    }
+    let answer = asked.answer(llm, Task::Whole, &prompt(&numbered, true))?;
     let sentence = |i: usize| picked[i].1;
     Some(answer.map(|answer| summary(&answer, &numbered, &sentence, WHOLE_KEY)))
 }
@@ -954,7 +953,7 @@ fn locate(shared: &Shared, weights: &Weights, stop: &AtomicBool) -> Result<PathB
         Weights::File(path) => return Ok(path.clone()),
         Weights::Hub { repo, file } => (repo, file),
     };
-    let cache = hub::cache().ok_or("no home directory for Hugging Face's cache")?;
+    let cache = cache()?;
     let kept = (hub::kept(&cache).into_iter())
         .filter(|(r, _)| r == repo)
         .map(|(_, f)| f)
@@ -973,9 +972,7 @@ fn locate(shared: &Shared, weights: &Weights, stop: &AtomicBool) -> Result<PathB
         None => gguf(listing.files.iter().map(|f| f.path.as_str()))
             .ok_or_else(|| format!("{repo} has no GGUF file"))?,
     };
-    let remote = (listing.files.iter())
-        .find(|f| f.path == file)
-        .ok_or_else(|| format!("{repo} has no {file}"))?;
+    let remote = remote(&listing, repo, file)?;
     fetch(
         shared,
         &cache,
@@ -987,6 +984,24 @@ fn locate(shared: &Shared, weights: &Weights, stop: &AtomicBool) -> Result<PathB
     )
 }
 
+/// Hugging Face's cache, where models are kept.
+#[cfg(feature = "summary")]
+fn cache() -> Result<PathBuf, String> {
+    hub::cache().ok_or_else(|| "no home directory for Hugging Face's cache".into())
+}
+
+/// `file` of `repo`, as `listing` has it.
+#[cfg(feature = "summary")]
+fn remote<'a>(
+    listing: &'a hub::Listing,
+    repo: &str,
+    file: &str,
+) -> Result<&'a hub::Remote, String> {
+    (listing.files.iter())
+        .find(|f| f.path == file)
+        .ok_or_else(|| format!("{repo} has no {file}"))
+}
+
 /// The directory of a snapshot of `repo` with all of `files`, downloading
 /// them into Hugging Face's cache first if they are not kept there.
 #[cfg(feature = "summary")]
@@ -996,7 +1011,7 @@ fn fetch_all(
     files: &[&str],
     stop: &AtomicBool,
 ) -> Result<PathBuf, String> {
-    let cache = hub::cache().ok_or("no home directory for Hugging Face's cache")?;
+    let cache = cache()?;
     let dir = (hub::cached(&cache, repo, files[0]))
         .and_then(|path| Some(path.parent()?.to_path_buf()))
         .filter(|dir| files.iter().all(|f| dir.join(f).is_file()));
@@ -1004,12 +1019,10 @@ fn fetch_all(
         return Ok(dir);
     }
     let listing = hub::list(repo, stop)?;
+    let name = repo.rsplit('/').next().unwrap_or(repo);
     let mut dir = None;
     for file in files {
-        let remote = (listing.files.iter())
-            .find(|f| f.path == *file)
-            .ok_or_else(|| format!("{repo} has no {file}"))?;
-        let name = repo.rsplit('/').next().unwrap_or(repo);
+        let remote = remote(&listing, repo, file)?;
         let path = fetch(shared, &cache, repo, &listing.commit, remote, name, stop)?;
         dir = path.parent().map(Path::to_path_buf);
     }
