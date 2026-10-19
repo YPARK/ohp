@@ -63,7 +63,7 @@ fn a_slide_fills_its_cell_box_without_overflowing() {
             &InterpreterSettings::default(),
             &picker,
             key,
-            &[],
+            (&[], &[]),
             &Kept::default(),
         )
         .unwrap();
@@ -90,7 +90,7 @@ fn a_page_past_the_end_renders_nothing() {
             &settings,
             &Picker::halfblocks(),
             key,
-            &[],
+            (&[], &[]),
             &Kept::default()
         )
         .is_none()
@@ -107,6 +107,7 @@ fn job(page: usize, cols: u16, rows: u16, look: Look) -> Job {
         key: key(page, cols, rows),
         look,
         lit: None,
+        marked: text::Picked::default(),
     }
 }
 
@@ -194,7 +195,7 @@ fn zoomed(zoom: Zoom) -> RgbaImage {
         &settings,
         &Picker::halfblocks(),
         key,
-        &[],
+        (&[], &[]),
         &Kept::default(),
     )
     .unwrap()
@@ -254,7 +255,7 @@ fn a_zoom_too_large_to_render_is_enlarged_to_fill_the_box() {
         &settings,
         &Picker::halfblocks(),
         key,
-        &[],
+        (&[], &[]),
         &Kept::default(),
     )
     .unwrap();
@@ -279,6 +280,7 @@ fn a_zoomed_text_job_shows_the_part_panned_to() {
             key,
             look: Look::Text,
             lit: None,
+            marked: text::Picked::default(),
         }]);
         let Some(Slide::Text { cells, backdrop }) = fixture::next(&renderer).slide else {
             panic!("no text slide");
@@ -297,6 +299,25 @@ fn a_zoomed_text_job_shows_the_part_panned_to() {
 }
 
 #[test]
+fn a_sentence_read_aloud_is_lit_over_a_key_sentence_marked() {
+    let mut image = RgbaImage::from_pixel(10, 4, image::Rgba([255; 4]));
+    let lit = [kurbo::Rect::new(0., 0., 5., 4.)];
+    let marked = [
+        kurbo::Rect::new(0., 0., 10., 4.),
+        kurbo::Rect::new(0., 0., 10., 2.),
+    ];
+    light(&mut image, (&lit, &marked), 1., (0, 0));
+    let rgb = |x, y| {
+        let [r, g, b, _] = image.get_pixel(x, y).0;
+        [r, g, b]
+    };
+    assert_eq!(rgb(2, 1), text::LIGHT);
+    // Marked once, however many boxes cover it.
+    assert_eq!(rgb(8, 1), text::MARK);
+    assert_eq!(rgb(8, 3), text::MARK);
+}
+
+#[test]
 fn a_slide_lit_again_is_lit_on_the_page_kept_unlit() {
     let dir = tempfile::tempdir().unwrap();
     let deck = Deck::open(&fixture::write(dir.path(), 2)).unwrap();
@@ -308,7 +329,7 @@ fn a_slide_lit_again_is_lit_on_the_page_kept_unlit() {
     );
     let key = key(1, 40, 10);
     let lit = |boxes: &[kurbo::Rect], kept: &Kept| {
-        rasterise(&pdf, &cache, &settings, &picker, key, boxes, kept).unwrap()
+        rasterise(&pdf, &cache, &settings, &picker, key, (boxes, &[]), kept).unwrap()
     };
     let (first, second) = (
         [kurbo::Rect::new(0., 0., 50., 50.)],
@@ -345,8 +366,9 @@ fn a_zoomed_slide_panned_is_lit_on_the_page_kept() {
         ..key(1, 40, 10)
     };
     let boxes = [kurbo::Rect::new(0., 100., 200., 200.)];
-    let lit =
-        |key, kept: &Kept| rasterise(&pdf, &cache, &settings, &picker, key, &boxes, kept).unwrap();
+    let lit = |key, kept: &Kept| {
+        rasterise(&pdf, &cache, &settings, &picker, key, (&boxes, &[]), kept).unwrap()
+    };
     let kept = Kept::default();
     lit(at(0), &kept);
     let page = kept.lock().unwrap().as_ref().unwrap().1.clone();

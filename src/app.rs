@@ -25,12 +25,20 @@
 //! A click on the presented slide reads it aloud from the sentence there,
 //! found from the word of text set in that cell, or else from the point of
 //! the slide the cell shows. A click in the grid presents the slide there.
+//!
+//! `k` sums up the slide on screen, in a column beside the slides, and
+//! marks its key sentences on it; the column follows the slides as they
+//! turn. `K` sums up the whole file there instead, every slide summed up
+//! and marked on the way. Either again closes the column.
 
 use crate::browse::{self, Browser};
+#[cfg(feature = "summary")]
+use crate::models::Models;
 use crate::remote::Link;
 use crate::render::{self, Deck, Done, Job, Key, Look, Options, Renderer, Slide, Stamp, Zoom};
 use crate::speak::{self, Speaker};
-use crate::text;
+use crate::summary::{self, Summarizer};
+use crate::text::{self, Picked};
 #[cfg(feature = "speech")]
 use crate::voices::{self, Voices};
 use ratatui::crossterm::event::{
@@ -42,7 +50,7 @@ use ratatui::crossterm::style::Print;
 use ratatui::layout::{Constraint, Layout, Position, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use ratatui_image::Image;
 use ratatui_image::picker::cap_parser::{Parser, QueryStdioOptions};
@@ -75,13 +83,14 @@ const WATCH_EVERY: Duration = Duration::from_millis(250);
 /// slides on others.
 /// `local` is how files picked with Ctrl-O, which are here, are read.
 /// `signaled` is set when a signal asks ohp to stop.
-/// `speaker` reads the slides aloud.
+/// `speaker` reads the slides aloud, and `summarizer` sums them up.
 pub fn run(
     deck: Deck,
     text: bool,
     links: Vec<Link>,
     local: Options,
     speaker: Speaker,
+    summarizer: Summarizer,
     signaled: Arc<AtomicUsize>,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
@@ -104,6 +113,9 @@ pub fn run(
         app.links = links;
         app.local = local;
         app.speaker = speaker;
+        app.summarizer = summarizer;
+        app.summarizer
+            .set_deck(app.deck.data.clone(), app.deck.pages);
         app.run(&mut terminal)?;
         app.clear_images()
     })();
@@ -149,7 +161,7 @@ fn quiet_render_panics() {
         let thread = std::thread::current();
         if !matches!(
             thread.name(),
-            Some(render::THREAD | speak::THREAD | speak::VOICES_THREAD)
+            Some(render::THREAD | speak::THREAD | speak::VOICES_THREAD | summary::THREAD)
         ) {
             // ratatui's hook, which this one wraps, restores all but this.
             let _ = execute!(std::io::stdout(), DisableMouseCapture);
@@ -182,6 +194,15 @@ impl Drop for ReadingKeys {
 enum View {
     Present,
     Grid,
+}
+
+/// The summary shown beside the slides.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Panel {
+    /// The slide on screen's.
+    Slide,
+    /// The whole file's.
+    Whole,
 }
 
 /// Where the grid's slots go.
@@ -221,7 +242,8 @@ struct App {
     shown: Cell<Option<Job>>,
     /// The presented slide on screen, and the cells it is drawn in.
     drawn: Cell<Option<(Job, Rect)>>,
-    /// Where slides are drawn: the screen above the status line.
+    /// Where slides are drawn: the screen above the status line, but for
+    /// the summary's column.
     main: Rect,
     /// Finished slides, `None` where one could not be rendered.
     slides: HashMap<Job, Option<Slide>>,
@@ -258,6 +280,13 @@ struct App {
     /// The voice picker, its list open over the slides when picking.
     #[cfg(feature = "speech")]
     voices: Voices,
+    summarizer: Summarizer,
+    /// The summary shown beside the slides, if one is; the slides' key
+    /// sentences are marked while one is.
+    panel: Option<Panel>,
+    /// The model picker, its list open over the slides when picking.
+    #[cfg(feature = "summary")]
+    models: Models,
     dirty: bool,
     quit: bool,
 }
@@ -304,6 +333,10 @@ impl App {
             lit: None,
             #[cfg(feature = "speech")]
             voices: Voices::default(),
+            summarizer: Summarizer::new(None),
+            panel: None,
+            #[cfg(feature = "summary")]
+            models: Models::default(),
             dirty: true,
             quit: false,
         }
@@ -311,13 +344,17 @@ impl App {
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
         let _reading = ReadingKeys::start();
-        let mut screen = Rect::default();
+        // The screen, and whether a summary is shown beside the slides.
+        let mut laid = (Rect::default(), false);
         while !self.quit {
             let size = terminal.size()?;
-            let now = Rect::new(0, 0, size.width, size.height);
-            if now != screen {
-                screen = now;
-                self.main = split(screen).0;
+            let now = (
+                Rect::new(0, 0, size.width, size.height),
+                self.panel.is_some(),
+            );
+            if now != laid {
+                laid = now;
+                self.main = split(now.0, now.1).0;
                 self.forget();
             }
             if self.dirty {
@@ -341,6 +378,9 @@ impl App {
             self.read_along();
             #[cfg(feature = "speech")]
             self.poll_voices();
+            let slide = self.panel == Some(Panel::Slide);
+            self.summarizer.want(slide.then_some(self.cur));
+            self.dirty |= self.summarizer.changed();
             if self.signaled.load(Ordering::Relaxed) != 0 {
                 self.quit = true;
             }
@@ -514,6 +554,7 @@ impl App {
                     });
                 }
                 self.cur = self.cur.min(deck.pages - 1);
+                self.summarizer.set_deck(deck.data.clone(), deck.pages);
                 self.deck = deck;
                 self.renderer = renderer;
                 self.requested.clear();
@@ -617,6 +658,55 @@ impl App {
         if let Some(event) = event {
             self.voiced(event);
         }
+    }
+
+    /// Show `panel`'s summary beside the slides, or stop showing it if it
+    /// is shown. The whole file is summed up while a summary is shown,
+    /// once its own was asked for.
+    fn summarize(&mut self, panel: Panel) {
+        if !cfg!(feature = "summary") {
+            self.notice = Some(summary::NO_SUMMARY.into());
+            return;
+        }
+        if self.panel == Some(panel) {
+            self.panel = None;
+            self.summarizer.want_whole(false);
+            return;
+        }
+        if self.panel.is_none() {
+            self.summarizer.retry();
+        }
+        self.panel = Some(panel);
+        if panel == Panel::Whole {
+            self.summarizer.want_whole(true);
+        }
+    }
+
+    /// Open the list to pick the model that sums up from.
+    #[cfg(feature = "summary")]
+    fn choose_model(&mut self) {
+        self.models.open(&self.summarizer.weights());
+    }
+
+    #[cfg(not(feature = "summary"))]
+    fn choose_model(&mut self) {
+        self.notice = Some(summary::NO_SUMMARY.into());
+    }
+
+    /// Sum up with the model in `weights` from now on, showing the slide's
+    /// summary if none is shown.
+    #[cfg(feature = "summary")]
+    fn summarize_with(&mut self, weights: summary::Weights) {
+        self.notice = Some(format!("summing up with {}", weights.name()));
+        self.summarizer.set_weights(weights);
+        self.summarizer.retry();
+        self.panel.get_or_insert(Panel::Slide);
+    }
+
+    /// The key sentences marked on `page`, while a summary is shown: its
+    /// own summary's, or the whole file's.
+    fn marked(&self, page: usize) -> Picked {
+        marked(&self.summarizer, self.panel, page)
     }
 
     /// Stop a reload under way and wait for it, so a knitr run it started
@@ -730,6 +820,14 @@ impl App {
             self.dirty = true;
             return;
         }
+        #[cfg(feature = "summary")]
+        if self.models.is_open() {
+            if let Some(weights) = self.models.key(key) {
+                self.summarize_with(weights);
+            }
+            self.dirty = true;
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('o') if ctrl => self.browse(),
@@ -767,6 +865,9 @@ impl App {
             KeyCode::Char('s') if self.speaker.reading() => self.speaker.stop(),
             KeyCode::Char('s') => self.speak(),
             KeyCode::Char('v') => self.choose_voice(),
+            KeyCode::Char('k') => self.summarize(Panel::Slide),
+            KeyCode::Char('K') => self.summarize(Panel::Whole),
+            KeyCode::Char('m') => self.choose_model(),
             _ => return,
         }
         self.dirty = true;
@@ -936,7 +1037,8 @@ impl App {
     }
 
     /// The job that draws `key`: the presented slide being read aloud has
-    /// the sentence being read lit.
+    /// the sentence being read lit, and every slide its key sentences
+    /// marked, while summaries are shown.
     fn job(&self, key: Key) -> Job {
         let reading = self.view == View::Present
             && key == self.presented()
@@ -945,6 +1047,7 @@ impl App {
             key,
             look: self.look,
             lit: self.lit.filter(|_| reading),
+            marked: self.marked(key.page),
         }
     }
 
@@ -980,15 +1083,21 @@ impl App {
         let grid = self.grid();
         let slot = Rect::new(0, 0, grid.slot.width, grid.slot.height);
         let thumb = Block::bordered().inner(slot).as_size();
+        let (summarizer, panel) = (&self.summarizer, self.panel);
+        // Unmarked, or marked as the slide's summary has it now.
+        let marking = |job: &Job| {
+            job.marked.is_empty() || job.marked == marked(summarizer, panel, job.key.page)
+        };
         // Both looks are kept, so `t` back is immediate.
         self.slides.retain(|job, _| {
             let key = job.key;
             if key.size() == full {
                 let kept = key.zoom == zoom || key.zoom == Zoom::FIT || Some(*job) == shown;
                 let lighting = job.lit.is_none() || job.lit == lit || Some(*job) == shown;
-                key.page.abs_diff(cur) <= KEEP && kept && lighting
+                let marking = marking(job) || Some(*job) == shown;
+                key.page.abs_diff(cur) <= KEEP && kept && lighting && marking
             } else {
-                key.size() == thumb
+                key.size() == thumb && marking(job)
             }
         });
     }
@@ -996,7 +1105,8 @@ impl App {
     // ── drawing ─────────────────────────────────────────────────────────
 
     fn draw(&self, f: &mut Frame) {
-        let (main, status) = split(f.area());
+        let (main, side, status) = split(f.area(), self.panel.is_some());
+        self.draw_summary(f, side);
         self.drawn.set(None);
         // Kitty's images are cells, which the list covers; others' are not.
         let covered = self.listing()
@@ -1030,12 +1140,18 @@ impl App {
         }
         #[cfg(feature = "speech")]
         self.voices.draw(f, inner);
+        #[cfg(feature = "summary")]
+        self.models.draw(f, inner);
     }
 
     /// Whether a list is open over the slides.
     fn listing(&self) -> bool {
         #[cfg(feature = "speech")]
         if self.voices.is_open() {
+            return true;
+        }
+        #[cfg(feature = "summary")]
+        if self.models.is_open() {
             return true;
         }
         self.browser.is_some()
@@ -1055,11 +1171,16 @@ impl App {
         };
         let same = |other: &Job| other.key.page == job.key.page && other.look == job.look;
         let unlit = Job { lit: None, ..job };
+        let unmarked = Job {
+            marked: Picked::default(),
+            ..unlit
+        };
         let found = [
             Some(job),
             self.shown.get().filter(same),
             Some(fitted),
             Some(unlit),
+            Some(unmarked),
         ]
         .into_iter()
         .flatten()
@@ -1092,6 +1213,67 @@ impl App {
         found.map(|(j, _)| j)
     }
 
+    /// The summary shown, in `area` beside the slides: what it says, the
+    /// key sentences marked, each in the colour it is marked with, and what
+    /// is being done towards it.
+    fn draw_summary(&self, f: &mut Frame, area: Rect) {
+        let Some(panel) = self.panel else { return };
+        let (title, view) = match panel {
+            Panel::Slide => (
+                format!(" summary · {} {} ", self.slide_word(), self.cur + 1),
+                self.summarizer.page(self.cur),
+            ),
+            Panel::Whole => (" summary · whole file ".into(), self.summarizer.whole()),
+        };
+        let dim = Style::new().fg(Color::DarkGray);
+        let block = Block::bordered().border_style(dim).title(Span::styled(
+            title,
+            Style::new().add_modifier(Modifier::BOLD),
+        ));
+        let mut lines: Vec<Line> = view.text.lines().map(Line::raw).collect();
+        if !view.key.is_empty() {
+            let [r, g, b] = text::MARK;
+            let mark = Style::new().fg(Color::Rgb(r, g, b));
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "Key takeaways",
+                Style::new().add_modifier(Modifier::BOLD),
+            ));
+            for (page, sentence) in &view.key {
+                let mut line = vec![Span::styled("▌ ", mark)];
+                if panel == Panel::Whole {
+                    let at = format!("{} {} · ", self.slide_word(), page + 1);
+                    line.push(Span::styled(at, dim));
+                }
+                line.push(Span::raw(sentence.as_str()));
+                lines.push(Line::from(line));
+            }
+        }
+        if let Some(busy) = &view.busy {
+            if !lines.is_empty() {
+                lines.push(Line::raw(""));
+            }
+            let width = block.inner(area).width;
+            if let Some(bar) = bar(busy.done, width) {
+                lines.push(bar);
+            }
+            lines.push(Line::styled(
+                busy.what.clone(),
+                dim.add_modifier(Modifier::ITALIC),
+            ));
+        }
+        let summary = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block);
+        f.render_widget(summary, area);
+    }
+
+    /// What the deck's pages are called: slides, or pages of a document.
+    fn slide_word(&self) -> &'static str {
+        let (w, h) = self.deck.sizes[self.cur];
+        if w > h { "slide" } else { "page" }
+    }
+
     fn draw_grid(&self, f: &mut Frame) {
         let grid = self.grid();
         for (i, rect) in self.slots(&grid) {
@@ -1120,15 +1302,15 @@ impl App {
         let (view, keys) = match self.view {
             View::Present if self.zoomed() => (
                 zoom.as_str(),
-                "arrows pan · +/- zoom · 0 fit · n/p next/prev · t text · s speak · v voice · r reload · ^O open · q quit",
+                "arrows pan · +/- zoom · 0 fit · n/p next/prev · t text · s speak · v voice · k/K summary · m model · r reload · ^O open · q quit",
             ),
             View::Present => (
                 "present",
-                "n/p ←/→ next/prev · +/- zoom · g grid · t text · s speak · click speak from · v voice · r reload · ^O open · q quit",
+                "n/p ←/→ next/prev · +/- zoom · g grid · t text · s speak · click speak from · v voice · k/K summary · m model · r reload · ^O open · q quit",
             ),
             View::Grid => (
                 "grid",
-                "n/p arrows click move · g/enter/double-click present · +/- zoom · t text · s speak · v voice · r reload · ^O open · q quit",
+                "n/p arrows click move · g/enter/double-click present · +/- zoom · t text · s speak · v voice · k/K summary · m model · r reload · ^O open · q quit",
             ),
         };
         let look = match self.look {
@@ -1142,6 +1324,14 @@ impl App {
         #[cfg(feature = "speech")]
         if let Some(note) = self.voices.note() {
             speaking.push_str(&note);
+        }
+        let busy = match self.panel {
+            Some(Panel::Slide) => self.summarizer.page(self.cur).busy,
+            Some(Panel::Whole) => self.summarizer.whole().busy,
+            None => None,
+        };
+        if let Some(done) = busy.and_then(|b| b.done) {
+            speaking.push_str(&format!(" · summing up {:.0}%", done * 100.));
         }
         let paths = &self.deck.paths;
         let file = self.deck.source(self.cur);
@@ -1211,10 +1401,43 @@ impl Drop for App {
     }
 }
 
-/// The slide area and the status line under it.
-fn split(area: Rect) -> (Rect, Rect) {
-    let [main, status] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-    (main, status)
+/// A bar `width` cells wide, its percent at its end, as full as `done`
+/// says, if that is known.
+fn bar(done: Option<f32>, width: u16) -> Option<Line<'static>> {
+    let done = done?.clamp(0., 1.);
+    let cells = usize::from(width.saturating_sub(5));
+    let full = (done * cells as f32).round() as usize;
+    let percent = format!(" {:>3.0}%", done * 100.);
+    Some(Line::from(vec![
+        Span::styled("█".repeat(full), Style::new().fg(Color::Yellow)),
+        Span::styled("░".repeat(cells - full), Style::new().fg(Color::DarkGray)),
+        Span::raw(percent),
+    ]))
+}
+
+/// The key sentences `summarizer` marks on `page` with `panel` shown.
+fn marked(summarizer: &Summarizer, panel: Option<Panel>, page: usize) -> Picked {
+    match panel {
+        Some(Panel::Slide) => summarizer.picked(page),
+        Some(Panel::Whole) => summarizer.picked_whole(page),
+        None => Picked::default(),
+    }
+}
+
+/// Columns the summary beside the slides takes, at least and at most.
+const SIDE: (u16, u16) = (32, 64);
+
+/// The slide area, the summary's column beside it if there is a summary,
+/// and the status line under them.
+fn split(area: Rect, summary: bool) -> (Rect, Rect, Rect) {
+    let [body, status] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+    if !summary {
+        return (body, Rect::default(), status);
+    }
+    let width = (body.width / 3).clamp(SIDE.0, SIDE.1).min(body.width / 2);
+    let [main, side] =
+        Layout::horizontal([Constraint::Min(1), Constraint::Length(width)]).areas(body);
+    (main, side, status)
 }
 
 fn centred(area: Rect, size: Size) -> Rect {

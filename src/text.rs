@@ -75,6 +75,9 @@ const LIT_ASCENT: f64 = 0.8;
 const LIT_DESCENT: f64 = 0.25;
 /// The colour a sentence being read is lit with, behind its text.
 pub const LIGHT: [u8; 3] = [255, 226, 110];
+/// The colour a page's key sentences are marked with, as its summary picks
+/// them.
+pub const MARK: [u8; 3] = [178, 232, 168];
 /// Least difference in luma between text and what is behind it. Text the
 /// page itself draws fainter than this, as beamer does covered items, is
 /// left faint.
@@ -101,6 +104,26 @@ pub struct Lit {
     pub glyphs: Vec<bool>,
     /// Boxes about it, one a line, in page points.
     pub boxes: Vec<Rect>,
+}
+
+/// Some of a page's sentences, as `Page::light` counts them: only the first
+/// 128 can be.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Picked(u128);
+
+impl Picked {
+    pub fn of(sentences: impl IntoIterator<Item = usize>) -> Self {
+        let bits = sentences.into_iter().filter(|&k| k < 128);
+        Picked(bits.fold(0, |all, k| all | 1 << k))
+    }
+
+    pub fn has(self, k: usize) -> bool {
+        k < 128 && self.0 & 1 << k != 0
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
 }
 
 /// A sentence read aloud, and the glyphs it is read from.
@@ -182,6 +205,8 @@ pub struct Cell {
     pub faint: bool,
     /// It is being read aloud.
     pub lit: bool,
+    /// It is in one of the page's key sentences.
+    pub marked: bool,
     /// The first glyph of its word, as the page has them: a word is read
     /// aloud in one sentence.
     pub glyph: usize,
@@ -231,17 +256,23 @@ pub fn of(data: Arc<Vec<u8>>, page: usize) -> Option<Page> {
 impl Page {
     /// Set the page on a `cols` × `rows` grid over `image`, a render of it,
     /// painting each glyph set out of the image, and lighting the cells of
-    /// the glyphs in `lit`.
-    pub fn set_over(&mut self, image: &mut RgbaImage, cols: u16, rows: u16, lit: &[bool]) -> Cells {
+    /// the glyphs in `lit`, and marking those in `marked`.
+    pub fn set_over(
+        &mut self,
+        image: &mut RgbaImage,
+        (cols, rows): (u16, u16),
+        lit: &[bool],
+        marked: &[bool],
+    ) -> Cells {
         self.sample(image);
-        let (cells, set) = self.layout(cols, rows, lit);
+        let (cells, set) = self.layout(cols, rows, lit, marked);
         self.erase(image, &set);
         cells
     }
 
     /// The page set on a `cols` × `rows` grid, and which glyphs were set:
     /// lines past the bottom and words past the edge are not.
-    fn layout(&self, cols: u16, rows: u16, lit: &[bool]) -> (Cells, Vec<bool>) {
+    fn layout(&self, cols: u16, rows: u16, lit: &[bool], marked: &[bool]) -> (Cells, Vec<bool>) {
         let (cols, rows) = (usize::from(cols), usize::from(rows));
         let mut grid: Cells = vec![vec![None; cols]; rows];
         let mut set = vec![false; self.glyphs.len()];
@@ -269,13 +300,15 @@ impl Page {
             }
             for (word, &(down, col)) in words.iter().zip(&spots) {
                 let first = &self.glyphs[word.glyphs[0]];
-                let lit = word.glyphs.iter().any(|&g| lit.get(g) == Some(&true));
+                let any = |of: &[bool]| word.glyphs.iter().any(|&g| of.get(g) == Some(&true));
+                let (lit, marked) = (any(lit), any(marked));
                 let cell = |ch| Cell {
                     ch,
                     rgb: first.rgb,
                     bold: word.heavy || word.size > LARGE * body,
                     faint: faint(first.rgb, first.back),
                     lit,
+                    marked,
                     glyph: word.glyphs[0],
                 };
                 let mut at = col;
@@ -312,11 +345,33 @@ impl Page {
 
     /// Sentence `k` of what is read aloud, to be lit as it is read.
     pub fn light(&self, k: usize) -> Lit {
+        self.light_all(|i| i == k)
+    }
+
+    /// The sentences `picked`, as `light` counts them, to be marked.
+    pub fn mark(&self, picked: Picked) -> Lit {
+        if picked.is_empty() {
+            return Lit::default();
+        }
+        self.light_all(|k| picked.has(k))
+    }
+
+    /// The sentences read aloud, as `light` counts them.
+    pub fn said(&self) -> Vec<String> {
+        (self.read_sentences().into_iter())
+            .map(|s| s.text)
+            .collect()
+    }
+
+    /// The sentences read aloud that `which` picks, as `light` counts them.
+    fn light_all(&self, which: impl Fn(usize) -> bool) -> Lit {
         let lines = self.reading_lines();
-        let sentence = self.sentences(&lines).into_iter().flatten().nth(k);
+        let sentences = self.sentences(&lines).into_iter().flatten();
         let mut glyphs = vec![false; self.glyphs.len()];
-        for g in sentence.map(|s| s.glyphs).unwrap_or_default() {
-            glyphs[g] = true;
+        for (_, s) in sentences.enumerate().filter(|(k, _)| which(*k)) {
+            for g in s.glyphs {
+                glyphs[g] = true;
+            }
         }
         let boxes = lines
             .iter()
@@ -827,8 +882,12 @@ pub fn overlay(cells: &Cells, area: Area, buf: &mut Buffer) {
             };
             // A block cell shows its top half in fg and bottom half in bg.
             let [top, bottom] = [target.fg, target.bg].map(|c| rgb_of(c).unwrap_or([255; 3]));
-            let back = if cell.lit { LIGHT } else { mix(top, bottom) };
-            let fg = if cell.faint && !cell.lit {
+            let back = match (cell.lit, cell.marked) {
+                (true, _) => LIGHT,
+                (false, true) => MARK,
+                (false, false) => mix(top, bottom),
+            };
+            let fg = if cell.faint && !cell.lit && !cell.marked {
                 cell.rgb
             } else {
                 readable(cell.rgb, back)

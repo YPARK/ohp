@@ -15,20 +15,32 @@ mod browse;
 mod cite;
 #[cfg(feature = "markdown")]
 mod csl;
+#[cfg(feature = "summary")]
+mod embed;
+#[cfg(any(feature = "speech", feature = "summary"))]
+mod fetch;
+#[cfg(feature = "summary")]
+mod hub;
 #[cfg(feature = "markdown")]
 mod knit;
 #[cfg(feature = "markdown")]
 mod latex;
+#[cfg(feature = "summary")]
+mod llm;
 #[cfg(feature = "markdown")]
 mod markdown;
 #[cfg(feature = "markdown")]
 mod math;
 mod menu;
-#[cfg(any(feature = "markdown", feature = "speech"))]
+#[cfg(feature = "summary")]
+mod models;
+#[cfg(any(feature = "markdown", feature = "speech", feature = "summary"))]
 mod process;
 mod remote;
 mod render;
+mod salient;
 mod speak;
+mod summary;
 mod text;
 #[cfg(feature = "markdown")]
 mod typeset;
@@ -59,7 +71,9 @@ use std::time::Duration;
 /// Keys: n/p or arrows next/previous slide (up/down move a row in the grid),
 /// g or tab switches between the slide and a grid of all slides, enter
 /// presents the slide picked in the grid, t switches between images and
-/// text, s reads the slides aloud from this one on, q quits.
+/// text, s reads the slides aloud from this one on, k sums up the slide on
+/// screen and marks its key sentences, K sums up the whole file, m picks
+/// the model that sums up, q quits.
 ///
 /// +/- zoom the slide, or the grid. Zoomed in, arrows pan the slide and 0
 /// fits it back to the screen.
@@ -118,6 +132,14 @@ struct Args {
     #[cfg(feature = "speech")]
     #[arg(long, value_name = "SECONDS", default_value = "0.5", value_parser = seconds)]
     pause: Duration,
+    /// Language model k sums pages up with: one ohp suggests, as
+    /// qwen2.5-3b, qwen2.5-1.5b, qwen3-4b, llama3.2-3b or qwen2.5-7b, a
+    /// repo on Hugging Face as owner/repo or owner/repo/file.gguf,
+    /// downloaded once into its cache, or a GGUF file here; m picks
+    /// another. [default: qwen2.5-3b on macOS, qwen2.5-1.5b elsewhere]
+    #[cfg(feature = "summary")]
+    #[arg(long, env = "OHP_MODEL", value_name = "MODEL", value_parser = summary::weights)]
+    model: Option<summary::Weights>,
 }
 
 /// A time in seconds, as `0.5`.
@@ -171,7 +193,10 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
         knit: local.knit && remotes.is_empty(),
         ..local.clone()
     };
-    #[cfg(all(unix, any(feature = "markdown", feature = "speech")))]
+    #[cfg(all(
+        unix,
+        any(feature = "markdown", feature = "speech", feature = "summary")
+    ))]
     process::signals::install(&options.stop, signaled)?;
     let deck = render::Deck::open_with(&files, options);
     // Stopped while the deck was read: no screen to show.
@@ -185,8 +210,19 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
         links,
         local,
         speaker(&args),
+        summarizer(&args),
         signaled.clone(),
     )
+}
+
+#[cfg(feature = "summary")]
+fn summarizer(args: &Args) -> summary::Summarizer {
+    summary::Summarizer::new(args.model.clone())
+}
+
+#[cfg(not(feature = "summary"))]
+fn summarizer(_: &Args) -> summary::Summarizer {
+    summary::Summarizer::new(None)
 }
 
 #[cfg(feature = "speech")]

@@ -22,12 +22,17 @@ cargo install --git https://github.com/YPARK/ohp
 
 No C libraries, no poppler, no LaTeX needed. Markdown is typeset by
 [typst](https://typst.app), whose evaluator assembles one small
-stack-switching file with the system C toolchain; without markdown, nothing
-but Rust is compiled:
+stack-switching file with the system C toolchain, and summaries' tokenizer
+builds Oniguruma's C with it; without either, nothing but Rust is compiled:
 
 ```sh
 cargo install --git https://github.com/YPARK/ohp --no-default-features --features speech
 ```
+
+Summing slides up, the `summary` feature, is in the default build too: a
+language model runs in ohp itself, with
+[candle](https://github.com/huggingface/candle), on the GPU through Metal
+on macOS, as [Summaries](#summaries) shows.
 
 Reading slides aloud, the `speech` feature, is in the default build, and
 reads with speech programs it runs, none built in: on macOS, its own `say`
@@ -85,6 +90,9 @@ set by typst, so need the `markdown` feature, as in the default build.
 | `s` | read the slides aloud from this one on; again to stop |
 | click | read aloud from the sentence clicked; in the grid, pick the slide clicked, and present it clicked again or double-clicked |
 | `v` | pick the voice to read in, or one of Piper's to download |
+| `k` | sum up the slide in a column beside it, and mark its key sentences; again to close |
+| `K` | sum up the whole file there, and mark its key sentences wherever they are; again to close |
+| `m` | pick the model that sums up, or one of Hugging Face's to download |
 | `q` | quit |
 
 ohp takes the mouse, so selecting text in the terminal needs Shift held,
@@ -259,6 +267,64 @@ question or exclamation mark, but not at an initial or an abbreviation such
 as `e.g.` or `Fig.`. The voice works a sentence ahead of the player, so a
 voice slow to start, as Piper's, mostly delays just the first sentence
 of a slide.
+
+## Summaries
+
+`k` sums up the slide or page on screen, in a column beside it, and marks
+on it, in green, the one to three sentences that carry its key takeaways,
+listed under the summary too. The column follows the slides as they turn,
+summing up each one turned to. `K` sums up the whole file there instead,
+and marks its three to five key sentences on whatever pages they are.
+Either key again, or the other, closes the column or switches it.
+
+The summary is written by a language model run in ohp, offline, which
+[candle](https://github.com/huggingface/candle) runs on the GPU through
+Metal on macOS and on the CPU elsewhere: a GGUF file of its weights,
+quantised to 4 bits, from [Hugging Face](https://huggingface.co)'s Hub.
+The first `k` downloads it, once, with `curl`, into Hugging Face's own
+cache, `~/.cache/huggingface/hub` (or `$HF_HUB_CACHE`, or `hub` in
+`$HF_HOME`), as its libraries lay it out, so a model one of them
+downloaded is used without downloading it again, and one ohp downloaded is
+theirs too. A download cut short is taken up where it stopped. While it
+downloads, while the model loads, reads the page and writes, a bar in the
+column shows how far it has come, and the status line its percent.
+
+`m` picks the model, in a list over the slides: those below, then any GGUF
+file in the cache. Type to narrow the list, or type a repo of the Hub's,
+as `bartowski/Qwen2.5-7B-Instruct-GGUF`, and Enter to sum up with it; its
+4-bit file, `Q4_K_M`, is taken, unless the file is named too, as
+`owner/repo/model-Q5_K_M.gguf`. `--model`, or `OHP_MODEL`, gives the model
+to start with in the same ways, or as a `.gguf` file here. A gated repo
+needs its terms accepted on the Hub, and a token, as `HF_TOKEN` gives it
+or `hf auth login` keeps it.
+
+| `m`, `--model` | | |
+|---|---|---|
+| `qwen2.5-3b` | 2.1 GB | default on macOS: a slide in a few seconds on an M4, a dense page of a paper in under ten |
+| `qwen2.5-1.5b` | 1.1 GB | default elsewhere: twice as quick, its picks less apt |
+| `qwen3-4b` | 2.5 GB | Qwen3-4B-Instruct-2507: newer, and a little slower |
+| `llama3.2-3b` | 2.0 GB | Meta's Llama 3.2 3B Instruct |
+| `qwen2.5-7b` | 4.7 GB | the best of these, and the slowest |
+| `owner/repo` | | any GGUF of a Qwen2, Qwen3 or Llama 3 model on the Hub |
+
+A page is given to the model as the sentences `s` reads aloud from it,
+numbered, up to about two thousand tokens' worth, and the model answers
+with its summary and the numbers of its key sentences, so what is marked
+is what the page says, word for word. A paper is too long to give the
+model whole, and would take minutes to read a page at a time; so for `K`,
+the sentences most central to the file are retrieved first: each is
+embedded by a small model of what sentences mean,
+[all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2),
+90 MB, downloaded from the Hub as the language model is, and scored by how
+near it is to the whole file, more on its first page and where it says
+what was found, as `we show`, and less where it points to a figure,
+leaving out references, running heads and sentences that say what one
+picked already does. Where that model cannot be had, as offline, the
+sentences' words are weighed instead, by TF-IDF. About two thousand tokens
+of them, in order and with their pages, are summed up as a page is: in
+about twenty seconds on an M4, however long the file. Summaries are kept
+until ohp quits, by the text summed up, so a page a reload leaves as it was
+is not summed up again, unless another model is picked.
 
 ## Slides on another machine
 
