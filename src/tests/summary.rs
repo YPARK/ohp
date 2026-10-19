@@ -442,7 +442,7 @@ fn summaries_are_kept_by_model_and_text() {
     let name = |weights: &Weights, what, pages: &[&Vec<String>]| {
         kept_name(weights, what, pages.iter().map(|p| p.as_slice()))
     };
-    let qwen = Weights::default();
+    let qwen = Weights::from(&SUGGESTED[0]);
     let once = name(&qwen, "page", &[&ab]);
     assert_eq!(once, name(&qwen, "page", &[&ab]));
     assert!(once.ends_with(".json") && once.len() == 21);
