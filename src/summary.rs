@@ -507,18 +507,19 @@ struct Running {
 impl State {
     /// What the model is to do next, if anything: the page wanted, then
     /// the document, then the pages after the one wanted, to be summed up
-    /// before they are turned to.
+    /// before they are turned to. Without a model, only what is shown is
+    /// looked for among the summaries kept.
     fn next(&self) -> Option<Task> {
         let (_, pages) = self.deck.as_ref()?;
-        if matches!(self.model, Weighed::Broken(_)) {
-            return None;
-        }
         let fresh = |p: &usize| p < pages && !self.pages.contains_key(p);
         if let Some(page) = self.wanted.filter(fresh) {
             return Some(Task::Page(page));
         }
         if self.whole_wanted && self.whole.is_none() {
             return Some(Task::Whole);
+        }
+        if matches!(self.model, Weighed::Broken(_)) {
+            return None;
         }
         let ahead = (self.wanted.into_iter()).flat_map(|w| w + 1..=w + AHEAD);
         ahead.filter(fresh).map(Task::Page).next()
@@ -569,9 +570,13 @@ impl State {
     /// What to show of `task`'s summary, `done` if it is done, `empty` if
     /// it is of nothing.
     fn view(&self, task: Task, done: Option<&Done>, empty: &str) -> View {
+        // Without a model, a summary may still be kept, until looked for.
+        let looking =
+            self.running.as_ref().is_some_and(|r| r.task == task) || self.next() == Some(task);
         match (done, &self.model) {
             (Some(Ok(summary)), _) => View::of(summary, empty),
-            (Some(Err(e)), _) | (None, Weighed::Broken(e)) => View::says(e),
+            (Some(Err(e)), _) => View::says(e),
+            (None, Weighed::Broken(e)) if !looking => View::says(e),
             (None, _) => {
                 let text = match &self.doing {
                     Some(Doing::Writing(t, so_far, ..)) if *t == task => so_far.clone(),
@@ -999,7 +1004,13 @@ impl Loader {
     /// not yet kept; another loaded before is let go first. One given up,
     /// as `stop` says, is not taken for one that cannot be had.
     fn llm(&mut self, shared: &Shared, stop: &AtomicBool) -> Result<&mut Llm, String> {
-        let weights = lock(shared).weights.clone();
+        let weights = {
+            let state = lock(shared);
+            if let Weighed::Broken(why) = &state.model {
+                return Err(why.clone());
+            }
+            state.weights.clone()
+        };
         if self.llm.as_ref().is_none_or(|(w, _)| *w != weights) {
             self.llm = None;
             let loaded = locate(shared, &weights, stop).and_then(|path| {

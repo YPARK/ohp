@@ -273,11 +273,37 @@ fn the_page_on_screen_is_summed_up_before_the_whole() {
 }
 
 #[test]
-fn nothing_is_summed_up_without_a_model() {
+fn without_a_model_only_what_is_shown_is_looked_for() {
     let mut state = state(3);
     state.wanted = Some(0);
     state.model = Weighed::Broken("no model".into());
-    assert_eq!(state.next(), None);
+    assert_eq!(state.next(), Some(Task::Page(0)), "it may be kept");
+    state.pages.insert(0, Err("no model".into()));
+    assert_eq!(state.next(), None, "none summed up ahead");
+    state.whole_wanted = true;
+    assert_eq!(state.next(), Some(Task::Whole));
+}
+
+#[test]
+fn a_summary_kept_is_shown_though_the_model_cannot_be_had() {
+    let pdf = fixture::with(&[
+        fixture::text(40., 150., 12., "Cells differ from one another."),
+        fixture::text(40., 150., 12., "Genes tell the cells apart."),
+    ]);
+    let said = text::of(Arc::new(pdf.clone()), 1).unwrap().said();
+    let mut summarizer = unloadable();
+    let kept = Summary {
+        text: "Genes tell them apart.".into(),
+        key: Vec::new(),
+    };
+    lock(&summarizer.shared).known.insert(said, Arc::new(kept));
+    summarizer.set_deck(Arc::new(pdf), 2);
+    summarizer.want(Some(0));
+    until(|| !summarizer.page(0).text.is_empty());
+    assert!(summarizer.page(0).text.contains("/no/such/model.gguf"));
+    summarizer.want(Some(1));
+    until(|| summarizer.page(1).busy.is_none() && !summarizer.page(1).text.is_empty());
+    assert_eq!(summarizer.page(1).text, "Genes tell them apart.");
 }
 
 /// Wait until `done`, for ten seconds at most.
