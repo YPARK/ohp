@@ -53,9 +53,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
-use ratatui_image::Image;
 use ratatui_image::picker::cap_parser::{Parser, QueryStdioOptions};
 use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::{FontSize, Image};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -143,9 +143,30 @@ fn pick() -> Picker {
     if asked.elapsed() >= timeout {
         let _ = execute!(std::io::stdout(), Print("\x1b[5n"));
     }
+    // Eat, the terminal inside Emacs, draws sixel but cannot say how many
+    // pixels a cell is, so it is left with half-blocks. Emacs says instead.
+    if picker.protocol_type() == ProtocolType::Halfblocks
+        && let Some(cell) = eat_cell_size()
+    {
+        #[allow(deprecated)]
+        let mut eat = Picker::from_fontsize(cell);
+        eat.set_protocol_type(ProtocolType::Sixel);
+        picker = eat;
+    }
     // Pads an image rounded a pixel short of its cells, as the slide's own white.
     picker.set_background_color(Some([255, 255, 255, 255]));
     picker
+}
+
+/// The pixels of a cell in Eat, from `OHP_CELL_SIZE=WxH`, as Emacs sets it.
+fn eat_cell_size() -> Option<FontSize> {
+    if !std::env::var("TERM").is_ok_and(|t| t.starts_with("eat")) {
+        return None;
+    }
+    let size = std::env::var("OHP_CELL_SIZE").ok()?;
+    let (w, h) = size.split_once('x')?;
+    let (w, h) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+    (w > 0 && h > 0).then(|| FontSize::new(w, h))
 }
 
 fn over_ssh() -> bool {
