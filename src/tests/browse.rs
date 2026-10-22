@@ -265,6 +265,29 @@ fn a_link_marked_is_the_link_listed_not_opened_twice() {
 }
 
 #[test]
+fn html_is_listed_with_the_slides() {
+    let dir = tree();
+    std::fs::write(dir.path().join("notes.html"), b"").unwrap();
+    std::fs::write(dir.path().join("page.HTM"), b"").unwrap();
+    let b = Browser::new(dir.path()).unwrap();
+    let want: &[&str] = if cfg!(feature = "markdown") {
+        &[
+            "..",
+            "notes",
+            "talks",
+            "alpha.pdf",
+            "beta.PDF",
+            "notes.html",
+            "page.HTM",
+            "slides.md",
+        ]
+    } else {
+        &["..", "notes", "talks", "alpha.pdf", "beta.PDF"]
+    };
+    assert_eq!(names(&b), want);
+}
+
+#[test]
 fn images_are_listed_with_the_slides() {
     let dir = tree();
     std::fs::write(dir.path().join("photo.JPG"), b"").unwrap();

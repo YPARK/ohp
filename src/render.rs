@@ -107,10 +107,9 @@ pub fn stamp(path: &Path) -> Stamp {
 
 /// Whether the file ends the way a finished PDF does. LaTeX may pause while
 /// writing one, so a file that stopped changing is not necessarily done.
-/// Markdown is written by an editor, and an image by its program, all at
-/// once.
+/// Markdown, HTML and an image are written all at once.
 pub fn finished(path: &Path) -> bool {
-    if markdown(path) || image(path) {
+    if document(path) || image(path) {
         return path.is_file();
     }
     let Ok(mut file) = std::fs::File::open(path) else {
@@ -130,6 +129,19 @@ pub fn markdown(path: &Path) -> bool {
         .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "md" | "markdown" | "rmd"))
 }
 
+/// Whether `path` names HTML, typeset as markdown is.
+pub fn html(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "html" | "htm"))
+}
+
+/// Whether `path` names markdown, R Markdown or HTML, typeset rather than
+/// read as a PDF.
+pub fn document(path: &Path) -> bool {
+    markdown(path) || html(path)
+}
+
 /// Whether `path` names an image, shown as a slide of its own.
 pub fn image(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
@@ -142,7 +154,7 @@ pub fn image(path: &Path) -> bool {
 
 /// Whether `paths` is a PDF, read as it is rather than typeset.
 pub fn pdf(paths: &[PathBuf]) -> bool {
-    matches!(paths, [path] if !markdown(path) && !image(path))
+    matches!(paths, [path] if !document(path) && !image(path))
 }
 
 /// The first of `paths`, which are some, and how many follow it.
@@ -174,7 +186,7 @@ type Made = (Vec<u8>, Option<String>, Vec<usize>);
 #[cfg(feature = "markdown")]
 fn typeset(paths: &[PathBuf], options: &Options) -> anyhow::Result<Made> {
     let (done, from) = match paths {
-        [path] if markdown(path) => (crate::typeset::typeset(path, options)?, Vec::new()),
+        [path] if document(path) => (crate::typeset::typeset(path, options)?, Vec::new()),
         _ => crate::album::gather(paths, options)?,
     };
     Ok((done.pdf, done.note, from))
@@ -183,6 +195,7 @@ fn typeset(paths: &[PathBuf], options: &Options) -> anyhow::Result<Made> {
 #[cfg(not(feature = "markdown"))]
 fn typeset(paths: &[PathBuf], _: &Options) -> anyhow::Result<Made> {
     let why = match paths {
+        [path] if html(path) => format!("{} is HTML", path.display()),
         [path] if markdown(path) => format!("{} is markdown", path.display()),
         [path] => format!("{} is an image", path.display()),
         _ => "showing several files together needs typst".into(),
@@ -196,8 +209,9 @@ impl Deck {
         Self::open_with(&[path.to_path_buf()], Options::default())
     }
 
-    /// The deck in `paths`: a PDF, or markdown typeset into one, or several
-    /// files, PDFs, images and markdown, set one after another into one.
+    /// The deck in `paths`: a PDF, or markdown or HTML typeset into one, or
+    /// several files, PDFs, images, markdown and HTML, set one after another
+    /// into one.
     pub fn open_with(paths: &[PathBuf], options: Options) -> anyhow::Result<Self> {
         let [first, ..] = paths else {
             anyhow::bail!("no file to present");

@@ -443,3 +443,10 @@ fn a_path_is_found_as_written_or_unescaped() {
     let doc = convert(&text, &setting(dir.path()));
     assert_eq!(doc.images.len(), 4, "{}", doc.source);
 }
+
+#[test]
+fn an_html_rule_is_a_line() {
+    let out = typst("Before\n\n<hr>\n\nAfter\n");
+    assert!(out.contains("#line(length: 100%"), "{out}");
+    assert!(!out.contains("#pagebreak"), "{out}");
+}

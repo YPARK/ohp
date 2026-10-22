@@ -1,4 +1,5 @@
-//! Markdown and R Markdown typeset into a PDF, in memory, by typst.
+//! Markdown, R Markdown and HTML typeset into a PDF, in memory, by typst.
+//! HTML is read as markdown first.
 //!
 //! A file with code chunks, R's, python's, bash's or any other engine
 //! knitr has, is first run through knitr when R is here, so its chunks show
@@ -50,7 +51,7 @@ pub fn paper(name: &str) -> Result<String, String> {
 }
 
 pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
-    let text =
+    let file =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let base = path.parent().unwrap_or(Path::new("."));
     // Why chunks were not run, which holds however the text is shown.
@@ -58,18 +59,24 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
     let rmd = path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("rmd"));
+    // HTML is markdown from here. Its embedded images stay until the PDF is
+    // made: the markdown names them.
+    let embedded = crate::render::html(path).then(|| crate::html::read(&file));
+    let _kept = embedded.as_ref().and_then(crate::html::Read::files);
     // The directory is kept until typeset: knitted plots are in it.
-    let (text, _knitted) = if options.knit && has_chunks(&text, rmd) {
+    let (text, _knitted) = if let Some(read) = &embedded {
+        (read.markdown.clone(), None)
+    } else if options.knit && has_chunks(&file, rmd) {
         match knit(path, &options.stop) {
             Knitted::Done(dir, md) => (md, Some(dir)),
             Knitted::Failed(why) => {
                 knitting = Some(why);
-                (text, None)
+                (file, None)
             }
             Knitted::Stopped => return Err(Stopped.into()),
         }
     } else {
-        (text, None)
+        (file, None)
     };
 
     let mut raw_math = HashSet::new();

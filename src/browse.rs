@@ -357,7 +357,7 @@ fn slides(path: &Path) -> bool {
     let pdf = path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
-    let typeset = crate::render::markdown(path) || crate::render::image(path);
+    let typeset = crate::render::document(path) || crate::render::image(path);
     pdf || cfg!(feature = "markdown") && typeset
 }
 

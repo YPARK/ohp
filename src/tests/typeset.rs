@@ -206,6 +206,77 @@ fn a_bibliography_typst_cannot_set_from_leaves_citations_as_written() {
 }
 
 #[test]
+fn an_html_document_is_typeset_on_letter() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(
+        dir.path(),
+        "notes.HTML",
+        "<html lang=\"en\"><head><title>Notes</title></head>\
+         <body><article><h1>Notes</h1><p>Hello there.</p></article></body></html>",
+    );
+    let deck = Deck::open(&path).unwrap();
+    assert_eq!(deck.pages, 1);
+    let (w, h) = deck.sizes[0];
+    assert!((w - 612.).abs() < 1. && (h - 792.).abs() < 1., "{w}×{h}");
+}
+
+#[test]
+fn a_katex_formula_and_a_drawn_svg_are_typeset() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(
+        dir.path(),
+        "notes.html",
+        "<article><p><span class=\"katex\"><span class=\"katex-mathml\"><math><semantics>\
+         <annotation encoding=\"application/x-tex\">E = mc^2</annotation>\
+         </semantics></math></span><span class=\"katex-html\">RENDERED</span></span></p>\
+         <svg><rect width=\"10\" height=\"10\" fill=\"black\"/></svg>\
+         <div class=\"mermaid\">graph LR\nA --&gt; B</div></article>",
+    );
+    let deck = Deck::open(&path).unwrap();
+    assert_eq!(deck.pages, 1);
+    assert!(deck.note.is_none(), "{:?}", deck.note);
+}
+
+#[test]
+fn a_mermaid_flowchart_is_typeset() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(
+        dir.path(),
+        "notes.html",
+        "<article><pre class=\"mermaid\">\n\
+         graph LR\n\
+         G[Genotype] -->|eQTL effect| E[Gene expression]\n\
+         G --> C[Cell type / expression PCs]\n\
+         E --> C\n\
+         </pre></article>",
+    );
+    let deck = Deck::open(&path).unwrap();
+    assert!(deck.note.is_none(), "{:?}", deck.note);
+    let page = crate::text::of(deck.data, 0).unwrap();
+    let said = page.said().join(" ");
+    assert!(said.contains("Genotype"), "{said}");
+    assert!(said.contains("expression"), "{said}");
+    assert!(said.contains("eQTL") || said.contains("effect"), "{said}");
+}
+
+#[test]
+fn reveal_sections_are_slides() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(
+        dir.path(),
+        "talk.html",
+        "<div class=\"reveal\"><div class=\"slides\">\
+         <section><h2>One</h2><p>a</p></section>\
+         <section><h2>Two</h2><p>b</p></section>\
+         </div></div>",
+    );
+    let deck = Deck::open(&path).unwrap();
+    assert_eq!(deck.pages, 2);
+    let (w, h) = deck.sizes[0];
+    assert!(w > h, "{w}×{h}");
+}
+
+#[test]
 fn a_stopped_typeset_ends_without_a_pdf() {
     let dir = tempfile::tempdir().unwrap();
     let path = write(dir.path(), "a.md", "Text.\n");

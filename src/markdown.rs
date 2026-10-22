@@ -799,6 +799,11 @@ impl Writer<'_, '_> {
                 let tag = html.trim().to_ascii_lowercase();
                 if matches!(tag.as_str(), "<br>" | "<br/>" | "<br />") {
                     self.raw("#linebreak();");
+                } else if matches!(tag.as_str(), "<hr>" | "<hr/>" | "<hr />") {
+                    // A rule in a slide deck is a new slide, so an HTML line
+                    // is drawn as a line wherever it is.
+                    self.block();
+                    self.raw("#line(length: 100%, stroke: 0.5pt + luma(170))\n");
                 }
             }
             _ => {}

@@ -1,7 +1,8 @@
 //! Several files presented together, as one deck: a PDF's pages as they
-//! are, an image on a page of its own, and markdown typeset first. typst
-//! sets them one after another into one PDF, each page the shape of what it
-//! shows, so the deck is drawn, read as text and read aloud as any other.
+//! are, an image on a page of its own, and markdown or HTML typeset first.
+//! typst sets them one after another into one PDF, each page the shape of
+//! what it shows, so the deck is drawn, read as text and read aloud as any
+//! other.
 //!
 //! A file that cannot be read is left out, and named in the status line.
 //! Each file is kept as it was shown, so when one of the deck's files
@@ -209,7 +210,7 @@ pub fn gather(paths: &[PathBuf], options: &Options) -> anyhow::Result<(Typeset, 
 
 /// `path` read, or typeset, and measured.
 fn show(path: &Path, options: &Options) -> anyhow::Result<Shown> {
-    if render::markdown(path) {
+    if render::document(path) {
         let done = typeset::typeset(path, options)?;
         return pdf(done.pdf.into(), done.note);
     }

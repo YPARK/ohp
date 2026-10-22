@@ -5,7 +5,7 @@
 //! so they can be presented from a remote machine over ssh. Elsewhere they
 //! are shown as their text, over a coarse image of the slide.
 //!
-//! Markdown and R Markdown are typeset into a PDF first, by typst.
+//! Markdown, R Markdown and HTML are typeset into a PDF first, by typst.
 
 #[cfg(feature = "markdown")]
 mod album;
@@ -19,6 +19,8 @@ mod csl;
 mod embed;
 #[cfg(any(feature = "speech", feature = "summary"))]
 mod fetch;
+#[cfg(feature = "markdown")]
+mod html;
 #[cfg(feature = "summary")]
 mod hub;
 #[cfg(feature = "markdown")]
@@ -32,6 +34,8 @@ mod markdown;
 #[cfg(feature = "markdown")]
 mod math;
 mod menu;
+#[cfg(feature = "markdown")]
+mod mermaid;
 #[cfg(feature = "summary")]
 mod models;
 #[cfg(any(feature = "markdown", feature = "speech", feature = "summary"))]
@@ -61,7 +65,7 @@ use std::time::Duration;
 
 #[cfg_attr(
     feature = "markdown",
-    doc = "Present a beamer PDF, or markdown or R Markdown, in the terminal."
+    doc = "Present a beamer PDF, or markdown, R Markdown or HTML, in the terminal."
 )]
 #[cfg_attr(
     not(feature = "markdown"),
@@ -87,7 +91,7 @@ use std::time::Duration;
 struct Args {
     #[cfg_attr(
         feature = "markdown",
-        doc = "The slides: a PDF, `.md` or `.Rmd` file, or an image, here, or on another machine"
+        doc = "The slides: a PDF, `.md`, `.Rmd` or `.html` file, or an image, here, or on another machine"
     )]
     #[cfg_attr(
         not(feature = "markdown"),
@@ -98,7 +102,7 @@ struct Args {
     /// list.
     #[cfg_attr(
         feature = "markdown",
-        doc = "Several files, here or not, PDFs, images and markdown mixed, are shown one after another as one deck."
+        doc = "Several files, here or not, PDFs, images, markdown and HTML mixed, are shown one after another as one deck."
     )]
     files: Vec<PathBuf>,
     /// Start with slides as text, even where the terminal shows images.

@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.92"
 license = "MIT"
 authors = ["Yongjin Park <yongjin.park@ubc.ca>"]
-description = "Present beamer PDF slides, and markdown, in the terminal over the kitty graphics protocol"
+description = "Present beamer PDF slides, markdown and HTML in the terminal over the kitty graphics protocol"
 repository = "https://github.com/YPARK/ohp"
 keywords = ["pdf", "beamer", "slides", "tui", "markdown"]
 categories = ["command-line-utilities", "visualization"]
@@ -29,23 +29,26 @@ summary = [
 ]
 # Slides read aloud by a speech program, run as R is, in a session of its own.
 speech = ["dep:libc", "dep:signal-hook", "dep:serde_json"]
-# Markdown and R Markdown, typeset by typst. Typst's evaluator grows its
-# stack through `psm`, which assembles one small file with the C toolchain.
-# Citations are read with typst's own bibliography crates. Images, and
-# several files shown together, are set by typst too; ohp measures images,
-# and makes large ones smaller, with the codecs typst reads them with.
+# Markdown, R Markdown and HTML, typeset by typst. Typst's evaluator grows
+# its stack through `psm`, which assembles one small file with the C
+# toolchain. Citations are read with typst's own bibliography crates.
+# Images, and several files shown together, are set by typst too; ohp
+# measures images, and makes large ones smaller, with the codecs typst
+# reads them with.
 markdown = [
+    "dep:base64",
     "dep:hayagriva",
     "image/png",
     "image/jpeg",
     "image/gif",
     "image/webp",
     "dep:libc",
-    "dep:signal-hook",
     "dep:percent-encoding",
     "dep:pulldown-cmark",
+    "dep:scraper",
     "dep:serde_json",
     "dep:serde_yaml",
+    "dep:signal-hook",
     "dep:typst",
     "dep:typst-assets",
     "dep:typst-layout",
@@ -54,6 +57,7 @@ markdown = [
 
 [dependencies]
 anyhow = "1.0"
+base64 = { version = "0.22", optional = true }
 candle-core = { version = "0.10.2", optional = true }
 candle-nn = { version = "0.10.2", optional = true }
 candle-transformers = { version = "0.10.2", optional = true }
@@ -66,6 +70,7 @@ pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 ratatui = "0.30"
 # Without default features: `chafa-dyn` links a C library.
 ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
+scraper = { version = "0.23", optional = true, default-features = false }
 serde_json = { version = "1", optional = true }
 serde_yaml = { version = "0.9", optional = true }
 tempfile = "3.27.0"

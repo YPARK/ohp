@@ -1,7 +1,7 @@
 # ohp
 
-An overhead projector: present beamer PDF slides, or markdown and R
-Markdown, in the terminal.
+An overhead projector: present beamer PDF slides, or markdown, R
+Markdown and HTML, in the terminal.
 
 Slides are rasterised in pure Rust by [hayro](https://crates.io/crates/hayro)
 and shown through [ratatui-image](https://crates.io/crates/ratatui-image),
@@ -51,6 +51,7 @@ ohp --text talk.pdf                  # slides as text, even where images can be 
 ohp user@host:~/talks/talk.pdf       # slides on another machine
 ohp talk.Rmd                         # R Markdown slides, chunks run by knitr
 ohp --paper a4 notes.md              # a markdown document, on A4 pages
+ohp notes.html                       # an HTML document
 ohp plot.png                         # an image
 ohp intro.pdf figs/*.png photo.jpg   # several files, mixed, one after another
 ohp host:talk.pdf host:fig.png       # several on another machine
@@ -68,8 +69,8 @@ file is shown first.
 
 Several files given, or marked, are shown as one deck, in the order
 given: each page of a PDF as a slide, each image, PNG, JPEG, GIF, WebP or
-SVG, as a slide its own shape, and markdown typeset as it is alone. The
-status line names the file the slide is from. A photo larger than a
+SVG, as a slide its own shape, and markdown or HTML typeset as it is
+alone. The status line names the file the slide is from. A photo larger than a
 screen shows, past 4096 pixels across or down, is made that small first.
 A file that cannot be read is left out, and named in the status line. A
 change to any of them reloads the deck, reading again only the files
@@ -158,6 +159,23 @@ pandoc shows it, and named on the status line. One difference: typst's
 citations have no place for a prefix, so the `see` of `[see @doe99]` is
 written before the parentheses rather than in them. Only the markdown file
 is watched, so after changing the bibliography, save the markdown again.
+
+## HTML
+
+`.html` and `.htm` files are typeset as markdown is. What is set is the
+first `<article>`, or else `<main>`, or else the body. Headings, lists,
+tables, code, links and images are set; an image whose data is in the
+file is shown too. Scripts, styles, navigation, footers and a table of
+contents are left out.
+
+A formula in `\(...\)` or `\[...\]`, in a MathML annotation, or in the
+TeX KaTeX or MathJax keep beside their drawing, is set as one written
+in markdown. A picture drawn in the page is shown, and so is a mermaid
+flowchart drawn from its source. A reveal.js deck, the `<section>` slides in
+`.slides`, is set as slides, and so is remark's or xaringan's markdown,
+kept in `<textarea id="source">` and typeset as written.
+Anything else is a document, on the same paper as markdown, and `--paper`
+sets it.
 
 ## Reading aloud
 
