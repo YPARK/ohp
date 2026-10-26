@@ -367,6 +367,16 @@ If the connection is lost, the status line says so and ohp reconnects by
 itself. It never asks for a password once the slides are up, so this needs
 a key or an ssh agent.
 
+## As a library
+
+ohp is a library too: `ohp::page::pages` draws the pages of a PDF, a
+markdown, R Markdown or HTML file, or an image, as ohp typesets them,
+each as wide as asked, as letterbox shows a message:
+
+```rust
+let pages = ohp::page::pages("note.html".as_ref(), 800)?;
+```
+
 ## License
 
 MIT; see [LICENSE](LICENSE).
