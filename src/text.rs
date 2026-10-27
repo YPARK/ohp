@@ -25,22 +25,25 @@
 //! run above and below it and its words fall in columns, apart across a rule
 //! or a wide gap.
 
-use hayro::hayro_interpret::font::Glyph;
-use hayro::hayro_interpret::hayro_cmap::BfString;
 use hayro::hayro_interpret::{
-    BlendMode, ClipPath, Context, Device, GlyphDrawMode, Image, InterpreterCache,
-    InterpreterSettings, Paint, PathDrawMode, SoftMask, TransformExt, interpret_page,
+    Context, InterpreterCache, InterpreterSettings, TransformExt, interpret_page,
 };
 use hayro::hayro_syntax::Pdf;
-use hayro::vello_cpu::kurbo::{Affine, BezPath, Point, Rect, Shape};
+use hayro::vello_cpu::kurbo::Rect;
 use image::{Rgba, RgbaImage};
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect as Area;
-use ratatui::style::{Color, Modifier, Style};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+mod marks;
+mod overlay;
+
+use marks::Marks;
+#[cfg(test)]
+use marks::{bold_font, math_char, math_font};
+use overlay::faint;
+pub use overlay::overlay;
 
 /// A gap wider than this, in ems, from where the pen ends a glyph to where
 /// it starts the next, starts a new word. A space a justified line squeezes
@@ -863,250 +866,6 @@ fn label(word: &str) -> bool {
     (n.len() <= 3 && all(|c| c.is_ascii_digit()))
         || (n.len() == 1 && all(|c| c.is_ascii_lowercase()))
         || (n.len() <= 4 && all(roman))
-}
-
-/// Write the cells over what `area` of `buf` already shows, a coarse image
-/// of the slide, each on the colour behind it.
-pub fn overlay(cells: &Cells, area: Area, buf: &mut Buffer) {
-    for (dy, row) in cells.iter().enumerate().take(area.height.into()) {
-        for (dx, cell) in row.iter().enumerate().take(area.width.into()) {
-            let Some(cell) = cell else { continue };
-            let wide = cell.ch.width() == Some(2);
-            // Half of it would show past the area.
-            if wide && dx + 1 >= usize::from(area.width) {
-                continue;
-            }
-            let (x, y) = (area.x + dx as u16, area.y + dy as u16);
-            let Some(target) = buf.cell_mut((x, y)) else {
-                continue;
-            };
-            // A block cell shows its top half in fg and bottom half in bg.
-            let [top, bottom] = [target.fg, target.bg].map(|c| rgb_of(c).unwrap_or([255; 3]));
-            let back = match (cell.lit, cell.marked) {
-                (true, _) => LIGHT,
-                (false, true) => MARK,
-                (false, false) => mix(top, bottom),
-            };
-            let fg = if cell.faint && !cell.lit && !cell.marked {
-                cell.rgb
-            } else {
-                readable(cell.rgb, back)
-            };
-            let mut style = Style::new().fg(fg.into()).bg(back.into());
-            if cell.bold {
-                style = style.add_modifier(Modifier::BOLD);
-            }
-            target.set_char(cell.ch).set_style(style);
-            if wide && let Some(next) = buf.cell_mut((x + 1, y)) {
-                next.set_char(' ').set_style(style);
-            }
-        }
-    }
-}
-
-fn faint(fg: [u8; 3], back: [u8; 3]) -> bool {
-    (luma(fg) - luma(back)).abs() < CONTRAST
-}
-
-/// `fg`, or black or white when `fg` would not stand out from `back`.
-fn readable(fg: [u8; 3], back: [u8; 3]) -> [u8; 3] {
-    if !faint(fg, back) {
-        fg
-    } else if luma(back) > 0.5 {
-        [0, 0, 0]
-    } else {
-        [255, 255, 255]
-    }
-}
-
-fn rgb_of(c: Color) -> Option<[u8; 3]> {
-    match c {
-        Color::Rgb(r, g, b) => Some([r, g, b]),
-        _ => None,
-    }
-}
-
-fn mix(a: [u8; 3], b: [u8; 3]) -> [u8; 3] {
-    [0, 1, 2].map(|i| ((u16::from(a[i]) + u16::from(b[i])) / 2) as u8)
-}
-
-fn luma([r, g, b]: [u8; 3]) -> f32 {
-    (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)) / 255.
-}
-
-/// The letters of a typographic ligature, which fonts for terminals rarely have.
-fn unligate(c: char) -> Option<&'static str> {
-    Some(match c {
-        'ﬀ' => "ff",
-        'ﬁ' => "fi",
-        'ﬂ' => "fl",
-        'ﬃ' => "ffi",
-        'ﬄ' => "ffl",
-        _ => return None,
-    })
-}
-
-/// Whether a font, by its PostScript name, is one formulas are set in.
-fn math_font(name: &str) -> bool {
-    const TEX: [&str; 8] = [
-        "CMMI", "CMSY", "CMEX", "CMBSY", "MSAM", "MSBM", "EUFM", "RSFS",
-    ];
-    name.contains("Math") || TEX.iter().any(|tex| name.starts_with(tex))
-}
-
-/// Whether a font, by its PostScript name, is a bold one.
-fn bold_font(name: &str) -> bool {
-    const WEIGHTS: [&str; 4] = ["bold", "black", "heavy", "demi"];
-    let lower = name.to_ascii_lowercase();
-    name.starts_with("CMBX")
-        || name.starts_with("CMB10")
-        || WEIGHTS.iter().any(|w| lower.contains(w))
-}
-
-/// Whether a character is a formula's: Greek, a mathematical operator or
-/// symbol, or a mathematical letter.
-fn math_char(c: char) -> bool {
-    matches!(c,
-        '\u{0391}'..='\u{03C9}'
-        | '\u{2200}'..='\u{22FF}'
-        | '\u{27C0}'..='\u{27EF}'
-        | '\u{2980}'..='\u{2AFF}'
-        | '\u{1D400}'..='\u{1D7FF}')
-}
-
-/// Collects the glyphs a page draws, and the rules; everything else is
-/// ignored.
-#[derive(Default)]
-struct Marks {
-    glyphs: Vec<Mark>,
-    across: Vec<Rect>,
-    down: Vec<Rect>,
-    /// Whether each font, by its cache key, is a math font and a bold one.
-    fonts: HashMap<u128, (bool, bool)>,
-}
-
-impl<'a> Device<'a> for Marks {
-    fn set_soft_mask(&mut self, _: Option<SoftMask<'a>>) {}
-    fn set_blend_mode(&mut self, _: BlendMode) {}
-
-    fn draw_path(&mut self, path: &BezPath, transform: Affine, _: &Paint<'a>, mode: &PathDrawMode) {
-        let mut bbox = transform.transform_rect_bbox(path.bounding_box());
-        if let PathDrawMode::Stroke(stroke) = mode {
-            let half = f64::from(stroke.line_width) * transform.determinant().abs().sqrt() / 2.;
-            bbox = bbox.inflate(half, half);
-        }
-        let (w, h) = (bbox.width(), bbox.height());
-        if h <= RULE && w >= 2. * RULE {
-            self.across.push(bbox);
-        } else if w <= RULE && h >= 2. * RULE {
-            self.down.push(bbox);
-        }
-    }
-
-    fn push_clip_path(&mut self, _: &ClipPath) {}
-    fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'a>>, _: BlendMode) {}
-    fn draw_image(&mut self, _: Image<'a, '_>, _: Affine) {}
-    fn pop_clip_path(&mut self) {}
-    fn pop_transparency_group(&mut self) {}
-
-    fn draw_glyph(
-        &mut self,
-        glyph: &Glyph<'a>,
-        transform: Affine,
-        glyph_transform: Affine,
-        paint: &Paint<'a>,
-        draw_mode: &GlyphDrawMode,
-    ) {
-        if matches!(draw_mode, GlyphDrawMode::Invisible) {
-            return;
-        }
-        let text = match glyph.as_unicode() {
-            Some(BfString::Char(c)) => unligate(c).map_or_else(|| c.to_string(), str::to_string),
-            Some(BfString::String(s)) => s,
-            None => return,
-        };
-        if text.trim().is_empty() {
-            return;
-        }
-        let m = transform * glyph_transform;
-        // Rotated text, as on a plot's axis, cannot be set in rows.
-        let [a, b, ..] = m.as_coeffs();
-        if a <= 0. || b.abs() > 0.1 * a {
-            return;
-        }
-        let rgb = match paint {
-            Paint::Color(c) => {
-                let [r, g, b, alpha] = c.to_rgba().to_rgba8();
-                if alpha < 128 {
-                    return;
-                }
-                [r, g, b]
-            }
-            Paint::Pattern(_) => [0, 0, 0],
-        };
-        // Outlines are in units of 1000 per em.
-        let origin = m * Point::ZERO;
-        let size = (m * Point::new(0., 1000.) - origin).hypot() as f32;
-        let bbox = match glyph {
-            Glyph::Outline(o) => m.transform_rect_bbox(o.outline().bounding_box()),
-            Glyph::Type3(_) => {
-                let (ascent, width, descent) = TYPE3;
-                let s = f64::from(size);
-                Rect::new(
-                    origin.x,
-                    origin.y - ascent * s,
-                    origin.x + width * s,
-                    origin.y + descent * s,
-                )
-            }
-        };
-        let advance = match glyph {
-            Glyph::Outline(o) => o.advance_width(),
-            Glyph::Type3(_) => None,
-        };
-        let pen = |at: f64| (m * Point::new(at, 0.)).x;
-        // A width past the outline by more than an em is in other units.
-        let (start, end) = match advance.map(|a| pen(a.into())) {
-            Some(end) if end >= origin.x && end <= bbox.x1 + f64::from(size) => (origin.x, end),
-            _ => {
-                let bearing = BEARING * f64::from(size);
-                (bbox.x0 - bearing, bbox.x1 + bearing)
-            }
-        };
-        // Filled and stroked text, as in fake bold, is drawn twice.
-        let again = |l: &Mark| l.text == text && l.x0 == bbox.x0 as f32 && l.y == origin.y as f32;
-        if self.glyphs.last().is_some_and(again) {
-            return;
-        }
-        let (math_face, heavy) = match glyph {
-            Glyph::Outline(o) => *self.fonts.entry(o.font_cache_key()).or_insert_with(|| {
-                o.font_data()
-                    .and_then(|f| f.postscript_name)
-                    .map_or((false, false), |name| {
-                        // Less a subset's tag, as `ABCDEF+`.
-                        let name = name.split_once('+').map_or(&*name, |(_, base)| base);
-                        (math_font(name), bold_font(name))
-                    })
-            }),
-            Glyph::Type3(_) => (false, false),
-        };
-        let math = math_face || text.chars().any(math_char);
-        self.glyphs.push(Mark {
-            x0: bbox.x0 as f32,
-            x1: bbox.x1 as f32,
-            start: start as f32,
-            end: end as f32,
-            y0: bbox.y0 as f32,
-            y1: bbox.y1 as f32,
-            y: origin.y as f32,
-            size,
-            text,
-            rgb,
-            back: [255; 3],
-            math,
-            heavy,
-        });
-    }
 }
 
 #[cfg(test)]

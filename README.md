@@ -89,8 +89,8 @@ set by typst, so need the `markdown` feature, as in the default build.
 | `r` | reload the file now, as after fixing what made a reload fail |
 | `ctrl-o` | pick another file to present, from the list above |
 | `s` | read the slides aloud from this one on; again to stop |
-| click | read aloud from the sentence clicked; in the grid, pick the slide clicked, and present it clicked again or double-clicked |
-| `v` | pick the voice to read in, or one of Piper's to download |
+| click | while reading aloud, read from the sentence clicked; in the grid, pick the slide clicked, and present it clicked again or double-clicked |
+| `v` | pick the voice to read in, or one of Piper's to download; `ctrl-d` twice removes one of Piper's downloaded |
 | `k` | sum up the slide in a column beside it, and mark its key sentences; again to close |
 | `K` | sum up the whole file there, and mark its key sentences wherever they are; again to close |
 | `m` | pick the model that sums up, or one of Hugging Face's to download |
@@ -205,11 +205,13 @@ better one, with no Python, Homebrew or anything else to set up:
    voice downloads, 20 to 140 MB, its progress in the status line, and
    reading goes on in it. `en_US-lessac-medium` and `en_GB-alan-medium` are
    good to start with; `high` voices are fuller, `medium` ones quicker.
-4. Press `s`, or click a sentence on the slide to read from there.
+4. Press `s`; while it reads, click a sentence on the slide to read from
+   there.
 
 The voices downloaded stay in `~/.local/share/piper`: the next time, the
 first of them by name is the voice without asking, and `v` switches among
-them, or back to a macOS voice. A macOS voice sounds better once its
+them, or back to a macOS voice. In that list, `ctrl-d` (or Delete) twice
+on one of Piper's removes it, unless it is the voice in use. A macOS voice sounds better once its
 Premium or Enhanced version is downloaded, under System Settings >
 Accessibility > Spoken Content > System voice > Manage Voices; choosing it
 there makes it the voice ohp reads in when no Piper voice is downloaded.
@@ -366,6 +368,16 @@ take over the terminal.
 If the connection is lost, the status line says so and ohp reconnects by
 itself. It never asks for a password once the slides are up, so this needs
 a key or an ssh agent.
+
+## As a library
+
+ohp is a library too: `ohp::page::pages` draws the pages of a PDF, a
+markdown, R Markdown or HTML file, or an image, as ohp typesets them,
+each as wide as asked, as letterbox shows a message:
+
+```rust
+let pages = ohp::page::pages("note.html".as_ref(), 800)?;
+```
 
 ## License
 

@@ -7,55 +7,14 @@
 //!
 //! Markdown, R Markdown and HTML are typeset into a PDF first, by typst.
 
-#[cfg(feature = "markdown")]
-mod album;
-mod app;
-mod browse;
-#[cfg(feature = "markdown")]
-mod cite;
-#[cfg(feature = "markdown")]
-mod csl;
-#[cfg(feature = "summary")]
-mod embed;
-#[cfg(any(feature = "speech", feature = "summary"))]
-mod fetch;
-#[cfg(feature = "markdown")]
-mod html;
-#[cfg(feature = "summary")]
-mod hub;
-#[cfg(feature = "markdown")]
-mod knit;
-#[cfg(feature = "markdown")]
-mod latex;
-#[cfg(feature = "summary")]
-mod llm;
-#[cfg(feature = "markdown")]
-mod markdown;
-#[cfg(feature = "markdown")]
-mod math;
-mod menu;
-#[cfg(feature = "markdown")]
-mod mermaid;
-#[cfg(feature = "summary")]
-mod models;
-#[cfg(any(feature = "markdown", feature = "speech", feature = "summary"))]
-mod process;
-mod remote;
-mod render;
-mod salient;
-mod speak;
-mod summary;
-mod text;
-#[cfg(feature = "markdown")]
-mod typeset;
-#[cfg(feature = "speech")]
-mod voices;
-
-#[cfg(test)]
-#[path = "tests/fixture.rs"]
-mod fixture;
-
 use clap::Parser;
+#[cfg(any(feature = "markdown", feature = "speech", feature = "summary"))]
+use ohp::process;
+#[cfg(feature = "markdown")]
+use ohp::typeset;
+#[cfg(feature = "speech")]
+use ohp::voices;
+use ohp::{app, browse, remote, render, shell_status, speak, summary};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -172,11 +131,6 @@ fn main() -> anyhow::Result<ExitCode> {
             Ok(ExitCode::from(shell_status(signal)))
         }
     }
-}
-
-/// The status a shell gives a process a signal ended.
-pub fn shell_status(signal: usize) -> u8 {
-    u8::try_from(128 + signal).unwrap_or(u8::MAX)
 }
 
 fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
