@@ -274,6 +274,7 @@ fn picking_sherpa_onnx_installs_it_and_opens_the_list_again() {
         name: "sherpa-onnx".into(),
         about: "install".into(),
         how: How::Install,
+        kept: None,
     };
     let mut picker = open(vec![install], None);
     picker.sherpa = Some(sherpa_release(&dir.path().join("host")));
@@ -305,6 +306,7 @@ fn ready(name: &str) -> Voice {
         name: name.into(),
         about: "installed".into(),
         how: How::Ready(format!("{name} --stdout")),
+        kept: None,
     }
 }
 
@@ -370,6 +372,7 @@ fn a_voice_to_download_says_why_it_cannot_be() {
             file: "vits-piper-en_US-amy-medium.tar.bz2".into(),
             size: 1,
         }),
+        kept: None,
     };
     let mut picker = open(vec![far], None);
     picker.piper = Err("install curl to download Piper's voices");
@@ -497,4 +500,66 @@ fn a_download_that_fails_leaves_nothing() {
     let (_, done) = download_from(&json, &format!("{root}/nowhere"), &to);
     assert!(done.is_err());
     assert_eq!(std::fs::read_dir(&to).unwrap().count(), 0);
+}
+
+#[test]
+fn ctrl_d_twice_removes_a_piper_voice_kept_but_not_the_one_in_use() {
+    let dir = tempfile::tempdir().unwrap();
+    let own = dir.path().join("vits-piper-en_US-amy-medium");
+    std::fs::create_dir(&own).unwrap();
+    for file in [
+        "en_US-amy-medium.onnx",
+        "en_US-amy-medium.onnx.json",
+        "tokens.txt",
+    ] {
+        std::fs::write(own.join(file), "").unwrap();
+    }
+    for file in ["en_GB-alan-medium.onnx", "en_GB-alan-medium.onnx.json"] {
+        std::fs::write(dir.path().join(file), "").unwrap();
+    }
+    let both = speak::Engines {
+        piper: true,
+        ..sherpa()
+    };
+    let voices = at_hand(None, Some(dir.path()), &both, &[]);
+    assert_eq!(names(&voices), ["en_GB-alan-medium", "en_US-amy-medium"]);
+    assert_eq!(
+        voices[0].kept,
+        Some(dir.path().join("en_GB-alan-medium.onnx"))
+    );
+    assert_eq!(voices[1].kept, Some(own.clone()));
+    let alan = voices[0].how.clone();
+    let How::Ready(alan) = alan else {
+        panic!("not ready")
+    };
+    let mut voices = voices;
+    voices.push(ready("espeak"));
+    let mut picker = open(voices, Some(&alan));
+    let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+    let said = |event: Option<Event>| match event {
+        Some(Event::Notice(said)) => said,
+        _ => panic!("nothing said"),
+    };
+
+    // The voice in use is not removed.
+    assert!(said(picker.key(ctrl_d)).contains("in use"));
+    assert!(said(picker.key(ctrl_d)).contains("in use"));
+    assert!(dir.path().join("en_GB-alan-medium.onnx").is_file());
+
+    // Asked once, then another key, nothing is removed.
+    press(&mut picker, &[KeyCode::Down]);
+    assert!(said(picker.key(ctrl_d)).contains("again"));
+    press(&mut picker, &[KeyCode::Up, KeyCode::Down]);
+    assert!(said(picker.key(ctrl_d)).contains("again"));
+    assert!(own.is_dir());
+    // Asked twice in a row, its directory is gone, and so is it from the list.
+    assert!(said(picker.key(KeyEvent::from(KeyCode::Delete))).contains("removed"));
+    assert!(!own.exists());
+    let list = picker.list.as_ref().unwrap();
+    assert_eq!(names(&list.voices), ["en_GB-alan-medium", "espeak"]);
+    assert_eq!(picked(&picker), Some("espeak"));
+
+    // A voice not of Piper's kept is not removed.
+    assert!(said(picker.key(ctrl_d)).contains("not one of Piper's"));
+    assert!(picker.is_open());
 }

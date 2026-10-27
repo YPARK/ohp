@@ -10,7 +10,9 @@
 //! time the list opens; so are macOS's voices, which `say` takes a moment
 //! to list. Typing narrows the list as the file picker's does. A voice not
 //! yet kept is downloaded first, its progress in the status line, and read
-//! in once it is whole.
+//! in once it is whole. Ctrl-D, or Delete, twice removes one of Piper's
+//! voices kept, unless it is the one in use; it is then offered to
+//! download again.
 //!
 //! Without sherpa-onnx or Piper, the list offers to install sherpa-onnx:
 //! its release for the machine, a program and the libraries it needs,
@@ -21,7 +23,7 @@ use crate::fetch::{fetch, part, run};
 use crate::menu::{self, Menu, dim, rank};
 use crate::speak;
 use ratatui::Frame;
-use ratatui::crossterm::event::KeyEvent;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -60,6 +62,8 @@ pub struct Voice {
     /// What it is, as its language and quality.
     about: String,
     how: How,
+    /// Where it is kept, if it is one of Piper's, to remove it.
+    kept: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -163,6 +167,7 @@ fn macos(listing: &str, language: &str, command: impl Fn(&str) -> String) -> Vec
                 name: name.into(),
                 about: format!("macOS · {locale}"),
                 how: How::Ready(command(name)),
+                kept: None,
             };
             (!name.is_empty()).then(|| (family(locale) != family(language), voice))
         })
@@ -256,14 +261,20 @@ fn at_hand(
         name: name.into(),
         about: about.into(),
         how: How::Ready(command),
+        kept: None,
     };
     let mut voices = Vec::new();
-    for model in dir.map(speak::piper_models).unwrap_or_default() {
-        if let (Some(stem), Some(command)) = (
-            model.file_stem().and_then(|s| s.to_str()),
-            engines.voice(&model),
-        ) {
-            voices.push(ready(stem, "Piper", command));
+    if let Some(dir) = dir {
+        for model in speak::piper_models(dir) {
+            if let (Some(stem), Some(command)) = (
+                model.file_stem().and_then(|s| s.to_str()),
+                engines.voice(&model),
+            ) {
+                voices.push(Voice {
+                    kept: Some(kept(dir, &model)),
+                    ..ready(stem, "Piper", command)
+                });
+            }
         }
     }
     for &(name, command) in others {
@@ -275,6 +286,31 @@ fn at_hand(
         voices.insert(0, ready("given", given, given.into()));
     }
     voices
+}
+
+/// What to remove to remove Piper's voice `model`, kept in `dir`: the
+/// directory of its own it is in, as those downloaded are, or else itself.
+fn kept(dir: &Path, model: &Path) -> PathBuf {
+    match model.parent() {
+        Some(own) if own != dir && speak::piper_models(own).len() == 1 => own.into(),
+        _ => model.into(),
+    }
+}
+
+/// Remove Piper's voice kept at `kept`, as `kept` gives it: its directory,
+/// or its model and the config beside it.
+fn remove(kept: &Path) -> std::io::Result<()> {
+    if kept.is_dir() {
+        return std::fs::remove_dir_all(kept);
+    }
+    std::fs::remove_file(kept)?;
+    std::fs::remove_file(kept.with_extension("onnx.json"))
+}
+
+/// Whether `key` asks to remove the voice picked: Ctrl-D, or Delete.
+fn removes(key: KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    key.code == KeyCode::Delete || (ctrl && key.code == KeyCode::Char('d'))
 }
 
 /// Piper's voices in sherpa-onnx's `release` of them, as GitHub's API gives
@@ -311,6 +347,7 @@ fn catalog(release: &str, language: &str) -> Result<Vec<Voice>, String> {
                     file: file.into(),
                     size,
                 }),
+                kept: None,
             };
             Some((family(locale) != mine, voice))
         })
@@ -528,6 +565,8 @@ struct List {
     current: Option<String>,
     /// Why there are no more voices to download.
     trouble: Option<String>,
+    /// The voice asked to remove, by the key just before.
+    removing: Option<usize>,
 }
 
 impl Default for Voices {
@@ -581,6 +620,7 @@ impl Voices {
                 about: "install, 20 MB, to download Piper's natural voices in many languages"
                     .into(),
                 how: How::Install,
+                kept: None,
             }]);
         }
         match &self.system {
@@ -613,8 +653,11 @@ impl Voices {
 
     pub fn key(&mut self, key: KeyEvent) -> Option<Event> {
         let list = self.list.as_mut()?;
+        // A voice is removed only if asked twice in a row.
+        let asked = list.removing.take();
         match list.menu.key(key, list.shown.len()) {
             menu::Key::Typed(_) | menu::Key::Retyped => list.refresh(),
+            menu::Key::Other if removes(key) => return self.remove(asked),
             menu::Key::Moved | menu::Key::Other => {}
             menu::Key::Quit => self.list = None,
             menu::Key::Enter => {
@@ -624,6 +667,44 @@ impl Voices {
             }
         }
         None
+    }
+
+    /// Remove the voice picked, if it is one of Piper's kept and not in
+    /// use, once `asked`, the voice the key before asked to remove, is it;
+    /// it is then listed to download again.
+    fn remove(&mut self, asked: Option<usize>) -> Option<Event> {
+        let list = self.list.as_mut()?;
+        let shown = list.menu.picked()?;
+        let at = *list.shown.get(shown)?;
+        let voice = &list.voices[at];
+        let name = voice.name.clone();
+        let Some(kept) = voice.kept.clone() else {
+            return Some(Event::Notice(format!(
+                "{name} is not one of Piper's voices kept here"
+            )));
+        };
+        if list.is_current(voice) {
+            return Some(Event::Notice(format!(
+                "{name} is in use: read in another to remove it"
+            )));
+        }
+        if asked != Some(at) {
+            list.removing = Some(at);
+            return Some(Event::Notice(format!(
+                "remove {name}? ctrl-d again to remove it"
+            )));
+        }
+        if let Err(e) = remove(&kept) {
+            return Some(Event::Notice(format!("cannot remove {name}: {e}")));
+        }
+        list.voices.remove(at);
+        list.refresh();
+        if let (Ok(_), Catalog::Fetched(more)) = (&self.piper, &self.catalog) {
+            list.add(more);
+        }
+        let last = list.shown.len().checked_sub(1);
+        list.menu.pick(last.map(|last| shown.min(last)));
+        Some(Event::Notice(format!("removed {name}")))
     }
 
     /// Read in `voice`, once it is downloaded if it must be.
@@ -758,6 +839,7 @@ impl List {
             shown: Vec::new(),
             current: current.map(String::from),
             trouble: None,
+            removing: None,
         };
         list.refresh();
         let at = (list.shown.iter()).position(|&i| list.is_current(&list.voices[i]));
@@ -841,7 +923,7 @@ impl List {
         if self.shown.is_empty() {
             notes.push(Span::styled(" no match ", dim()));
         }
-        let keys = "type to narrow · ↑/↓ move · enter read in it · esc cancel";
+        let keys = "type to narrow · ↑/↓ move · enter read in it · ^D remove · esc cancel";
         self.menu.draw(f, area, prompt, items, notes, keys);
     }
 }

@@ -1,5 +1,8 @@
 use super::*;
 use crate::fixture::{self, FRAME};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect as Area;
+use ratatui::style::{Color, Modifier};
 use std::sync::Arc;
 
 /// Page 0 of a one-page PDF drawn by `content`.
