@@ -35,7 +35,10 @@ impl App {
             MouseEventKind::ScrollUp => self.key(KeyCode::Up.into()),
             MouseEventKind::Down(MouseButton::Left) => match self.view {
                 #[cfg(feature = "sign")]
-                View::Present if self.signing.is_some() => self.sign_click(at),
+                View::Present if self.signing.is_some() => {
+                    self.sign_click(at);
+                    self.dirty = true;
+                }
                 View::Present if self.speaker.reading() => {
                     if let Some(k) = self.sentence_at(at) {
                         self.notice = None;

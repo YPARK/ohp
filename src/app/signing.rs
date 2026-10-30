@@ -56,13 +56,9 @@ pub(super) struct Field {
 }
 
 impl Field {
-    /// `text`, the cursor at its end.
-    fn new(text: &str) -> Self {
-        Field {
-            text: text.to_string(),
-            at: text.chars().count(),
-            picked: None,
-        }
+    /// `text`, all of it picked, to be typed over or kept.
+    fn offered(text: &str) -> Self {
+        Field::picking(text, 0, text.chars().count())
     }
 
     /// `text`, the chars from `from` to `to` picked.
@@ -248,11 +244,14 @@ impl App {
                 KeyCode::Esc => s.typing = None,
                 KeyCode::Tab | KeyCode::BackTab if !typing.offers.is_empty() => {
                     let n = typing.offers.len();
+                    // Begun empty, with nothing typed before: the first offer.
+                    let shown = typing.field.text == typing.offers[typing.offered];
                     typing.offered = match key.code {
+                        KeyCode::Tab if !shown => typing.offered,
                         KeyCode::Tab => (typing.offered + 1) % n,
                         _ => (typing.offered + n - 1) % n,
                     };
-                    typing.field = Field::new(&typing.offers[typing.offered]);
+                    typing.field = Field::offered(&typing.offers[typing.offered]);
                 }
                 _ => typing.field.key(key),
             }
@@ -333,6 +332,10 @@ impl App {
             Tool::Dot => What::Dot,
             Tool::Text => {
                 let mut offers = sign::typed();
+                // What was typed last, picked: typed over, or kept on ⏎.
+                let field = offers
+                    .first()
+                    .map_or_else(Field::default, |t| Field::offered(t));
                 if let Some(first) = offers.first() {
                     let initials = sign::initials(first);
                     if initials.chars().count() > 1 && !offers.contains(&initials) {
@@ -343,7 +346,7 @@ impl App {
                 s.typing = Some(Typing {
                     page,
                     at: point,
-                    field: Field::new(&offers[0]),
+                    field,
                     offers,
                     offered: 0,
                 });

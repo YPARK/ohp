@@ -87,13 +87,15 @@ fn text_is_typed_where_it_was_clicked_and_put_on_enter() {
     press(&mut app, &[KeyCode::Char('T')]);
     click(&mut app, 20, 10);
     assert!(marks(&app).is_empty(), "put only once typed");
-    // The date is offered, as nothing was typed before.
-    let typing = &app.signing.as_ref().unwrap().typing.as_ref().unwrap().field;
-    assert_eq!(typing.text, crate::sign::today());
-    // Typing is the text's, not signing's: u is a letter.
+    // Nothing typed before: begun empty, tab offering the date, picked.
+    assert_eq!(typing_text(&app), "");
+    press(&mut app, &[KeyCode::Tab]);
+    assert_eq!(typing_text(&app), crate::sign::today());
+    // Typing is the text's, not signing's: u is a letter, typed over
+    // what is offered.
     press(&mut app, &[KeyCode::Char('u')]);
-    assert!(typing_text(&app).ends_with('u'));
-    app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    assert_eq!(typing_text(&app), "u");
+    press(&mut app, &[KeyCode::Backspace]);
     for c in "Yongjin Park".chars() {
         press(&mut app, &[KeyCode::Char(c)]);
     }
