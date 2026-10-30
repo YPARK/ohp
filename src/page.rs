@@ -15,6 +15,7 @@ use std::path::Path;
 pub fn pages(path: &Path, width: u32) -> anyhow::Result<Vec<RgbaImage>> {
     let options = Options {
         knit: false,
+        screen: true,
         ..Options::default()
     };
     let deck = Deck::open_with(&[path.to_path_buf()], options)?;

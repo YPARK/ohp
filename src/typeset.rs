@@ -30,6 +30,7 @@ use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World, WorldExt};
+use typst_kit::fonts::FontStore;
 use typst_layout::PagedDocument;
 use typst_pdf::PdfOptions;
 
@@ -106,6 +107,7 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
                 source_only: &source_only,
                 latex: rendered,
                 broken: &broken,
+                screen: options.screen,
             };
             markdown::convert(&text, &setting)
         };
@@ -220,11 +222,14 @@ pub fn compile(world: &Doc) -> Result<Vec<u8>, Vec<SourceDiagnostic>> {
 
 static LIBRARY: LazyLock<LazyHash<Library>> = LazyLock::new(|| LazyHash::new(Library::default()));
 
-static FONTS: LazyLock<(LazyHash<FontBook>, Vec<Font>)> = LazyLock::new(|| {
-    let fonts: Vec<Font> = typst_assets::fonts()
-        .flat_map(|data| Font::iter(Bytes::new(data)))
-        .collect();
-    (LazyHash::new(FontBook::from_fonts(&fonts)), fonts)
+/// The fonts typst sets with: its own, and this machine's, each read only
+/// once it is first set, so a sans for pages read on a screen, and Korean,
+/// Chinese or Japanese, are set in what the system has.
+static FONTS: LazyLock<FontStore> = LazyLock::new(|| {
+    let mut fonts = FontStore::new();
+    fonts.extend(typst_kit::fonts::embedded());
+    fonts.extend(typst_kit::fonts::system());
+    fonts
 });
 
 /// One typst document, the images it shows and the formulas LaTeX rendered
@@ -273,7 +278,7 @@ impl World for Doc {
     }
 
     fn book(&self) -> &LazyHash<FontBook> {
-        &FONTS.0
+        FONTS.book()
     }
 
     fn main(&self) -> FileId {
@@ -296,7 +301,7 @@ impl World for Doc {
     }
 
     fn font(&self, index: usize) -> Option<Font> {
-        FONTS.1.get(index).cloned()
+        FONTS.font(index)
     }
 
     fn today(&self, _: Option<Duration>) -> Option<Datetime> {

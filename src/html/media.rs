@@ -24,6 +24,10 @@ impl Writer {
                 return;
             };
             path
+        } else if alt.is_empty() && remote(src) {
+            // Never fetched, and nothing to say of it: a banner, a spacer, a
+            // pixel that tells the sender it was seen.
+            return;
         } else {
             let src = src.split(['?', '#']).next().unwrap_or(src);
             clean_url(src)
@@ -107,6 +111,13 @@ pub(super) fn shows_image(el: ElementRef) -> bool {
         "img" | "object" | "embed" => image_src(el).is_some(),
         _ => false,
     }
+}
+
+/// Whether `src` is fetched from elsewhere, not a file beside the page.
+fn remote(src: &str) -> bool {
+    ["http:", "https:", "//", "cid:"]
+        .iter()
+        .any(|p| ascii_starts(src, p))
 }
 
 pub(super) fn image_src(el: ElementRef<'_>) -> Option<&str> {

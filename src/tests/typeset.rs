@@ -98,6 +98,7 @@ fn set_text(path: &Path) -> Vec<String> {
         source_only: &none,
         latex: &HashMap::new(),
         broken: &none,
+        screen: false,
     };
     let doc = markdown::convert(&text, &setting);
     let world = Doc::new(doc.source, &doc.images, &doc.files, &mut HashMap::new());

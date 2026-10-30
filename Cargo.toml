@@ -1,6 +1,6 @@
 [package]
 name = "ohp"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
@@ -51,6 +51,7 @@ markdown = [
     "dep:signal-hook",
     "dep:typst",
     "dep:typst-assets",
+    "dep:typst-kit",
     "dep:typst-layout",
     "dep:typst-pdf",
 ]
@@ -77,6 +78,7 @@ tempfile = "3.27.0"
 tokenizers = { version = "0.22.2", default-features = false, optional = true }
 typst = { version = "0.15.1", optional = true }
 typst-assets = { version = "0.15.1", features = ["fonts"], optional = true }
+typst-kit = { version = "0.15.1", default-features = false, features = ["scan-fonts", "embedded-fonts"], optional = true }
 typst-layout = { version = "0.15.1", optional = true }
 typst-pdf = { version = "0.15.1", optional = true }
 unicode-width = "0.2"

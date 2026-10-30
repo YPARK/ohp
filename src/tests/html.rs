@@ -17,6 +17,7 @@ fn setting() -> Setting<'static> {
         source_only: &NONE,
         latex: &LATEX,
         broken: &NONE,
+        screen: false,
     }
 }
 
@@ -294,4 +295,74 @@ fn image_paths(markdown: &str) -> Vec<&str> {
         rest = &rest[end + 2..];
     }
     paths
+}
+
+#[test]
+fn a_table_laid_out_for_mail_is_read_as_its_blocks() {
+    // As Outlook and newsletters lay out mail: tables in tables, a cell
+    // of paragraphs, lists and pictures, and a column alone.
+    let html = r#"
+        <table class="MsoNormalTable" border="0" width="100%"><tr><td>
+          <table><tr><td>
+            <p>Research Funding</p>
+            <ul><li>Fund A</li><li>Fund B</li></ul>
+          </td></tr></table>
+        </td></tr>
+        <tr><td><p>Second part.</p><p>Its own paragraph.</p></td></tr>
+        </table>
+        <table role="presentation"><tr><td>Left</td><td>Right</td></tr>
+        <tr><td>Under</td><td>it</td></tr></table>"#;
+    let out = md(html);
+    assert!(!out.contains('|'), "{out}");
+    assert!(out.contains("Research Funding\n\n"), "{out}");
+    assert!(out.contains("- Fund A"), "{out}");
+    assert!(
+        out.contains("Second part\\.\n\nIts own paragraph\\."),
+        "{out}"
+    );
+    assert!(out.contains("Left\n\nRight"), "{out}");
+}
+
+#[test]
+fn a_table_of_data_in_mail_is_still_a_table() {
+    let html = r#"
+        <table class="MsoTableGrid" border="1">
+          <tr><td><p>Name</p></td><td><p>Room</p></td></tr>
+          <tr><td><p>Ada</p></td><td><p>4</p></td></tr>
+        </table>"#;
+    let out = md(html);
+    assert!(out.contains("| Name | Room |"), "{out}");
+    assert!(out.contains("| Ada | 4 |"), "{out}");
+}
+
+#[test]
+fn a_picture_from_elsewhere_says_only_what_it_shows() {
+    let html = r#"
+        <p>Before.<img src="https://track.example/pixel.gif" width="1" height="1"></p>
+        <p><img src="https://cdn.example/banner.jpg"></p>
+        <p><img src="https://cdn.example/logo.png" alt="The faculty's logo"></p>"#;
+    let out = typst_of(html);
+    assert!(!out.contains("example"), "{out}");
+    assert!(out.contains("The faculty's logo"), "{out}");
+}
+
+#[test]
+fn pages_read_on_a_screen_have_slim_margins_and_no_numbers() {
+    let html = "<p>Dear all, the seminar is on Thursday.</p>";
+    let printed = typst_of(html);
+    assert!(printed.contains("numbering"), "{printed}");
+    let screen = convert(
+        &md(html),
+        &Setting {
+            screen: true,
+            ..setting()
+        },
+    )
+    .source;
+    assert!(!screen.contains("numbering"), "{screen}");
+    assert!(screen.contains("margin"), "{screen}");
+    assert!(screen.contains("justify: false"), "{screen}");
+    // In a sans, as mail is read; print keeps its serif.
+    assert!(screen.contains("\"Helvetica\""), "{screen}");
+    assert!(!printed.contains("Helvetica"), "{printed}");
 }
