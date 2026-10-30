@@ -106,6 +106,7 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
                 source_only: &source_only,
                 latex: rendered,
                 broken: &broken,
+                screen: options.screen,
             };
             markdown::convert(&text, &setting)
         };

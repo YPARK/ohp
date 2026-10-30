@@ -87,6 +87,9 @@ pub struct Setting<'a> {
     pub latex: &'a HashMap<Formula, Rendered>,
     /// Images found, by index, typst could not show.
     pub broken: &'a HashSet<usize>,
+    /// Pages to be read on a screen, as mail is: slim margins, no page
+    /// numbers, lines left ragged.
+    pub screen: bool,
 }
 
 /// Slides set on paper as wide as a beamer 16:9 frame.
@@ -343,12 +346,19 @@ impl Writer<'_, '_> {
                 "#set page(paper: {}, margin: (x: 1.6cm, y: 1.3cm))\n",
                 string(paper)
             )
+        } else if self.setting.screen {
+            format!(
+                "#set page(paper: {}, margin: (x: 1.2cm, y: 1.2cm))\n",
+                string(paper)
+            )
         } else {
             format!("#set page(paper: {}, numbering: \"1\")\n", string(paper))
         };
         self.out.push_str(&page);
         self.out.push_str(if slides {
             "#set text(size: 24pt)\n#set par(leading: 0.6em)\n"
+        } else if self.setting.screen {
+            "#set text(size: 11pt)\n#set par(justify: false)\n"
         } else {
             "#set text(size: 11pt)\n#set par(justify: true)\n"
         });

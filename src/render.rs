@@ -67,6 +67,8 @@ pub struct Options {
     pub paper: Option<String>,
     /// Run code chunks with knitr, where R is here.
     pub knit: bool,
+    /// Pages to be read on a screen: slim margins, no page numbers.
+    pub screen: bool,
     /// Set to stop typesetting under way, as a knitr run; shared by the
     /// options' clones, so by every reload of a deck.
     pub stop: Arc<AtomicBool>,
@@ -81,6 +83,7 @@ impl Default for Options {
         Options {
             paper: None,
             knit: true,
+            screen: false,
             stop: Arc::default(),
             #[cfg(feature = "markdown")]
             cache: Arc::default(),

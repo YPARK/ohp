@@ -14,6 +14,7 @@ fn setting(base: &Path) -> Setting<'_> {
         source_only: &NONE,
         latex: &NOT_RENDERED,
         broken: &NONE,
+        screen: false,
     }
 }
 
@@ -389,6 +390,7 @@ fn an_image_typst_could_not_read_is_described() {
         "![first](a.png) ![second](b.png)\n",
         &Setting {
             broken: &broken,
+            screen: false,
             ..setting(dir.path())
         },
     );
