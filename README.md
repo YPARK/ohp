@@ -29,6 +29,9 @@ builds Oniguruma's C with it; without either, nothing but Rust is compiled:
 cargo install --git https://github.com/YPARK/ohp --no-default-features --features speech
 ```
 
+Signing a PDF, the `sign` feature, as [Signing](#signing) shows, is in
+the default build, in pure Rust.
+
 Summing slides up, the `summary` feature, is in the default build too: a
 language model runs in ohp itself, with
 [candle](https://github.com/huggingface/candle), on the GPU through Metal
@@ -94,6 +97,7 @@ set by typst, so need the `markdown` feature, as in the default build.
 | `k` | sum up the slide in a column beside it, and mark its key sentences; again to close |
 | `K` | sum up the whole file there, and mark its key sentences wherever they are; again to close |
 | `m` | pick the model that sums up, or one of Hugging Face's to download |
+| `S` | sign the PDF: a signature, your name, the date, ✓ ✕ ●, put where you click, in a copy, as [Signing](#signing) shows |
 | `q` | quit |
 
 ohp takes the mouse, so selecting text in the terminal needs Shift held,
@@ -352,6 +356,50 @@ Summaries are kept, by the model and the text summed up, in
 or a file, summed up before, as one a reload leaves as it was, or a paper
 opened again, is shown at once, with no model loaded. To forget them,
 `rm -rf ~/.cache/ohp/summaries`.
+
+## Signing
+
+`S` signs the PDF presented, as Acrobat's Fill & Sign does: what is
+picked is put where you click, and the pages turn and zoom as ever, to
+put each where it goes on any of them.
+
+| Key | |
+|---|---|
+| click | put what is picked there: the signature, its left edge where clicked; text, the date, a ✓ ✕ ● |
+| `S` | put the signature (picked to begin with) |
+| `T` | type text, as your name: where it is clicked, typed, `tab` offering what you typed before, its initials and the date, `⏎` putting it |
+| `D` | put today's date |
+| `C` `X` `O` | put a ✓, a ✕, a ● |
+| `N` | pick another image of your signature |
+| `u` | take the last put back |
+| `[` `]` | make the last put smaller, or larger |
+| Shift and the arrows | move the last put |
+| `esc` | done: what to call the copy is asked, `form-signed.pdf`, the `signed` picked to type over |
+
+The signature is an image of yours, picked the first time it is put,
+from a list of images as `ctrl-o` lists files: a PNG with a clear
+background, or a photo or scan of it on paper, whose paper is made clear
+and cut away. It is kept, so, in `~/.config/ohp/signature.png`, to sign
+with next time; `$OHP_SIGNATURE` names another. What you type is kept
+beside it, to be offered again.
+
+Nothing is put in the PDF itself. As each is put, it is drawn into a copy
+beside it, shown in its place, so what you see is what is sent: the
+signature as an image, text in Helvetica, ✓ ✕ ● as lines, into the page,
+not as comments over it, so Acrobat, a browser and a printer show them
+alike, and a form flattened keeps them. The copy is the PDF's own bytes
+with an incremental update after them, as Acrobat saves, so a digital
+signature already on it stays valid, and a PDF locked only against
+changes, opened with no password, is locked again as it was. One that
+needs a password to open is not signed.
+
+The signature is a picture of yours, not a digital signature with a
+certificate, which Acrobat's Signature panel would show as valid. Text is
+set in Helvetica, which has Latin letters only.
+
+What runs ohp may name the PDF, `$OHP_AS`, as letterbox names a message's
+file, and have the copy kept said, `$OHP_SIGNED` naming a file to write
+its path in.
 
 ## Slides on another machine
 

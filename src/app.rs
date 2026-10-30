@@ -32,6 +32,9 @@
 //! turn. `K` sums up the whole file there instead, and marks its key
 //! sentences on whatever slides they are. Either again closes the column.
 //! `m` picks the model that sums up, in a list over the slides.
+//!
+//! `S` signs a PDF: each click puts a signature, text or a mark where it
+//! is, in a copy shown in place of the PDF, as `signing` has it.
 
 use crate::browse::{self, Browser};
 #[cfg(feature = "summary")]
@@ -63,6 +66,8 @@ use std::time::{Duration, Instant};
 
 mod draw;
 mod input;
+#[cfg(feature = "sign")]
+mod signing;
 
 use draw::{marked, split};
 
@@ -118,6 +123,8 @@ pub fn run(
         app.summarizer
             .set_deck(app.deck.data.clone(), app.deck.pages);
         app.run(&mut terminal)?;
+        #[cfg(feature = "sign")]
+        app.quit_signing();
         app.clear_images()
     })();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
@@ -243,6 +250,9 @@ enum Then {
     Reload,
     /// Files picked while another was being read.
     Open(Vec<PathBuf>),
+    /// The copy being signed, written again while it was being read.
+    #[cfg(feature = "sign")]
+    Signed,
 }
 
 struct App {
@@ -284,6 +294,11 @@ struct App {
     opening: Option<Vec<PathBuf>>,
     /// What to read once the read under way is done.
     then: Option<Then>,
+    /// What to say once the read under way is done, in place of `reloaded`.
+    read_said: Option<String>,
+    /// The PDF being signed, while it is.
+    #[cfg(feature = "sign")]
+    signing: Option<Box<signing::Signing>>,
     /// How files picked with Ctrl-O are read.
     local: Options,
     /// The list another file is picked from, open over the slides.
@@ -346,6 +361,9 @@ impl App {
             loading: None,
             opening: None,
             then: None,
+            read_said: None,
+            #[cfg(feature = "sign")]
+            signing: None,
             browser: None,
             signaled,
             notice: None,
@@ -462,6 +480,14 @@ impl App {
         }
     }
 
+    /// Whether the PDF presented is being signed.
+    fn signing(&self) -> bool {
+        #[cfg(feature = "sign")]
+        return self.signing.is_some();
+        #[cfg(not(feature = "sign"))]
+        false
+    }
+
     /// Read the deck again on a thread of its own.
     fn reload(&mut self) {
         if self.loading.is_some() {
@@ -569,7 +595,9 @@ impl App {
                     // A reload asked for was of the file this replaces.
                     self.then = self.then.take().filter(|then| *then != Then::Reload);
                     self.notice = deck.note.clone();
-                } else {
+                } else if let Some(said) = self.read_said.take() {
+                    self.notice = Some(said);
+                } else if !self.signing() {
                     self.notice = Some(match &deck.note {
                         Some(note) => format!("reloaded; {note}"),
                         None => "reloaded".into(),
@@ -579,6 +607,12 @@ impl App {
                 self.summarizer.set_deck(deck.data.clone(), deck.pages);
                 self.deck = deck;
                 self.renderer = renderer;
+                // The copy being signed, read as it was written: not a
+                // change on disk to read again.
+                if self.signing() {
+                    self.stamp = self.deck.stamps();
+                    self.settling = None;
+                }
                 self.requested.clear();
                 self.stale = std::mem::take(&mut self.slides);
                 // The slide being read is read again from what it says now.
@@ -597,6 +631,8 @@ impl App {
         match self.then.take() {
             Some(Then::Open(path)) => self.open(path),
             Some(Then::Reload) => self.reload(),
+            #[cfg(feature = "sign")]
+            Some(Then::Signed) => self.show_copy(),
             None => {}
         }
     }

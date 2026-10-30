@@ -34,6 +34,8 @@ impl App {
             MouseEventKind::ScrollDown => self.key(KeyCode::Down.into()),
             MouseEventKind::ScrollUp => self.key(KeyCode::Up.into()),
             MouseEventKind::Down(MouseButton::Left) => match self.view {
+                #[cfg(feature = "sign")]
+                View::Present if self.signing.is_some() => self.sign_click(at),
                 View::Present if self.speaker.reading() => {
                     if let Some(k) = self.sentence_at(at) {
                         self.notice = None;
@@ -96,11 +98,20 @@ impl App {
         if let Some(browser) = &mut self.browser {
             match browser.key(key) {
                 browse::Outcome::Stay => {}
+                #[cfg(feature = "sign")]
+                browse::Outcome::Open(paths) if self.picking_signature() => {
+                    self.browser = None;
+                    self.picked_signature(Some(paths));
+                }
                 browse::Outcome::Open(paths) => {
                     self.browser = None;
                     self.open(self.added_first(paths));
                 }
-                browse::Outcome::Quit => self.browser = None,
+                browse::Outcome::Quit => {
+                    self.browser = None;
+                    #[cfg(feature = "sign")]
+                    self.picked_signature(None);
+                }
             }
             self.dirty = true;
             return;
@@ -118,6 +129,11 @@ impl App {
             if let Some(weights) = self.models.key(key) {
                 self.summarize_with(weights);
             }
+            self.dirty = true;
+            return;
+        }
+        #[cfg(feature = "sign")]
+        if self.sign_key(key) {
             self.dirty = true;
             return;
         }
@@ -161,6 +177,12 @@ impl App {
             KeyCode::Char('k') => self.summarize(Panel::Slide),
             KeyCode::Char('K') => self.summarize(Panel::Whole),
             KeyCode::Char('m') => self.choose_model(),
+            #[cfg(feature = "sign")]
+            KeyCode::Char('S') => self.sign(),
+            #[cfg(not(feature = "sign"))]
+            KeyCode::Char('S') => {
+                self.notice = Some("ohp was built without signing: --features sign".into())
+            }
             _ => return,
         }
         self.dirty = true;
