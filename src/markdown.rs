@@ -358,7 +358,13 @@ impl Writer<'_, '_> {
         self.out.push_str(if slides {
             "#set text(size: 24pt)\n#set par(leading: 0.6em)\n"
         } else if self.setting.screen {
-            "#set text(size: 11pt)\n#set par(justify: false)\n"
+            // A sans, as mail is read on a screen, from those the system
+            // has, Korean, Japanese and Chinese in one too; typst's own
+            // serif if it has none.
+            "#set text(size: 11pt, font: (\"Helvetica Neue\", \"Helvetica\", \"Arial\", \
+             \"Noto Sans\", \"DejaVu Sans\", \"Apple SD Gothic Neo\", \"Hiragino Sans\", \
+             \"PingFang SC\", \"Noto Sans CJK KR\", \"Malgun Gothic\", \"Libertinus Serif\"))\n\
+             #set par(justify: false)\n"
         } else {
             "#set text(size: 11pt)\n#set par(justify: true)\n"
         });

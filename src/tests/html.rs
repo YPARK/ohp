@@ -362,4 +362,7 @@ fn pages_read_on_a_screen_have_slim_margins_and_no_numbers() {
     assert!(!screen.contains("numbering"), "{screen}");
     assert!(screen.contains("margin"), "{screen}");
     assert!(screen.contains("justify: false"), "{screen}");
+    // In a sans, as mail is read; print keeps its serif.
+    assert!(screen.contains("\"Helvetica\""), "{screen}");
+    assert!(!printed.contains("Helvetica"), "{printed}");
 }
