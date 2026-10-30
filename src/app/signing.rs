@@ -435,6 +435,11 @@ impl App {
             return;
         }
         self.notice = Some(format!("{} put · u takes it back", s.marks.len()));
+        // Written here, and read next: not a change on disk to watch settle.
+        if self.deck.paths == [s.copy.clone()] {
+            self.stamp = self.deck.stamps();
+            self.settling = None;
+        }
         if self.loading.is_some() {
             self.then = Some(Then::Signed);
         } else {

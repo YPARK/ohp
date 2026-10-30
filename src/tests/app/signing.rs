@@ -60,6 +60,11 @@ fn a_click_puts_the_signature_in_a_copy_shown_in_place() {
     // Read as it was written: no change on disk to read again.
     watch(&mut app);
     assert!(app.loading.is_none() && app.settling.is_none());
+    // Nor is the next written, while it is read.
+    click(&mut app, 30, 10);
+    due(&mut app);
+    app.watch();
+    assert_eq!(app.notice.as_deref(), Some("2 put · u takes it back"));
 }
 
 #[test]
