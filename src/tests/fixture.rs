@@ -157,23 +157,44 @@ fn running(command: &str) -> bool {
         .is_ok_and(|o| !o.stdout.is_empty())
 }
 
+/// A script named `name` in `dir`, saying `body`, that can be run, written by `sh`
+/// rather than here. While another test's thread is between forking a
+/// child and that child running its program, the child holds every file
+/// this process has open; a script written here could be open for writing
+/// in it still when run, and Linux refuses to run that: "Text file busy".
+#[cfg(unix)]
+pub fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let path = dir.join(name);
+    let mut sh = Command::new("sh")
+        .args(["-c", r#"cat > "$1" && chmod -- 755 "$1""#, "sh"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Failing, sh may close its input first: what it says is what counts.
+    let _ = sh.stdin.take().unwrap().write_all(body.as_bytes());
+    assert!(sh.wait().unwrap().success(), "writing {}", path.display());
+    path
+}
+
 /// A fake `lp` in `dir` that writes each argument it is given, a line
 /// each, to `dir/args`, what it reads to `dir/printed.pdf`, and says what
 /// CUPS's says.
 #[cfg(unix)]
 pub fn fake_lp(dir: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let lp = dir.join("lp");
     // Its folder found from where it is, so no path is written into it to
     // be read by the shell; its arguments written by printf, which, unlike
     // dash's echo, takes none of them for its own.
-    let script = r#"#!/bin/sh
+    script(
+        dir,
+        "lp",
+        r#"#!/bin/sh
 d=$(dirname "$0")
 printf '%s\n' "$@" >> "$d/args"
 cat > "$d/printed.pdf"
 echo 'request id is Office-7 (1 file(s))'
-"#;
-    std::fs::write(&lp, script).unwrap();
-    std::fs::set_permissions(&lp, std::fs::Permissions::from_mode(0o755)).unwrap();
-    lp
+"#,
+    )
 }

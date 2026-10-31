@@ -1,5 +1,5 @@
 use super::*;
-use crate::fixture::fake_lp;
+use crate::fixture::{fake_lp, script};
 
 /// The pages `text` names, as CUPS is sent them.
 fn said(text: &str, current: usize, total: usize) -> Result<Option<String>, String> {
@@ -10,7 +10,6 @@ fn said(text: &str, current: usize, total: usize) -> Result<Option<String>, Stri
 fn ranges(text: &str, total: usize) -> Ranges {
     pages(text, 0, total).unwrap().unwrap()
 }
-use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn pages_are_read_as_cups_takes_them() {
@@ -129,13 +128,11 @@ fn with_no_lp_the_next_is_tried_and_with_none_it_is_said() {
 #[test]
 fn a_refusal_from_lp_is_said() {
     let dir = tempfile::tempdir().unwrap();
-    let lp = dir.path().join("lp");
-    std::fs::write(
-        &lp,
+    let lp = script(
+        dir.path(),
+        "lp",
         "#!/bin/sh\necho 'lp: The printer or class does not exist.' >&2\nexit 1\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&lp, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let err = print_with(&[lp.as_os_str()], b"%PDF", &Job::new("a.pdf")).unwrap_err();
     assert!(format!("{err:#}").contains("does not exist"), "{err:#}");
 }
