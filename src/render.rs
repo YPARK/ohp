@@ -21,7 +21,7 @@ use ratatui_image::Resize;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::Protocol;
 use ratatui_image::protocol::halfblocks::Halfblocks;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -343,23 +343,38 @@ pub struct Found {
     pub current: Option<u16>,
 }
 
-/// The queries searched for, each once, named by where it is: a job, which
-/// is copied, names its query so.
-static QUERIES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// The queries searched for, each once, named by where it is in the list,
+/// and found in the map by what it is: a job, which is copied, names its
+/// query so.
+static QUERIES: std::sync::LazyLock<std::sync::Mutex<Queries>> =
+    std::sync::LazyLock::new(Default::default);
+
+#[derive(Default)]
+struct Queries {
+    all: Vec<String>,
+    named: HashMap<String, u32>,
+}
 
 /// The name of `query`, for a job to light what is found of it.
 pub fn query_id(query: &str) -> u32 {
-    let mut all = QUERIES.lock().expect("queries");
-    let at = all.iter().position(|q| q == query).unwrap_or_else(|| {
-        all.push(query.to_string());
-        all.len() - 1
-    });
-    u32::try_from(at).unwrap_or(u32::MAX)
+    let mut queries = QUERIES.lock().expect("queries");
+    if let Some(&id) = queries.named.get(query) {
+        return id;
+    }
+    let id = u32::try_from(queries.all.len()).unwrap_or(u32::MAX);
+    queries.all.push(query.to_string());
+    queries.named.insert(query.to_string(), id);
+    id
 }
 
 /// The query `id` names.
 fn query(id: u32) -> Option<String> {
-    QUERIES.lock().ok()?.get(usize::try_from(id).ok()?).cloned()
+    QUERIES
+        .lock()
+        .ok()?
+        .all
+        .get(usize::try_from(id).ok()?)
+        .cloned()
 }
 
 /// What `found` lights on `page`: the place gone to, and the others.

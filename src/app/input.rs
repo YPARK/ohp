@@ -162,20 +162,27 @@ impl App {
         if key.page != page {
             return None;
         }
-        let cell = |p: f32, size: f32, pan: u16, from: u16, to: u16| {
-            let c = (p * scale / size).floor() - f32::from(pan) + f32::from(from);
-            c.clamp(f32::from(from), f32::from(to)) as u16
+        let cell = |p: f32, size: f32, pan: u16, from: u16| {
+            (p * scale / size).floor() - f32::from(pan) + f32::from(from)
         };
-        let (left, right) = (area.x, area.right().saturating_sub(1));
-        let (top, bottom) = (area.y, area.bottom().saturating_sub(1));
+        // The box in cells, then as much of it as the area shows.
         let (a, b) = (
-            cell(x0, fw, key.zoom.x, left, right),
-            cell(x1, fw, key.zoom.x, left, right),
+            cell(x0, fw, key.zoom.x, area.x),
+            cell(x1, fw, key.zoom.x, area.x),
         );
         let (c, d) = (
-            cell(y0, fh, key.zoom.y, top, bottom),
-            cell(y1, fh, key.zoom.y, top, bottom),
+            cell(y0, fh, key.zoom.y, area.y),
+            cell(y1, fh, key.zoom.y, area.y),
         );
+        let (right, bottom) = (f32::from(area.right()), f32::from(area.bottom()));
+        if b < f32::from(area.x) || a >= right || d < f32::from(area.y) || c >= bottom {
+            return None;
+        }
+        let (a, c) = (
+            a.max(f32::from(area.x)) as u16,
+            c.max(f32::from(area.y)) as u16,
+        );
+        let (b, d) = (b.min(right - 1.) as u16, d.min(bottom - 1.) as u16);
         (b >= a && d >= c).then(|| Rect::new(a, c, b - a + 1, d - c + 1))
     }
 

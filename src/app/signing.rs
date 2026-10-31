@@ -151,6 +151,12 @@ impl App {
 
     /// Begin signing the PDF presented.
     pub(super) fn sign(&mut self) {
+        // Begun again on the copy, what is put could no longer be moved or
+        // taken back.
+        if self.signing.is_some() {
+            self.notice = Some("annotating: enter when done".into());
+            return;
+        }
         if !render::pdf(&self.deck.paths) || !self.links.is_empty() {
             self.notice = Some("only a PDF is annotated: A on one".into());
             return;
@@ -341,9 +347,6 @@ impl App {
             .and_then(|s| s.wheeled)
             .is_some_and(|at| now || at.elapsed() >= WHEEL_REST);
         if due {
-            if let Some(s) = &mut self.signing {
-                s.wheeled = None;
-            }
             self.write_copy();
         }
     }
@@ -587,25 +590,48 @@ impl App {
     /// Write the copy with all that is put, and show it, saying `said`, else
     /// how many are put.
     fn write_copy_saying(&mut self, said: Option<String>) {
-        let Some(s) = &self.signing else {
-            return;
-        };
-        sign::keep_sizes(s.kept_in.as_deref(), &s.sizes);
-        let written = sign::stamp(&s.original, &s.marks, s.signature.as_ref())
-            .and_then(|pdf| Ok(sign::write(&s.copy, &pdf)?));
-        if let Err(e) = written {
+        if let Err(e) = self.write_stamped() {
             self.notice = Some(format!("cannot sign it: {e:#}"));
             return;
         }
+        let Some(s) = &self.signing else {
+            return;
+        };
         // Read in place of what is shown, the page and zoom kept.
         let said = said.unwrap_or_else(|| "click it to move or size it · u takes it back".into());
         self.notice = Some(said.clone());
         self.read(vec![s.copy.clone()], self.deck.options.clone(), Some(said));
     }
 
+    /// The copy written with all that is put, and the sizes kept for next
+    /// time; the wheel's sizing written with it.
+    fn write_stamped(&mut self) -> anyhow::Result<()> {
+        let Some(s) = &mut self.signing else {
+            return Ok(());
+        };
+        sign::keep_sizes(s.kept_in.as_deref(), &s.sizes);
+        let pdf = sign::stamp(&s.original, &s.marks, s.signature.as_ref())?;
+        sign::write(&s.copy, &pdf)?;
+        s.wheeled = None;
+        Ok(())
+    }
+
+    /// The PDF as annotated now: the original with all that is put, though
+    /// the copy last written is still being read.
+    pub(super) fn annotated(&self) -> Option<Vec<u8>> {
+        let s = self.signing.as_ref()?;
+        sign::stamp(&s.original, &s.marks, s.signature.as_ref()).ok()
+    }
+
     /// Done signing: the copy under the name typed, and said where it is.
     fn finish(&mut self) {
-        self.settle_wheel(true);
+        // Sized by the wheel and not yet written: written here, and read
+        // once named, not before, as it is renamed at once.
+        let wheeled = self.signing.as_ref().is_some_and(|s| s.wheeled.is_some());
+        if wheeled && let Err(e) = self.write_stamped() {
+            self.notice = Some(format!("cannot sign it: {e:#}"));
+            return;
+        }
         let Some(mut s) = self.signing.take() else {
             return;
         };
@@ -630,7 +656,7 @@ impl App {
         report(&kept);
         let said = format!("signed: {}", kept.display());
         self.notice = Some(said.clone());
-        if kept != s.copy {
+        if kept != s.copy || wheeled {
             self.read(vec![kept], self.deck.options.clone(), Some(said));
         }
     }

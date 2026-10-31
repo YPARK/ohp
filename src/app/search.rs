@@ -9,11 +9,10 @@
 //! again. Any other key stays there and does its own.
 
 use super::field::Field;
-use super::{App, View};
+use super::{App, View, background};
 use crate::render::{self, Found, Zoom};
 use crate::text;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::sync::mpsc::channel;
 
 /// A search under way.
 pub(super) struct Search {
@@ -178,18 +177,29 @@ impl App {
         if self.texts.is_some() || self.reading.is_some() {
             return;
         }
-        let (tx, rx) = channel();
         let (data, pages) = (self.deck.data.clone(), self.deck.pages);
-        std::thread::spawn(move || {
+        self.reading = Some(background(move || {
             let all: Vec<usize> = (0..pages).collect();
             let texts = text::of_each(data, &all).into_iter();
-            let _ = tx.send(
-                texts
-                    .map(|t| t.map(|t| t.searchable()).unwrap_or_default())
-                    .collect(),
-            );
-        });
-        self.reading = Some(rx);
+            texts
+                .map(|t| t.map(|t| t.searchable()).unwrap_or_default())
+                .collect()
+        }));
+    }
+
+    /// The deck read again: its text read again to search, and a search
+    /// under way searched for in it once read, within its slides.
+    pub(super) fn searched_anew(&mut self) {
+        (self.texts, self.reading) = (None, None);
+        let last = self.deck.pages.saturating_sub(1);
+        let Some(s) = &mut self.search else {
+            return;
+        };
+        s.from.0 = s.from.0.min(last);
+        s.at = None;
+        s.counts.clear();
+        s.wrapped = false;
+        self.read_slides();
     }
 
     /// The slides' text, once read, taken in, and what is typed searched

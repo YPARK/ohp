@@ -225,10 +225,15 @@ fn p_while_signing_prints_the_copy_with_what_is_put() {
     press(&mut app, &[KeyCode::Char('P')]);
     let p = app.printing.as_mut().expect("the print line open");
     p.lookup = None;
-    p.printers.clear();
+    p.printers = crate::print::Printers::default();
     p.programs = vec![crate::fixture::fake_lp(dir.path()).into()];
+    // As if the copy last written were not yet read again.
+    let original = std::fs::read(dir.path().join("deck.pdf")).unwrap();
+    app.deck.data = Arc::new(original.clone());
     press(&mut app, &[KeyCode::Enter]);
+    super::printing::sent(&mut app);
     let printed = std::fs::read(dir.path().join("printed.pdf")).unwrap();
+    assert_ne!(printed, original, "printed as annotated, not as last read");
     assert_eq!(
         printed,
         std::fs::read(dir.path().join("deck-signed.pdf")).unwrap()
@@ -400,4 +405,56 @@ fn a_mark_a_cell_tall_is_outlined_as_it_is_dragged() {
     app.drawn.set(Some((app.job(app.presented()), PAGE)));
     // Two points square: within one cell each way.
     assert!(app.cells_of(0, [100., 100., 102., 102.]).is_some());
+}
+
+#[test]
+fn a_again_while_annotating_keeps_what_is_put() {
+    let (dir, mut app) = signing();
+    click(&mut app, 20, 10);
+    press(&mut app, &[KeyCode::Char('A')]);
+    let s = app.signing.as_ref().unwrap();
+    assert_eq!(s.marks.len(), 1, "still the one put, to move or take back");
+    assert_eq!(s.copy, dir.path().join("deck-signed.pdf"));
+}
+
+#[test]
+fn a_box_off_what_is_shown_is_not_outlined() {
+    let (_dir, app) = signing();
+    app.drawn.set(Some((app.job(app.presented()), PAGE)));
+    assert!(app.cells_of(0, [-50., 10., -20., 20.]).is_none());
+    assert!(app.cells_of(0, [100., 2000., 120., 2010.]).is_none());
+}
+
+#[test]
+fn done_just_after_the_wheel_keeps_the_copy_as_sized() {
+    let (dir, mut app) = signing();
+    click(&mut app, 20, 10);
+    mouse(&mut app, MouseEventKind::ScrollUp, 22, 10);
+    let s = app.signing.as_ref().unwrap();
+    let want = crate::sign::stamp(&s.original, &s.marks, s.signature.as_ref()).unwrap();
+    press(&mut app, &[KeyCode::Enter, KeyCode::Enter]);
+    finish(&mut app);
+    let kept = dir.path().join("deck-signed.pdf");
+    assert_eq!(std::fs::read(&kept).unwrap(), want);
+    // Shown as written, and its size kept for next time.
+    assert_eq!(*app.deck.data, want);
+    let sizes = crate::sign::sizes(Some(&dir.path().join("kept")));
+    assert!(sizes.of(crate::sign::Kind::Signature) > 1.);
+    assert!(
+        app.notice.as_deref().unwrap_or("").starts_with("signed:"),
+        "{:?}",
+        app.notice
+    );
+}
+
+#[test]
+fn another_file_opened_while_annotating_ends_annotating() {
+    let (dir, mut app) = signing();
+    click(&mut app, 20, 10);
+    std::fs::create_dir(dir.path().join("other")).unwrap();
+    let other = fixture::write_pdf(&dir.path().join("other"), &fixture::pdf(2));
+    app.open(vec![other]);
+    assert!(app.signing.is_none());
+    finish(&mut app);
+    assert_eq!(app.deck.pages, 2);
 }

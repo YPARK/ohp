@@ -52,6 +52,9 @@ pub struct Job {
     pub pages: Option<String>,
     pub sides: Sides,
     pub scale: Scale,
+    /// Its pages are wider than tall, as slides: printed across the sheet,
+    /// so turned on its short edge, two-sided.
+    pub wide: bool,
     /// What the printer's queue calls it.
     pub title: String,
 }
@@ -65,6 +68,7 @@ impl Job {
             pages: None,
             sides: Sides::Printer,
             scale: Scale::Auto,
+            wide: false,
             title: title.to_string(),
         }
     }
@@ -73,14 +77,15 @@ impl Job {
 /// The pages `text` names, `current` the page shown, from 0, of `total`,
 /// as CUPS reads them: `None` for all, as `all` or nothing; `this` or `.`
 /// for the page shown; else pages and ranges, `3-7, 9`, a range open at
-/// either end running to the first or last page.
-pub fn pages(text: &str, current: usize, total: usize) -> Result<Option<String>, String> {
+/// either end running to the first or last page, put in order and those
+/// that overlap or meet made one.
+pub fn pages(text: &str, current: usize, total: usize) -> Result<Option<Ranges>, String> {
     let text = text.trim();
     if text.is_empty() || text.eq_ignore_ascii_case("all") {
         return Ok(None);
     }
     if text == "." || text.eq_ignore_ascii_case("this") {
-        return Ok(Some((current + 1).to_string()));
+        return Ok(Some(Ranges(vec![(current + 1, current + 1)])));
     }
     let page = |s: &str, or: usize| -> Result<usize, String> {
         let s = s.trim();
@@ -93,7 +98,7 @@ pub fn pages(text: &str, current: usize, total: usize) -> Result<Option<String>,
             Err(_) => Err(format!("{s} is not a page: as 3-7, 9, or all")),
         }
     };
-    let mut ranges = Vec::new();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
     for part in text.split(',') {
         if part.trim().is_empty() {
             return Err(format!("{text} is not pages: as 3-7, 9, or all"));
@@ -108,18 +113,57 @@ pub fn pages(text: &str, current: usize, total: usize) -> Result<Option<String>,
         if from > to {
             return Err(format!("{} runs backwards", part.trim()));
         }
-        ranges.push(match from == to {
-            true => from.to_string(),
-            false => format!("{from}-{to}"),
-        });
+        ranges.push((from, to));
     }
-    Ok(Some(ranges.join(",")))
+    // In order, those that overlap or meet made one: CUPS takes no other.
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (from, to) in ranges {
+        match merged.last_mut() {
+            Some(last) if from <= last.1 + 1 => last.1 = last.1.max(to),
+            _ => merged.push((from, to)),
+        }
+    }
+    Ok(Some(Ranges(merged)))
+}
+
+/// Pages picked, as ranges of them from 1, each `(first, last)`, in order,
+/// none overlapping or meeting another: as CUPS takes them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ranges(Vec<(usize, usize)>);
+
+impl Ranges {
+    /// The pages, from 0.
+    pub fn pages(&self) -> impl Iterator<Item = usize> + '_ {
+        self.0.iter().flat_map(|&(from, to)| from - 1..to)
+    }
+}
+
+/// As CUPS's `page-ranges` reads them: `3-7,9`.
+impl std::fmt::Display for Ranges {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let each: Vec<String> = (self.0.iter())
+            .map(|&(from, to)| match from == to {
+                true => from.to_string(),
+                false => format!("{from}-{to}"),
+            })
+            .collect();
+        f.write_str(&each.join(","))
+    }
+}
+
+/// The printers CUPS lists, and whether the first is its default: it
+/// names none, else.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Printers {
+    pub names: Vec<String>,
+    pub default: bool,
 }
 
 /// The printers: the queues `lpstat -p -d` lists, `queues`, the default
 /// it names first; then those `lpstat -e` lists, `found`, with no queue,
 /// as a printer found on the network.
-pub fn destinations(queues: &str, found: &str) -> Vec<String> {
+pub fn destinations(queues: &str, found: &str) -> Printers {
     let mut all: Vec<String> = queues
         .lines()
         .filter_map(|l| l.strip_prefix("printer "))
@@ -130,7 +174,8 @@ pub fn destinations(queues: &str, found: &str) -> Vec<String> {
         .lines()
         .find_map(|l| l.strip_prefix("system default destination:"))
         .map(str::trim);
-    if let Some(i) = default.and_then(|d| all.iter().position(|p| p == d)) {
+    let named = default.and_then(|d| all.iter().position(|p| p == d));
+    if let Some(i) = named {
         let first = all.remove(i);
         all.insert(0, first);
     }
@@ -139,11 +184,14 @@ pub fn destinations(queues: &str, found: &str) -> Vec<String> {
             all.push(name.to_string());
         }
     }
-    all
+    Printers {
+        names: all,
+        default: named.is_some(),
+    }
 }
 
 /// The printers here, the default first; none where CUPS is not.
-pub fn printers() -> Vec<String> {
+pub fn printers() -> Printers {
     let lpstat = |flags: &[&str]| {
         // In English, whatever the language here: macOS's heeds the
         // locale only with SOFTWARE set.
@@ -201,6 +249,7 @@ pub fn args(job: &Job, flags: &Flags) -> Vec<OsString> {
     match job.sides {
         Sides::Printer => {}
         Sides::One => push("-o", "sides=one-sided"),
+        Sides::Two if job.wide => push("-o", "sides=two-sided-short-edge"),
         Sides::Two => push("-o", "sides=two-sided-long-edge"),
     }
     match job.scale {
@@ -212,26 +261,21 @@ pub fn args(job: &Job, flags: &Flags) -> Vec<OsString> {
     args
 }
 
-/// The pages `pages`, as `pages` gives them, of `total`, from 0, as CUPS
-/// prints them: in the document's order, each once; all if `None`.
-pub fn picked(pages: Option<&str>, total: usize) -> Vec<usize> {
-    let Some(pages) = pages else {
-        return (0..total).collect();
-    };
-    let mut all: Vec<usize> = Vec::new();
-    for part in pages.split(',') {
-        let n = |s: &str| s.trim().parse::<usize>().ok();
-        let (from, to) = match part.split_once('-') {
-            Some((a, b)) => (n(a), n(b)),
-            None => (n(part), n(part)),
-        };
-        if let (Some(from), Some(to)) = (from, to) {
-            all.extend((from..=to.min(total)).filter(|&p| p >= 1).map(|p| p - 1));
-        }
+/// Whether the pages `pages` picks, of these sizes, are, most of them,
+/// wider than tall: all if `None`.
+pub fn wide(sizes: &[(f32, f32)], pages: Option<&Ranges>) -> bool {
+    let picked = picked(pages, sizes.len());
+    let wide = picked.iter().filter(|&&i| sizes[i].0 > sizes[i].1).count();
+    2 * wide > picked.len()
+}
+
+/// The pages `pages` picks, of `total`, from 0, as CUPS prints them: in
+/// the document's order, each once; all if `None`.
+pub fn picked(pages: Option<&Ranges>, total: usize) -> Vec<usize> {
+    match pages {
+        Some(pages) => pages.pages().filter(|&p| p < total).collect(),
+        None => (0..total).collect(),
     }
-    all.sort_unstable();
-    all.dedup();
-    all
 }
 
 /// The size of the paper CUPS names `name`, in points, wide by tall: as

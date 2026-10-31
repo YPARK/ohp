@@ -98,7 +98,6 @@ pub fn next(renderer: &Renderer) -> Done {
         .expect("a render")
 }
 
-#[cfg(feature = "markdown")]
 /// `text` written to `name` in `dir`.
 pub fn write_text(dir: &Path, name: &str, text: &str) -> PathBuf {
     let path = dir.join(name);

@@ -11,9 +11,22 @@ fn printing() -> (tempfile::TempDir, App) {
     let p = app.printing.as_mut().expect("the print line open");
     // Not what CUPS here says, as it says it.
     p.lookup = None;
-    p.printers = vec!["Office".into(), "Label".into()];
+    p.printers = crate::print::Printers {
+        names: vec!["Office".into(), "Label".into()],
+        default: true,
+    };
     p.programs = vec![fixture::fake_lp(dir.path()).into()];
     (dir, app)
+}
+
+/// Wait for what was sent to the printer to be taken.
+pub(super) fn sent(app: &mut App) {
+    let start = Instant::now();
+    while !app.sending.is_empty() {
+        assert!(start.elapsed() < Duration::from_secs(30), "lp did not end");
+        std::thread::sleep(Duration::from_millis(5));
+        app.poll_printing();
+    }
 }
 
 fn args(dir: &tempfile::TempDir) -> String {
@@ -24,6 +37,7 @@ fn args(dir: &tempfile::TempDir) -> String {
 fn enter_prints_what_is_shown_on_the_default_printer() {
     let (dir, mut app) = printing();
     press(&mut app, &[KeyCode::Enter]);
+    sent(&mut app);
     assert!(app.printing.is_none());
     assert_eq!(app.notice.as_deref(), Some("sent to the printer: Office-7"));
     let printed = std::fs::read(dir.path().join("printed.pdf")).unwrap();
@@ -60,12 +74,13 @@ fn pages_copies_sides_and_printer_are_picked_in_the_form() {
     assert_eq!(p.value(Row::Sides), "two-sided");
     assert_eq!(p.value(Row::Printer), "Label");
     press(&mut app, &[KeyCode::Enter]);
+    sent(&mut app);
     let args = args(&dir);
     for want in [
         "-d\nLabel\n",
         "-n\n3\n",
         "page-ranges=2\n",
-        "sides=two-sided-long-edge",
+        "sides=two-sided-short-edge",
     ] {
         assert!(args.contains(want), "{want} not in {args}");
     }
@@ -123,13 +138,14 @@ fn esc_prints_nothing() {
 #[test]
 fn with_no_printer_listed_lp_s_default_is_used() {
     let (dir, mut app) = printing();
-    app.printing.as_mut().unwrap().printers.clear();
+    app.printing.as_mut().unwrap().printers = crate::print::Printers::default();
     let p = app.printing.as_ref().unwrap();
     assert_eq!(
         p.value(crate::app::printing::Row::Printer),
         "the default printer"
     );
     press(&mut app, &[KeyCode::Enter]);
+    sent(&mut app);
     assert!(!args(&dir).contains("-d\n"), "{}", args(&dir));
 }
 
@@ -214,17 +230,58 @@ fn printers_and_paper_found_off_the_screen_s_thread_are_taken_in() {
         app.printing.as_ref().unwrap().value(Row::Printer),
         "Office (default)"
     );
-    app.found_printers();
+    app.poll_printing();
     // Nothing said yet: as it was.
     assert!(app.printing.as_ref().unwrap().lookup.is_some());
     tx.send(crate::app::printing::Lookup {
-        printers: Some(vec!["Lab".into()]),
+        printers: Some(crate::print::Printers {
+            names: vec!["Lab".into()],
+            default: true,
+        }),
         paper: Some(("A4".into(), (595., 842.))),
     })
     .unwrap();
-    app.found_printers();
+    app.poll_printing();
     let p = app.printing.as_ref().unwrap();
     assert!(p.lookup.is_none());
     assert_eq!(p.value(Row::Printer), "Lab (default)");
     assert_eq!(p.paper.as_ref().unwrap().0, "A4");
+}
+
+#[test]
+fn the_first_printer_is_the_default_only_when_cups_says() {
+    let (_dir, mut app) = printing();
+    let p = app.printing.as_mut().unwrap();
+    p.printers.default = false;
+    assert_eq!(p.value(crate::app::printing::Row::Printer), "Office");
+}
+
+#[test]
+fn a_second_print_while_the_first_is_sent_loses_neither() {
+    let (dir, mut app) = printing();
+    press(&mut app, &[KeyCode::Enter, KeyCode::Char('P')]);
+    let p = app.printing.as_mut().unwrap();
+    p.lookup = None;
+    p.programs = vec![fixture::fake_lp(dir.path()).into()];
+    press(&mut app, &[KeyCode::Enter]);
+    assert_eq!(app.sending.len(), 2);
+    // Each said as it comes, both at once or one after the other.
+    let (mut said, start) = (String::new(), Instant::now());
+    while !app.sending.is_empty() {
+        assert!(start.elapsed() < Duration::from_secs(30), "lp did not end");
+        std::thread::sleep(Duration::from_millis(5));
+        app.notice = None;
+        app.poll_printing();
+        said.push_str(app.notice.as_deref().unwrap_or(""));
+    }
+    assert_eq!(said.matches("sent to the printer").count(), 2, "{said}");
+}
+
+#[test]
+fn quitting_waits_for_what_is_sent_to_the_printer() {
+    let (dir, mut app) = printing();
+    press(&mut app, &[KeyCode::Enter]);
+    app.wait_for_printing(Duration::from_secs(30));
+    assert!(app.sending.is_empty());
+    assert!(dir.path().join("printed.pdf").exists());
 }

@@ -3,9 +3,9 @@
 //! `print` has it. What is printed is the deck's PDF as it is shown: a
 //! PDF being signed, the copy with all that is put.
 
-use super::App;
 use super::draw::{row_line, side_block};
 use super::field::Field;
+use super::{App, background};
 use crate::print::{self, Job, Scale, Sides};
 use crate::render::{self, Key};
 use ratatui::Frame;
@@ -15,7 +15,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Paragraph};
 use std::ffi::{OsStr, OsString};
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 
 /// Most copies `→` asks for.
 const MOST_COPIES: u32 = 99;
@@ -58,7 +59,7 @@ const FORM_TOP: u16 = 2;
 pub(super) struct Printing {
     /// The printers, the default first; none if `lpstat` lists none, as
     /// where it is not, and `lp`'s default is used.
-    pub(super) printers: Vec<String>,
+    pub(super) printers: print::Printers,
     printer: usize,
     pub(super) pages: Field,
     copies: u32,
@@ -82,21 +83,19 @@ pub(super) struct Printing {
 /// What CUPS says: the printers, when they were asked for, and the paper
 /// of the first, or of the one asked about.
 pub(super) struct Lookup {
-    pub(super) printers: Option<Vec<String>>,
+    pub(super) printers: Option<print::Printers>,
     pub(super) paper: Option<(String, (f32, f32))>,
 }
 
 /// Ask CUPS, off the screen's thread, for the paper of `printer`; with
 /// none, for the printers and the paper of the first.
 fn look_up(printer: Option<String>) -> Receiver<Lookup> {
-    let (tx, rx) = channel();
-    std::thread::spawn(move || {
+    background(move || {
         let printers = printer.is_none().then(print::printers);
-        let asked = printer.or_else(|| printers.as_ref()?.first().cloned());
+        let asked = printer.or_else(|| printers.as_ref()?.names.first().cloned());
         let paper = print::paper_of(asked.as_deref());
-        let _ = tx.send(Lookup { printers, paper });
-    });
-    rx
+        Lookup { printers, paper }
+    })
 }
 
 impl App {
@@ -107,7 +106,7 @@ impl App {
         self.printing = Some(Printing {
             lookup: Some(look_up(None)),
             paper: None,
-            printers: Vec::new(),
+            printers: print::Printers::default(),
             printer: 0,
             pages: Field::offered("all"),
             copies: 1,
@@ -168,8 +167,21 @@ impl App {
         true
     }
 
-    /// What CUPS has said since asked, taken in.
-    pub(super) fn found_printers(&mut self) {
+    /// What CUPS has said since asked, taken in: the printers and paper,
+    /// and what became of what was sent to print.
+    pub(super) fn poll_printing(&mut self) {
+        let mut said = Vec::new();
+        self.sending.retain(|rx| match rx.try_recv() {
+            Ok(one) => {
+                said.push(one);
+                false
+            }
+            Err(e) => e == TryRecvError::Empty,
+        });
+        if !said.is_empty() {
+            self.notice = Some(said.join(" · "));
+            self.dirty = true;
+        }
         let Some(p) = &mut self.printing else {
             return;
         };
@@ -182,6 +194,15 @@ impl App {
         }
         p.paper = found.paper;
         self.dirty = true;
+    }
+
+    /// Wait, `most` at most, for what is being handed to `lp`: ohp ending,
+    /// it would be cut short.
+    pub(super) fn wait_for_printing(&mut self, most: Duration) {
+        let until = Instant::now() + most;
+        for rx in std::mem::take(&mut self.sending) {
+            let _ = rx.recv_timeout(until.saturating_duration_since(Instant::now()));
+        }
     }
 
     /// Print what is picked; with pages not there, say so and stay.
@@ -197,18 +218,24 @@ impl App {
             }
         };
         let job = Job {
-            printer: p.printers.get(p.printer).cloned(),
+            printer: p.printers.names.get(p.printer).cloned(),
             copies: p.copies,
-            pages,
+            pages: pages.as_ref().map(ToString::to_string),
             sides: p.sides,
             scale: p.scale,
+            wide: print::wide(&self.deck.sizes, pages.as_ref()),
             title: render::name(&self.deck.paths[0]),
         };
-        let programs: Vec<&OsStr> = p.programs.iter().map(OsString::as_os_str).collect();
-        self.notice = Some(match print::print_with(&programs, &self.deck.data, &job) {
-            Ok(said) => said,
-            Err(e) => format!("{e:#}"),
-        });
+        let programs = p.programs.clone();
+        // As annotated, though the copy last written is still being read.
+        let pdf = self.annotated().unwrap_or_else(|| self.deck.data.to_vec());
+        // Off the screen's thread: lp may set up a printer found on the
+        // network first, which takes a while.
+        self.sending.push(background(move || {
+            let programs: Vec<&OsStr> = programs.iter().map(OsString::as_os_str).collect();
+            print::print_with(&programs, &pdf, &job).unwrap_or_else(|e| format!("{e:#}"))
+        }));
+        self.notice = Some("sending to the printer…".into());
         self.printing = None;
     }
 
@@ -218,7 +245,7 @@ impl App {
         let p = self.printing.as_ref()?;
         let total = self.deck.pages;
         let pages = match print::pages(&p.pages.text, self.cur, total) {
-            Ok(pages) => print::picked(pages.as_deref(), total),
+            Ok(pages) => print::picked(pages.as_ref(), total),
             Err(_) => vec![self.cur],
         };
         let at = p.sheet.min(pages.len().saturating_sub(1));
@@ -349,8 +376,8 @@ impl Printing {
             Row::Sides => self.sides = cycle(&Sides::ALL, self.sides, up),
             Row::Scale => self.scale = cycle(&Scale::ALL, self.scale, up),
             Row::Printer => {
-                self.printer = step(self.printer, self.printers.len(), up);
-                let printer = self.printers.get(self.printer).cloned();
+                self.printer = step(self.printer, self.printers.names.len(), up);
+                let printer = self.printers.names.get(self.printer).cloned();
                 self.paper = None;
                 self.lookup = Some(look_up(printer));
             }
@@ -374,8 +401,10 @@ impl Printing {
                 Scale::Actual => "actual size",
             }
             .into(),
-            Row::Printer => match self.printers.get(self.printer) {
-                Some(name) if self.printer == 0 => format!("{name} (default)"),
+            Row::Printer => match self.printers.names.get(self.printer) {
+                Some(name) if self.printer == 0 && self.printers.default => {
+                    format!("{name} (default)")
+                }
                 Some(name) => name.clone(),
                 None if self.lookup.is_some() => "finding printers…".into(),
                 None => "the default printer".into(),

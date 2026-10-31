@@ -205,7 +205,7 @@ fn print(deck: &render::Deck, args: &Args) -> anyhow::Result<()> {
     let job = print::Job {
         printer: args.printer.clone(),
         copies: args.copies,
-        pages,
+        pages: pages.as_ref().map(ToString::to_string),
         scale: match args.scale.as_str() {
             "fit" => print::Scale::Fit,
             "actual" => print::Scale::Actual,
@@ -215,6 +215,7 @@ fn print(deck: &render::Deck, args: &Args) -> anyhow::Result<()> {
             true => print::Sides::Two,
             false => print::Sides::Printer,
         },
+        wide: print::wide(&deck.sizes, pages.as_ref()),
         title: render::name(&deck.paths[0]),
     };
     println!("{}", print::print(&deck.data, &job)?);

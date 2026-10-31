@@ -132,6 +132,8 @@ pub fn run(
             .set_deck(app.deck.data.clone(), app.deck.pages);
         app.run(&mut terminal)?;
         app.quit_signing();
+        // What is being handed to lp, handed over whole before ohp ends.
+        app.wait_for_printing(Duration::from_secs(30));
         app.clear_images()
     })();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
@@ -328,6 +330,8 @@ struct App {
     texts: Option<Vec<crate::text::Searchable>>,
     /// The slides' text being read for searching, off the screen's thread.
     reading: Option<Receiver<Vec<crate::text::Searchable>>>,
+    /// What was sent to the printer, each being taken by `lp`.
+    sending: Vec<Receiver<String>>,
     /// What is picked to print, while `P` is picking it.
     printing: Option<printing::Printing>,
     /// How files picked with Ctrl-O are read.
@@ -398,6 +402,7 @@ impl App {
             #[cfg(feature = "sign")]
             signing: None,
             printing: None,
+            sending: Vec::new(),
             search: None,
             last_query: String::new(),
             texts: None,
@@ -449,7 +454,7 @@ impl App {
                 self.receive(done);
             }
             self.settle_wheel(false);
-            self.found_printers();
+            self.poll_printing();
             self.read_texts();
             self.watch();
             self.loaded();
@@ -551,6 +556,8 @@ impl App {
 
     /// Read `paths` on a thread of its own, to present in place of the deck.
     fn open(&mut self, paths: Vec<PathBuf>) {
+        // What is annotated is of the file shown: another, it is done.
+        self.quit_signing();
         if self.loading.is_some() {
             self.then = Some(Then::Open(paths));
             return;
@@ -651,9 +658,8 @@ impl App {
                 self.cur = self.cur.min(deck.pages - 1);
                 self.summarizer.set_deck(deck.data.clone(), deck.pages);
                 self.deck = deck;
-                // Read again for a search, as it says now.
-                (self.texts, self.reading) = (None, None);
                 self.renderer = renderer;
+                self.searched_anew();
                 // Its files as they were read: what changed since is read again.
                 if let Some(asked) = asked {
                     self.stamp = asked.stamps;
@@ -1000,6 +1006,16 @@ impl App {
     // ── drawing ─────────────────────────────────────────────────────────
 }
 
+/// What `work` returns, worked out on a thread of its own, off the
+/// screen's: asked for with `try_recv` as the screen is redrawn.
+fn background<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Receiver<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    rx
+}
+
 /// Built without signing, `A` says so, and nothing else is signing's.
 #[cfg(not(feature = "sign"))]
 impl App {
@@ -1018,6 +1034,10 @@ impl App {
     fn sign_click(&mut self, _: ratatui::layout::Position) {}
 
     fn settle_wheel(&mut self, _: bool) {}
+
+    fn annotated(&self) -> Option<Vec<u8>> {
+        None
+    }
 
     fn sign_drag(&mut self, _: ratatui::layout::Position) {}
 

@@ -300,11 +300,19 @@ fn a_summary_kept_is_shown_though_the_model_cannot_be_had() {
     summarizer.set_deck(Arc::new(pdf), 2);
     summarizer.want(Some(0));
     until(|| !summarizer.page(0).text.is_empty());
-    assert!(summarizer.page(0).text.contains("/no/such/model.gguf"));
+    assert!(summarizer.page(0).text.contains(CANNOT));
     summarizer.want(Some(1));
     until(|| summarizer.page(1).busy.is_none() && !summarizer.page(1).text.is_empty());
     assert_eq!(summarizer.page(1).text, "Genes tell them apart.");
 }
+
+/// What a summary says when the model cannot be had: the file not there,
+/// or, built without summaries, that.
+const CANNOT: &str = if cfg!(feature = "summary") {
+    "/no/such/model.gguf"
+} else {
+    NO_SUMMARY
+};
 
 /// Wait until `done`, for ten seconds at most.
 fn until(done: impl Fn() -> bool) {
@@ -336,7 +344,7 @@ fn a_model_that_cannot_be_loaded_says_why() {
     summarizer.want(Some(0));
     until(|| !summarizer.page(0).text.is_empty());
     let view = summarizer.page(0);
-    assert!(view.text.contains("/no/such/model.gguf"), "{view:?}");
+    assert!(view.text.contains(CANNOT), "{view:?}");
 }
 
 #[test]

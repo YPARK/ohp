@@ -222,3 +222,26 @@ fn what_is_typed_before_the_slides_are_read_is_searched_for_once_they_are() {
     }
     assert_eq!(app.cur, 2);
 }
+
+#[test]
+fn a_reload_while_searching_reads_the_slides_again_and_stays_in_them() {
+    let (dir, mut app) = slides();
+    app.cur = 3;
+    ctrl(&mut app, 's');
+    typed(&mut app, "beta");
+    // Rewritten shorter: two slides, "beta" on the first.
+    let pdf = fixture::with(&["beta", "x"].map(|t| fixture::text(40., 150., 12., t)));
+    fixture::write_pdf(dir.path(), &pdf);
+    app.reload();
+    finish(&mut app);
+    assert!(app.search.is_some());
+    let start = Instant::now();
+    while app.texts.is_none() {
+        assert!(start.elapsed() < Duration::from_secs(30), "not read again");
+        std::thread::sleep(Duration::from_millis(5));
+        app.read_texts();
+    }
+    assert_eq!(app.cur, 0);
+    ctrl(&mut app, 'g');
+    assert!(app.cur < app.deck.pages);
+}
