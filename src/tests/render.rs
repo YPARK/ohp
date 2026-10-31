@@ -108,6 +108,7 @@ fn job(page: usize, cols: u16, rows: u16, look: Look) -> Job {
         look,
         lit: None,
         marked: text::Picked::default(),
+        found: None,
     }
 }
 
@@ -281,6 +282,7 @@ fn a_zoomed_text_job_shows_the_part_panned_to() {
             look: Look::Text,
             lit: None,
             marked: text::Picked::default(),
+            found: None,
         }]);
         let Some(Slide::Text { cells, backdrop }) = fixture::next(&renderer).slide else {
             panic!("no text slide");
@@ -376,4 +378,32 @@ fn a_zoomed_slide_panned_is_lit_on_the_page_kept() {
     let same = kept.lock().unwrap().as_ref().unwrap().1.clone();
     assert!(Arc::ptr_eq(&page, &same), "the page was drawn again");
     assert_eq!(panned, lit(at(10), &Kept::default()));
+}
+
+#[test]
+fn what_a_search_finds_is_lit_the_place_gone_to_brighter() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = fixture::with(&["one two one"].map(|t| fixture::text(40., 150., 12., t)));
+    let deck = Deck::open(&fixture::write_pdf(dir.path(), &pdf)).unwrap();
+    let renderer = Renderer::spawn(&deck, &Picker::halfblocks(), 1).unwrap();
+    let found = Some(Found {
+        query: query_id("one"),
+        current: Some(1),
+    });
+    renderer.push([Job {
+        found,
+        ..job(0, 60, 30, Look::Text)
+    }]);
+    let Some(Slide::Text { cells, .. }) = fixture::next(&renderer).slide else {
+        panic!("no text slide");
+    };
+    let set: Vec<text::Cell> = cells.iter().flatten().flatten().copied().collect();
+    let lit: String = set.iter().filter(|c| c.lit).map(|c| c.ch).collect();
+    let marked: String = set.iter().filter(|c| c.marked).map(|c| c.ch).collect();
+    // The second "one" gone to, the first only found.
+    assert_eq!((lit.as_str(), marked.as_str()), ("one", "one"));
+    let two = set.iter().find(|c| c.ch == 't').unwrap();
+    assert!(!two.lit && !two.marked);
+    let first = set.iter().position(|c| c.ch == 'o').unwrap();
+    assert!(set[first].marked && !set[first].lit);
 }

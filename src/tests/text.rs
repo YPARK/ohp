@@ -851,3 +851,63 @@ fn a_bold_heading_ends_its_sentence_and_is_bold() {
     assert!(find(&cells, 'H').bold);
     assert!(!find(&cells, 'B').bold);
 }
+
+/// The text of each match of `query` on `page`, its glyphs' text joined.
+fn found(page: &Page, query: &str) -> Vec<String> {
+    page.searchable()
+        .find(query)
+        .iter()
+        .map(|m| m.iter().map(|&g| page.glyphs[g].text.as_str()).collect())
+        .collect()
+}
+
+#[test]
+fn a_query_is_found_wherever_it_is_on_the_page() {
+    let page = page(&format!(
+        "{}{}",
+        fixture::text(20., 200., 12., "Methods and more methods"),
+        fixture::text(20., 180., 12., "METHODS"),
+    ));
+    // Lower case: any case, as Emacs searches.
+    assert_eq!(found(&page, "methods"), ["Methods", "methods", "METHODS"]);
+    // A capital: that case only.
+    assert_eq!(found(&page, "Methods"), ["Methods"]);
+    assert_eq!(found(&page, "and more"), ["andmore"]);
+    assert!(found(&page, "absent").is_empty());
+    assert!(found(&page, "").is_empty());
+}
+
+#[test]
+fn a_query_runs_on_from_one_line_to_the_next() {
+    let page = page(&format!(
+        "{}{}",
+        fixture::text(20., 200., 12., "the model"),
+        fixture::text(20., 186., 12., "fits well"),
+    ));
+    assert_eq!(found(&page, "model fits"), ["modelfits"]);
+}
+
+#[test]
+fn what_is_found_is_lit_in_boxes_a_line_each() {
+    let page = page(&format!(
+        "{}{}",
+        fixture::text(20., 200., 12., "the model"),
+        fixture::text(20., 186., 12., "fits well"),
+    ));
+    let (lit, others) = page.found("model fits", Some(0));
+    assert_eq!(lit.boxes.len(), 2);
+    assert_eq!(lit.glyphs.iter().filter(|&&g| g).count(), 9);
+    assert!(!others.glyphs.contains(&true));
+}
+
+#[test]
+fn each_page_s_text_is_read_as_one_at_a_time_reads_it() {
+    let data = Arc::new(fixture::with(
+        &["a", "b c"].map(|t| fixture::text(40., 150., 12., t)),
+    ));
+    let each = of_each(data.clone(), &[1, 0]);
+    let one = of(data, 1).unwrap();
+    let found = |p: &Page, q| p.searchable().find(q).len();
+    assert_eq!(found(each[0].as_ref().unwrap(), "c"), found(&one, "c"));
+    assert_eq!(found(each[1].as_ref().unwrap(), "a"), 1);
+}

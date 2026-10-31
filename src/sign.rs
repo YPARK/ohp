@@ -17,8 +17,10 @@ use image::{DynamicImage, GenericImageView, RgbaImage};
 use lopdf::{Dictionary, Document, IncrementalDocument, Object, ObjectId, Stream, dictionary};
 use std::path::{Path, PathBuf};
 
-/// How wide a signature is put, in points, as Acrobat puts one.
+/// The box a signature is fitted in, its shape kept, in points: as wide
+/// as Acrobat puts one, and as tall as a line written by hand.
 pub const SIGNATURE_WIDTH: f32 = 150.;
+pub const SIGNATURE_HEIGHT: f32 = 32.;
 /// How large text is set, in points.
 pub const TEXT_SIZE: f32 = 11.;
 /// How large a ✓, ✕ or ● is set, in points.
@@ -60,6 +62,193 @@ impl Mark {
             scale: 1.,
         }
     }
+}
+
+impl Mark {
+    /// Whether `point`, on `page`, is on it.
+    fn covers(&self, page: usize, (x, y): (f32, f32), signature: Option<&Signature>) -> bool {
+        let [x0, y0, x1, y1] = bounds(self, signature);
+        self.page == page && (x0..=x1).contains(&x) && (y0..=y1).contains(&y)
+    }
+}
+
+/// The box `mark` covers on its page, as `[left, top, right, bottom]` in
+/// points from its top left as shown; text's as wide as Helvetica's
+/// letters are, about.
+pub fn bounds(mark: &Mark, signature: Option<&Signature>) -> [f32; 4] {
+    let (u, v) = mark.at;
+    match &mark.what {
+        What::Signature => {
+            let w = signature.map_or(SIGNATURE_WIDTH * mark.scale, |s| s.width_at(mark.scale));
+            let h = signature.map_or(w / 3., |s| s.height_at(w));
+            [u, v - h / 2., u + w, v + h / 2.]
+        }
+        What::Text(t) => {
+            let size = TEXT_SIZE * mark.scale;
+            let w = 0.55 * size * t.chars().count() as f32;
+            [u, v - size / 2., u + w, v + size / 2.]
+        }
+        _ => {
+            let half = MARK_SIZE * mark.scale / 2.;
+            [u - half, v - half, u + half, v + half]
+        }
+    }
+}
+
+/// The box, as `bounds` has boxes, of the form field to sign or type in
+/// that is at `point` on `page`, as shown, or near it, if one is: a signature's or a
+/// text's, not a checkbox's or a button's.
+pub fn field_at(original: &Original, page: usize, (u, v): (f32, f32)) -> Option<[f32; 4]> {
+    let doc = original.0.get_prev_documents();
+    let id = *doc.get_pages().get(&(u32::try_from(page).ok()? + 1))?;
+    let view = page_view(doc, id);
+    let annots = doc.get_dictionary(id).ok()?.get(b"Annots").ok()?;
+    let (_, annots) = doc.dereference(annots).ok()?;
+    // The field the point is in, else the nearest it is near.
+    let away = |p: f32, from: f32, to: f32| (from - p).max(p - to).max(0.);
+    let fields = annots.as_array().ok()?.iter().filter_map(|a| {
+        let widget = doc.dereference(a).ok()?.1.as_dict().ok()?;
+        let fillable = matches!(field_type(doc, widget)?, b"Sig" | b"Tx");
+        let rect = widget.get(b"Rect").ok()?.as_array().ok()?;
+        let n: Vec<f32> = rect.iter().filter_map(|n| n.as_float().ok()).collect();
+        let [x0, y0, x1, y1] = <[f32; 4]>::try_from(n).ok()?;
+        let (a, b) = (view.shown((x0, y0)), view.shown((x1, y1)));
+        let shown = [a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1)];
+        let far = away(u, shown[0], shown[2]).hypot(away(v, shown[1], shown[3]));
+        (fillable && far <= NEAR).then_some((far, shown))
+    });
+    fields
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, shown)| shown)
+}
+
+/// How near a field a click is taken to be in it, in points: as on the
+/// line a field is drawn above.
+const NEAR: f32 = 8.;
+
+/// A field's type, `/FT`, as its widget has it or a field above it does.
+fn field_type<'a>(doc: &'a Document, widget: &'a Dictionary) -> Option<&'a [u8]> {
+    let mut at = widget;
+    for _ in 0..16 {
+        if let Ok(kind) = at.get(b"FT").and_then(Object::as_name) {
+            return Some(kind);
+        }
+        let parent = at.get(b"Parent").ok()?;
+        at = doc.dereference(parent).ok()?.1.as_dict().ok()?;
+    }
+    None
+}
+
+/// Where to put `signature`, and at what scale, to fit the field `field`,
+/// a box as `bounds` has boxes: as large as it is, a little inside it, its
+/// left edge at the field's, halfway up it.
+pub fn fit(signature: &Signature, [x0, y0, x1, y1]: [f32; 4]) -> ((f32, f32), f32) {
+    let (w, h) = (x1 - x0, y1 - y0);
+    let one = signature.width_at(1.);
+    let scale = (0.94 * w / one).min(0.84 * h / signature.height_at(one));
+    (
+        (x0 + 0.03 * w, (y0 + y1) / 2.),
+        scale.clamp(SMALLEST, LARGEST),
+    )
+}
+
+/// Which of `marks` is at `point` on `page`: the last put of those there.
+pub fn under(
+    marks: &[Mark],
+    page: usize,
+    point: (f32, f32),
+    signature: Option<&Signature>,
+) -> Option<usize> {
+    marks.iter().rposition(|m| m.covers(page, point, signature))
+}
+
+impl What {
+    /// Which size it is put at.
+    pub fn kind(&self) -> Kind {
+        match self {
+            What::Signature => Kind::Signature,
+            What::Text(_) => Kind::Text,
+            What::Check | What::Cross | What::Dot => Kind::Mark,
+        }
+    }
+}
+
+/// What is put at a size of its own: the signature, text and the date,
+/// or a ✓ ✕ ●.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Signature,
+    Text,
+    Mark,
+}
+
+impl Kind {
+    const ALL: [Kind; 3] = [Kind::Signature, Kind::Text, Kind::Mark];
+
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Signature => "signature",
+            Kind::Text => "text",
+            Kind::Mark => "mark",
+        }
+    }
+}
+
+/// Smallest and largest a scale is, of each kind's own size.
+pub const SMALLEST: f32 = 0.2;
+pub const LARGEST: f32 = 6.;
+
+/// How large each kind is put, as a scale of its own size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sizes([f32; 3]);
+
+impl Default for Sizes {
+    fn default() -> Self {
+        Sizes([1.; 3])
+    }
+}
+
+impl Sizes {
+    pub fn of(&self, kind: Kind) -> f32 {
+        self.0[kind as usize]
+    }
+
+    /// Set `kind`'s scale, kept within bounds.
+    pub fn set(&mut self, kind: Kind, scale: f32) {
+        self.0[kind as usize] = scale.clamp(SMALLEST, LARGEST);
+    }
+}
+
+/// The sizes kept in `dir`, one kind a line, as `signature 1.32`; each
+/// not kept, or not read, its own size.
+pub fn sizes(dir: Option<&Path>) -> Sizes {
+    let mut sizes = Sizes::default();
+    let Some(dir) = dir else {
+        return sizes;
+    };
+    let kept = std::fs::read_to_string(dir.join(SIZES)).unwrap_or_default();
+    for (name, scale) in kept.lines().filter_map(|l| l.split_once(' ')) {
+        let kind = Kind::ALL.into_iter().find(|k| k.name() == name.trim());
+        if let (Some(kind), Ok(scale)) = (kind, scale.trim().parse::<f32>())
+            && scale.is_finite()
+        {
+            sizes.set(kind, scale);
+        }
+    }
+    sizes
+}
+
+/// Keep `sizes` in `dir`, to put each kind at next time.
+pub fn keep_sizes(dir: Option<&Path>, sizes: &Sizes) {
+    let Some(dir) = dir else {
+        return;
+    };
+    let lines: Vec<String> = Kind::ALL
+        .into_iter()
+        .map(|k| format!("{} {}", k.name(), sizes.of(k)))
+        .collect();
+    let _ = std::fs::create_dir_all(dir)
+        .and_then(|_| write(&dir.join(SIZES), lines.join("\n").as_bytes()));
 }
 
 /// A signature as a picture, the paper it was on made clear and cut away,
@@ -180,6 +369,13 @@ impl Signature {
     pub fn height_at(&self, width: f32) -> f32 {
         width * self.height() as f32 / self.width() as f32
     }
+
+    /// How wide it is put at `scale`: fitted in the box a signature is,
+    /// `SIGNATURE_WIDTH` by `SIGNATURE_HEIGHT`, at 1.
+    pub fn width_at(&self, scale: f32) -> f32 {
+        let wide = self.width() as f32 / self.height() as f32;
+        scale * SIGNATURE_WIDTH.min(SIGNATURE_HEIGHT * wide)
+    }
 }
 
 /// `image` cut to what is not clear in it, with a little room around.
@@ -227,6 +423,8 @@ pub fn config() -> Option<PathBuf> {
 const SIGNATURE: &str = "signature.png";
 /// The texts typed, kept in `dir`, one a line, the latest first.
 const TYPED: &str = "typed";
+/// How large each kind is put, kept in `dir`, as `sizes` reads them.
+const SIZES: &str = "sizes";
 
 /// The signature kept to sign with: `$OHP_SIGNATURE`, else the one last
 /// picked, kept in `dir`, if there is one.
@@ -360,6 +558,14 @@ impl View {
         })
     }
 
+    /// Where the point `(x, y)` of the PDF is shown, as `at` has it turned.
+    fn shown(self, (x, y): (f32, f32)) -> (f32, f32) {
+        let [a, b, c, d, e, f] = self.0;
+        let (x, y) = (x - e, y - f);
+        let det = a * d - b * c;
+        ((d * x - c * y) / det, (a * y - b * x) / det)
+    }
+
     /// The point shown at `(u, v)`.
     fn at(self, (u, v): (f32, f32)) -> (f32, f32) {
         let [a, b, c, d, e, f] = self.0;
@@ -373,6 +579,14 @@ impl View {
         let (e, f) = self.at((u, v));
         numbers(&[w * a, w * b, -h * c, -h * d, e, f])
     }
+}
+
+/// How page `page` of `doc` is shown: its crop box, turned as it says.
+fn page_view(doc: &Document, page: ObjectId) -> View {
+    let rotate = inherited(doc, page, b"Rotate")
+        .and_then(|r| r.as_i64().ok())
+        .unwrap_or(0);
+    View::new(shown_box(doc, page), rotate)
 }
 
 /// `numbers` as a content stream writes them.
@@ -468,10 +682,7 @@ pub fn stamp(
             continue;
         }
         let prev = update.get_prev_documents();
-        let rotate = inherited(prev, page_id, b"Rotate")
-            .and_then(|r| r.as_i64().ok())
-            .unwrap_or(0);
-        let view = View::new(shown_box(prev, page_id), rotate);
+        let view = page_view(prev, page_id);
         let mut ops: Vec<u8> = b"Q\n".to_vec();
         for mark in on {
             draw(&mut ops, view, mark, signature);
@@ -529,7 +740,7 @@ fn draw(ops: &mut Vec<u8>, view: View, mark: &Mark, signature: Option<&Signature
             let Some(s) = signature else {
                 return;
             };
-            let w = SIGNATURE_WIDTH * mark.scale;
+            let w = s.width_at(mark.scale);
             let h = s.height_at(w);
             let cm = view.upright((u, v + h / 2.), w, h);
             ops.extend(format!("q {cm} cm /OhpSignature Do Q\n").bytes());

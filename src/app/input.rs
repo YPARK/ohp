@@ -3,13 +3,13 @@
 
 use super::{App, Panel, View, ZOOMS};
 use crate::browse;
-use crate::render::{self, Look, Slide, Zoom};
+use crate::render::{self, Key, Look, Slide, Zoom};
 
 use crate::text;
 use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui::layout::Position;
+use ratatui::layout::{Position, Rect};
 
 impl App {
     pub(super) fn handle(&mut self, ev: Event) {
@@ -30,13 +30,55 @@ impl App {
             return;
         }
         let at = Position::new(mouse.column, mouse.row);
+        // While printing, only the form's rows are clicked: the preview is
+        // no page to put on, pan or turn.
+        if self.printing.is_some() {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.print_click(at) {
+                self.dirty = true;
+            }
+            return;
+        }
         match mouse.kind {
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+                if self.signing() && self.view == View::Present =>
+            {
+                let up = mouse.kind == MouseEventKind::ScrollUp;
+                if self.sign_wheel(at, up) {
+                    self.dirty = true;
+                } else {
+                    self.key(if up { KeyCode::Up } else { KeyCode::Down }.into());
+                }
+            }
             MouseEventKind::ScrollDown => self.key(KeyCode::Down.into()),
             MouseEventKind::ScrollUp => self.key(KeyCode::Up.into()),
+            MouseEventKind::Drag(MouseButton::Left) if self.signing() => {
+                self.sign_drag(at);
+                self.dirty = true;
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some((from, zoom)) = self.panning {
+                    let by = |was: u16, from: u16, to: u16| {
+                        (i32::from(was) + i32::from(from) - i32::from(to)).clamp(0, u16::MAX.into())
+                            as u16
+                    };
+                    self.zoom.x = by(zoom.x, from.x, at.x);
+                    self.zoom.y = by(zoom.y, from.y, at.y);
+                    self.clamp_pan();
+                    self.dirty = true;
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.panning = None;
+                self.sign_release();
+                self.dirty = true;
+            }
             MouseEventKind::Down(MouseButton::Left) => match self.view {
                 View::Present if self.signing() => {
                     self.sign_click(at);
                     self.dirty = true;
+                }
+                View::Present if self.zoomed() && !self.speaker.reading() => {
+                    self.panning = Some((at, self.zoom));
                 }
                 View::Present if self.speaker.reading() => {
                     if let Some(k) = self.sentence_at(at) {
@@ -83,19 +125,25 @@ impl App {
         page.sentence_near(x, y)
     }
 
+    /// The page presented as last drawn: its key, its cells, the cell's
+    /// size in pixels, and its pixels a point.
+    fn shown_page(&self) -> Option<(Key, Rect, (f32, f32), f32)> {
+        let (job, area) = self.drawn.get()?;
+        let key = job.key;
+        let font = self.picker.font_size();
+        let cell = (f32::from(font.width), f32::from(font.height));
+        let scale = render::fit(key, cell, *self.deck.sizes.get(key.page)?) * key.zoom.scale();
+        Some((key, area, cell, scale))
+    }
+
     /// The presented page shown at `at` on the screen, and the point of it
     /// there, the middle of its cell, in points from its top left as shown.
     pub(super) fn page_point(&self, at: Position) -> Option<(usize, (f32, f32))> {
-        let (job, area) = self.drawn.get()?;
+        let (key, area, (fw, fh), scale) = self.shown_page()?;
         if !area.contains(at) {
             return None;
         }
         let (dx, dy) = (at.x - area.x, at.y - area.y);
-        let font = self.picker.font_size();
-        let (fw, fh) = (f32::from(font.width), f32::from(font.height));
-        let key = job.key;
-        let size = *self.deck.sizes.get(key.page)?;
-        let scale = render::fit(key, (fw, fh), size) * key.zoom.scale();
         // The middle of the cell, past the part of the slide panned off.
         let point = |pan: u16, cell: u16, size: f32| {
             (f32::from(pan) + f32::from(cell) + 0.5) * size / scale
@@ -104,6 +152,31 @@ impl App {
             key.page,
             (point(key.zoom.x, dx, fw), point(key.zoom.y, dy, fh)),
         ))
+    }
+
+    /// The cells that show the box `[left, top, right, bottom]`, in points
+    /// of page `page` as `page_point` has them, as much of it as is shown on
+    /// the presented page; none if it is not presented, or none is shown.
+    pub(super) fn cells_of(&self, page: usize, [x0, y0, x1, y1]: [f32; 4]) -> Option<Rect> {
+        let (key, area, (fw, fh), scale) = self.shown_page()?;
+        if key.page != page {
+            return None;
+        }
+        let cell = |p: f32, size: f32, pan: u16, from: u16, to: u16| {
+            let c = (p * scale / size).floor() - f32::from(pan) + f32::from(from);
+            c.clamp(f32::from(from), f32::from(to)) as u16
+        };
+        let (left, right) = (area.x, area.right().saturating_sub(1));
+        let (top, bottom) = (area.y, area.bottom().saturating_sub(1));
+        let (a, b) = (
+            cell(x0, fw, key.zoom.x, left, right),
+            cell(x1, fw, key.zoom.x, left, right),
+        );
+        let (c, d) = (
+            cell(y0, fh, key.zoom.y, top, bottom),
+            cell(y1, fh, key.zoom.y, top, bottom),
+        );
+        (b >= a && d >= c).then(|| Rect::new(a, c, b - a + 1, d - c + 1))
     }
 
     pub(super) fn key(&mut self, key: KeyEvent) {
@@ -148,13 +221,21 @@ impl App {
             self.dirty = true;
             return;
         }
-        if self.sign_key(key) {
+        // A search under way takes the keys; else the print form's and
+        // signing's, as what is being typed there, before ctrl-s begins one.
+        let searching = self.search.is_some();
+        if (searching && self.search_key(key))
+            || self.print_key(key)
+            || self.sign_key(key)
+            || (!searching && self.search_key(key))
+        {
             self.dirty = true;
             return;
         }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('o') if ctrl => self.browse(),
+            KeyCode::Char('p') if ctrl => self.print(),
             KeyCode::Right if self.zoomed() => self.pan(1, 0),
             KeyCode::Left if self.zoomed() => self.pan(-1, 0),
             KeyCode::Down if self.zoomed() => self.pan(0, 1),
@@ -192,7 +273,8 @@ impl App {
             KeyCode::Char('k') => self.summarize(Panel::Slide),
             KeyCode::Char('K') => self.summarize(Panel::Whole),
             KeyCode::Char('m') => self.choose_model(),
-            KeyCode::Char('S') => self.sign(),
+            KeyCode::Char('A') => self.sign(),
+            KeyCode::Char('P') => self.print(),
             _ => return,
         }
         self.dirty = true;

@@ -29,7 +29,8 @@ builds Oniguruma's C with it; without either, nothing but Rust is compiled:
 cargo install --git https://github.com/YPARK/ohp --no-default-features --features speech
 ```
 
-Signing a PDF, the `sign` feature, as [Signing](#signing) shows, is in
+Annotating and signing a PDF, the `sign` feature, as
+[Annotating and signing](#annotating-and-signing) shows, is in
 the default build, in pure Rust.
 
 Summing slides up, the `summary` feature, is in the default build too: a
@@ -97,7 +98,9 @@ set by typst, so need the `markdown` feature, as in the default build.
 | `k` | sum up the slide in a column beside it, and mark its key sentences; again to close |
 | `K` | sum up the whole file there, and mark its key sentences wherever they are; again to close |
 | `m` | pick the model that sums up, or one of Hugging Face's to download |
-| `S` | sign the PDF: a signature, your name, the date, ✓ ✕ ●, put where you click, in a copy, as [Signing](#signing) shows |
+| `ctrl-s`, `ctrl-r` | search forward, or back, as [Searching](#searching) shows |
+| `A` | annotate and sign the PDF: a signature, your name, the date, ✓ ✕ ●, put where you click, in a copy, as [Annotating and signing](#annotating-and-signing) shows |
+| `P`, `ctrl-p` | print what is shown, as [Printing](#printing) shows |
 | `q` | quit |
 
 ohp takes the mouse, so selecting text in the terminal needs Shift held,
@@ -357,24 +360,55 @@ or a file, summed up before, as one a reload leaves as it was, or a paper
 opened again, is shown at once, with no model loaded. To forget them,
 `rm -rf ~/.cache/ohp/summaries`.
 
-## Signing
+## Searching
 
-`S` signs the PDF presented, as Acrobat's Fill & Sign does: what is
-picked is put where you click, and the pages turn and zoom as ever, to
-put each where it goes on any of them.
+`ctrl-s` searches the slides forward and `ctrl-r` back, as Emacs's
+isearch does in pdf-tools: each letter typed narrows what is found, the
+slide turned to the first place it is, and every place it is lit, the
+one gone to brighter. The status line counts them, as `search: model ·
+3 of 12`.
 
 | Key | |
 |---|---|
+| typing, `backspace` | change what is searched for |
+| `ctrl-s`, `ctrl-r` | go to the next place, or the last, round the end to the other; with nothing typed, search for the last searched again |
+| `enter`, `esc` | stay there |
+| `ctrl-g` | go back to where the search began |
+| any other key | stay there, and do what it does |
+
+All in lower case, a query is found in any case; with a capital, in its
+own. It runs on from one line to the next.
+
+## Annotating and signing
+
+`A` annotates the PDF presented, as Acrobat's Fill & Sign does: what is
+picked is put where you click, and the pages turn and zoom as ever, to
+put each where it goes on any of them. A palette beside the page lists
+the tools, each at the size it is put, and the keys; it goes when you
+are done.
+
+| Key or mouse | |
+|---|---|
 | click | put what is picked there: the signature, its left edge where clicked; text, the date, a ✓ ✕ ● |
-| `S` | put the signature (picked to begin with) |
-| `T` | type text, as your name: where it is clicked, typed, `tab` offering what you typed before, its initials and the date, `⏎` putting it |
-| `D` | put today's date |
-| `C` `X` `O` | put a ✓, a ✕, a ● |
+| click on what is put | pick it, to drag, size or take back |
+| drag | move what is put |
+| wheel over what is put | make it larger, or smaller; elsewhere, turn the pages |
+| `1` to `6`, or a click on the palette | pick the signature, text, the date, ✓, ✕ or ● |
+| `[` `]` | make the last put, or picked, smaller or larger |
+| Shift and the arrows | nudge it |
+| `u`, `backspace`, `ctrl-z` | take it back |
 | `N` | pick another image of your signature |
-| `u` | take the last put back |
-| `[` `]` | make the last put smaller, or larger |
-| Shift and the arrows | move the last put |
-| `esc` | done: what to call the copy is asked, `form-signed.pdf`, the `signed` picked to type over |
+| `P` | print the copy, as it is now |
+| `enter` or `esc` | done: what to call the copy is asked, `form-signed.pdf`, the `signed` picked to type over |
+
+Text typed is put where it was clicked: typed, `tab` offering what you
+typed before, its initials and the date, `enter` putting it.
+
+A signature is fitted in a box 150 points wide and 32 tall, its shape
+kept. Clicked in a form field to sign or type in, it is fitted to that
+field instead, and text is set in it, at its left edge, no taller than
+it. Each kind, the signature, text and the date, and ✓ ✕ ●, is put at
+the size it was last made, kept in `~/.config/ohp/sizes` for next time.
 
 The signature is an image of yours, picked the first time it is put,
 from a list of images as `ctrl-o` lists files, begun at home: a PNG with a clear
@@ -399,6 +433,35 @@ set in Helvetica, which has Latin letters only.
 
 What runs ohp, as letterbox, may have the copy kept said, `$OHP_SIGNED`
 naming a file to write its path in.
+
+## Printing
+
+`P`, or `ctrl-p`, prints what is shown, as its PDF, with CUPS's `lp`,
+which macOS and Linux both have (on Debian and Ubuntu,
+`sudo apt install cups-client`), or `lpr` where there is no `lp`. A form
+beside the page asks:
+
+| Row | |
+|---|---|
+| pages | `all`, `this` for the page shown, or as `3-7, 9`; typed |
+| copies | 1 to 99 |
+| sides | as the printer is set, one-sided, or two-sided |
+| scale | shrink to fit: as it is, unless larger than the paper; fit to paper; or actual size |
+| printer | the printers `lpstat` lists, the default first, then those found on the network |
+
+`↑` `↓` pick a row, `←` `→` change it, a click on a row picks it and
+again changes it, `enter` prints and `esc` does not. Markdown and HTML
+print as they are typeset, on their paper; a PDF being annotated prints
+as the copy with all that is put.
+
+While the form is open, the page is previewed as it prints: on a sheet
+of the paper the printer is set to, turned to lie as the page does, at
+the scale picked. `n` and `p` turn through the pages picked, as they
+print, in the document's order. The PDF is handed to `lp` on its input,
+never written to a file another could read first.
+
+`ohp --print talk.pdf` prints with no screen at all, and `--printer`,
+`--pages`, `--copies`, `--two-sided` and `--scale` say how.
 
 ## Slides on another machine
 

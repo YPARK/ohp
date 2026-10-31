@@ -14,7 +14,7 @@ use ohp::process;
 use ohp::typeset;
 #[cfg(feature = "speech")]
 use ohp::voices;
-use ohp::{app, browse, remote, render, shell_status, speak, summary};
+use ohp::{app, browse, print, remote, render, shell_status, speak, summary};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -36,7 +36,8 @@ use std::time::Duration;
 /// presents the slide picked in the grid, t switches between images and
 /// text, s reads the slides aloud from this one on, k sums up the slide on
 /// screen and marks its key sentences, K sums up the whole file, m picks
-/// the model that sums up, S signs the PDF, q quits.
+/// the model that sums up, A annotates and signs the PDF, P prints, q
+/// quits.
 ///
 /// +/- zoom the slide, or the grid. Zoomed in, arrows pan the slide and 0
 /// fits it back to the screen.
@@ -67,6 +68,28 @@ struct Args {
     /// Start with slides as text, even where the terminal shows images.
     #[arg(long)]
     text: bool,
+    /// Print the file, as P does, with CUPS's lp, and quit, showing
+    /// nothing.
+    #[arg(long)]
+    print: bool,
+    /// Printer to print on, as `lpstat -e` names it. [default: the
+    /// system's default]
+    #[arg(long, requires = "print", value_name = "NAME")]
+    printer: Option<String>,
+    /// Pages to print: all, or as 3-7, 9.
+    #[arg(long, requires = "print", default_value = "all")]
+    pages: String,
+    /// Copies to print.
+    #[arg(long, requires = "print", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=99))]
+    copies: u32,
+    /// Print on both sides of the paper.
+    #[arg(long, requires = "print")]
+    two_sided: bool,
+    /// How pages are made the paper's size: auto, as they are if they fit
+    /// and else shrunk; fit, as large as the paper takes; or actual, as
+    /// they are.
+    #[arg(long, requires = "print", default_value = "auto", value_parser = ["auto", "fit", "actual"])]
+    scale: String,
     /// Paper to set markdown on, as typst names it: us-letter, a4,
     /// presentation-16-9, … [default: presentation-16-9 for slides,
     /// us-letter otherwise]
@@ -161,6 +184,9 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
     if signaled.load(Ordering::Relaxed) != 0 {
         return Ok(());
     }
+    if args.print {
+        return print(&deck?, &args);
+    }
     let links = remotes.iter().map(remote::Remote::link).collect();
     app::run(
         deck?,
@@ -171,6 +197,28 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
         summarizer(&args),
         signaled.clone(),
     )
+}
+
+/// Print `deck` as `args` ask, and say what became of it.
+fn print(deck: &render::Deck, args: &Args) -> anyhow::Result<()> {
+    let pages = print::pages(&args.pages, 0, deck.pages).map_err(anyhow::Error::msg)?;
+    let job = print::Job {
+        printer: args.printer.clone(),
+        copies: args.copies,
+        pages,
+        scale: match args.scale.as_str() {
+            "fit" => print::Scale::Fit,
+            "actual" => print::Scale::Actual,
+            _ => print::Scale::Auto,
+        },
+        sides: match args.two_sided {
+            true => print::Sides::Two,
+            false => print::Sides::Printer,
+        },
+        title: render::name(&deck.paths[0]),
+    };
+    println!("{}", print::print(&deck.data, &job)?);
+    Ok(())
 }
 
 #[cfg(feature = "summary")]

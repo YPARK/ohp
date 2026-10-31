@@ -31,6 +31,7 @@ fn job(key: Key, look: Look) -> Job {
         look,
         lit: None,
         marked: Picked::default(),
+        found: None,
     }
 }
 
@@ -787,3 +788,9 @@ mod speaking;
 #[cfg(feature = "sign")]
 #[path = "app/signing.rs"]
 mod signing;
+
+#[path = "app/printing.rs"]
+mod printing;
+
+#[path = "app/search.rs"]
+mod search;

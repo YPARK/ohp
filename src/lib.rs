@@ -37,6 +37,7 @@ mod menu;
 mod mermaid;
 #[cfg(feature = "summary")]
 mod models;
+pub mod print;
 #[cfg(any(feature = "markdown", feature = "speech", feature = "summary"))]
 pub mod process;
 pub mod remote;

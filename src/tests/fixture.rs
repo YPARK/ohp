@@ -157,3 +157,20 @@ fn running(command: &str) -> bool {
         .output()
         .is_ok_and(|o| !o.stdout.is_empty())
 }
+
+/// A fake `lp` in `dir` that writes each argument it is given, a line
+/// each, to `dir/args`, what it reads to `dir/printed.pdf`, and says what
+/// CUPS's says.
+#[cfg(unix)]
+pub fn fake_lp(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let lp = dir.join("lp");
+    let script = format!(
+        "#!/bin/sh\nfor a; do echo \"$a\" >> {0}/args; done\n\
+         cat > {0}/printed.pdf\necho 'request id is Office-7 (1 file(s))'\n",
+        dir.display()
+    );
+    std::fs::write(&lp, script).unwrap();
+    std::fs::set_permissions(&lp, std::fs::Permissions::from_mode(0o755)).unwrap();
+    lp
+}

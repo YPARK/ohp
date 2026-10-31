@@ -18,8 +18,15 @@ use std::io::Write;
 
 impl App {
     pub(super) fn draw(&self, f: &mut Frame) {
-        let (main, side, status) = split(f.area(), self.panel.is_some());
-        self.draw_summary(f, side);
+        let (main, side, status) = split(f.area(), self.side_open());
+        self.side.set(side);
+        if self.printing.is_some() {
+            self.draw_print(f, side);
+        } else if self.signing() {
+            self.draw_palette(f, side);
+        } else {
+            self.draw_summary(f, side);
+        }
         self.drawn.set(None);
         // Kitty's images are cells, which the list covers; others' are not.
         let covered = self.listing()
@@ -28,7 +35,9 @@ impl App {
                 self.picker.protocol_type(),
                 ProtocolType::Kitty | ProtocolType::Halfblocks
             );
-        if !covered {
+        if self.printing.is_some() {
+            self.draw_preview(f, main);
+        } else if !covered {
             match self.view {
                 View::Present => {
                     let job = self.job(self.presented());
@@ -37,6 +46,10 @@ impl App {
                 }
                 View::Grid => self.draw_grid(f),
             }
+        }
+        if let Some(outline) = self.dragged().and_then(|(page, b)| self.cells_of(page, b)) {
+            let lit = Style::new().fg(Color::Yellow);
+            f.render_widget(Block::bordered().border_style(lit), outline);
         }
         f.render_widget(Paragraph::new(self.status()), status);
         if !self.listing() {
@@ -57,6 +70,12 @@ impl App {
         self.models.draw(f, inner);
     }
 
+    /// Whether a column is beside the slides: the summary, the annotate
+    /// palette or the print form.
+    pub(super) fn side_open(&self) -> bool {
+        self.panel.is_some() || self.signing() || self.printing.is_some()
+    }
+
     /// Whether a list is open over the slides.
     pub(super) fn listing(&self) -> bool {
         #[cfg(feature = "speech")]
@@ -74,7 +93,7 @@ impl App {
     /// is rendered, the same slide as last presented or fitted. Returns the
     /// job whose slide is drawn, noted as `drawn` with its cells when
     /// presenting.
-    fn draw_slide(&self, f: &mut Frame, job: Job, area: Rect) -> Option<Job> {
+    pub(super) fn draw_slide(&self, f: &mut Frame, job: Job, area: Rect) -> Option<Job> {
         let fitted = Job {
             key: Key {
                 zoom: Zoom::FIT,
@@ -86,6 +105,7 @@ impl App {
         let unlit = Job { lit: None, ..job };
         let unmarked = Job {
             marked: Picked::default(),
+            found: None,
             ..unlit
         };
         let found = [
@@ -137,10 +157,7 @@ impl App {
         };
         let view = self.summary(panel);
         let dim = Style::new().fg(Color::DarkGray);
-        let block = Block::bordered().border_style(dim).title(Span::styled(
-            title,
-            Style::new().add_modifier(Modifier::BOLD),
-        ));
+        let block = side_block(title);
         let mut lines: Vec<Line> = view.text.lines().map(Line::raw).collect();
         if !view.key.is_empty() {
             let [r, g, b] = text::MARK;
@@ -228,14 +245,16 @@ impl App {
             ),
             View::Present => (
                 "present",
-                "n/p ←/→ next/prev · +/- zoom · g grid · t text · s speak, then click to speak from · v voice · k/K summary · m model · S sign · r reload · ^O open · q quit",
+                "n/p ←/→ next/prev · ^S search · +/- zoom · g grid · t text · A annotate · P print · s speak, then click to speak from · v voice · k/K summary · m model · r reload · ^O open · q quit",
             ),
             View::Grid => (
                 "grid",
                 "n/p arrows click move · g/enter/double-click present · +/- zoom · t text · s speak · v voice · k/K summary · m model · r reload · ^O open · q quit",
             ),
         };
-        let signing = self.sign_status();
+        let signing = (self.search_status())
+            .or_else(|| self.print_status())
+            .or_else(|| self.sign_status());
         let (view, keys) = match &signing {
             Some((doing, keys)) => (doing.as_str(), *keys),
             None => (view, keys),
@@ -343,11 +362,11 @@ pub(super) fn marked(summarizer: &Summarizer, panel: Option<Panel>, page: usize)
 /// Columns the summary beside the slides takes, at least and at most.
 pub(super) const SIDE: (u16, u16) = (32, 64);
 
-/// The slide area, the summary's column beside it if there is a summary,
-/// and the status line under them.
-pub(super) fn split(area: Rect, summary: bool) -> (Rect, Rect, Rect) {
+/// The slide area, the column beside it if there is one, and the status
+/// line under them.
+pub(super) fn split(area: Rect, side: bool) -> (Rect, Rect, Rect) {
     let [body, status] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-    if !summary {
+    if !side {
         return (body, Rect::default(), status);
     }
     let width = (body.width / 3).clamp(SIDE.0, SIDE.1).min(body.width / 2);
@@ -375,4 +394,24 @@ pub(super) fn note(f: &mut Frame, area: Rect, text: &str) {
     );
     let text = Span::styled(text, Style::new().fg(Color::DarkGray));
     f.render_widget(Paragraph::new(text).centered(), mid);
+}
+
+/// The column beside the slides, framed and titled `title`.
+pub(super) fn side_block<'a>(title: impl Into<std::borrow::Cow<'a, str>>) -> Block<'a> {
+    let bold = Style::new().add_modifier(Modifier::BOLD);
+    Block::bordered()
+        .border_style(Style::new().fg(Color::DarkGray))
+        .title(Span::styled(title, bold))
+}
+
+/// A row of a list in the column beside the slides: `▶` and lit, if it is
+/// the one picked.
+pub(super) fn row_line(picked: bool, text: &str) -> Line<'static> {
+    match picked {
+        true => Line::styled(
+            format!("▶ {text}"),
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        false => Line::raw(format!("  {text}")),
+    }
 }
