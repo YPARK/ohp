@@ -42,6 +42,8 @@ pub mod process;
 pub mod remote;
 pub mod render;
 mod salient;
+#[cfg(feature = "sign")]
+pub mod sign;
 pub mod speak;
 pub mod summary;
 mod text;
