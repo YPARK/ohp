@@ -164,11 +164,15 @@ fn running(command: &str) -> bool {
 pub fn fake_lp(dir: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let lp = dir.join("lp");
-    let script = format!(
-        "#!/bin/sh\nfor a; do echo \"$a\" >> {0}/args; done\n\
-         cat > {0}/printed.pdf\necho 'request id is Office-7 (1 file(s))'\n",
-        dir.display()
-    );
+    // Its folder found from where it is, so no path is written into it to
+    // be read by the shell; its arguments written by printf, which, unlike
+    // dash's echo, takes none of them for its own.
+    let script = r#"#!/bin/sh
+d=$(dirname "$0")
+printf '%s\n' "$@" >> "$d/args"
+cat > "$d/printed.pdf"
+echo 'request id is Office-7 (1 file(s))'
+"#;
     std::fs::write(&lp, script).unwrap();
     std::fs::set_permissions(&lp, std::fs::Permissions::from_mode(0o755)).unwrap();
     lp

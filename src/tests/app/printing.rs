@@ -258,11 +258,13 @@ fn the_first_printer_is_the_default_only_when_cups_says() {
 
 #[test]
 fn a_second_print_while_the_first_is_sent_loses_neither() {
-    let (dir, mut app) = printing();
+    let (_dir, mut app) = printing();
+    // The same fake lp again, not written anew while the first runs it.
+    let programs = app.printing.as_ref().unwrap().programs.clone();
     press(&mut app, &[KeyCode::Enter, KeyCode::Char('P')]);
     let p = app.printing.as_mut().unwrap();
     p.lookup = None;
-    p.programs = vec![fixture::fake_lp(dir.path()).into()];
+    p.programs = programs;
     press(&mut app, &[KeyCode::Enter]);
     assert_eq!(app.sending.len(), 2);
     // Each said as it comes, both at once or one after the other.
