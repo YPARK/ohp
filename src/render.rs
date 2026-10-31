@@ -21,7 +21,7 @@ use ratatui_image::Resize;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::Protocol;
 use ratatui_image::protocol::halfblocks::Halfblocks;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -331,6 +331,71 @@ pub struct Job {
     pub lit: Option<usize>,
     /// The slide's key sentences, marked on it, as its summary picks them.
     pub marked: text::Picked,
+    /// What a search finds on it, lit.
+    pub found: Option<Found>,
+}
+
+/// What a search finds on a slide: the query, as `query_id` names it, and
+/// which of the places it is on the slide is the one gone to, if one is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Found {
+    pub query: u32,
+    pub current: Option<u16>,
+}
+
+/// The queries searched for, each once, named by where it is in the list,
+/// and found in the map by what it is: a job, which is copied, names its
+/// query so.
+static QUERIES: std::sync::LazyLock<std::sync::Mutex<Queries>> =
+    std::sync::LazyLock::new(Default::default);
+
+#[derive(Default)]
+struct Queries {
+    all: Vec<String>,
+    named: HashMap<String, u32>,
+}
+
+/// The name of `query`, for a job to light what is found of it.
+pub fn query_id(query: &str) -> u32 {
+    let mut queries = QUERIES.lock().expect("queries");
+    if let Some(&id) = queries.named.get(query) {
+        return id;
+    }
+    let id = u32::try_from(queries.all.len()).unwrap_or(u32::MAX);
+    queries.all.push(query.to_string());
+    queries.named.insert(query.to_string(), id);
+    id
+}
+
+/// The query `id` names.
+fn query(id: u32) -> Option<String> {
+    QUERIES
+        .lock()
+        .ok()?
+        .all
+        .get(usize::try_from(id).ok()?)
+        .cloned()
+}
+
+/// What `found` lights on `page`: the place gone to, and the others.
+fn found_on(page: &text::Page, found: Option<Found>) -> (text::Lit, text::Lit) {
+    let Some((found, query)) = found.and_then(|f| Some((f, query(f.query)?))) else {
+        return Default::default();
+    };
+    page.found(&query, found.current.map(usize::from))
+}
+
+/// `a` with `b` lit too, glyph by glyph.
+fn either(a: Vec<bool>, b: &[bool]) -> Vec<bool> {
+    if b.is_empty() {
+        return a;
+    }
+    let mut a = a;
+    a.resize(b.len().max(a.len()), false);
+    for (x, &y) in a.iter_mut().zip(b) {
+        *x |= y;
+    }
+    a
 }
 
 pub enum Slide {
@@ -442,11 +507,14 @@ fn work(data: Arc<Vec<u8>>, picker: &Picker, queue: &Queue, kept: &Kept, tx: &Se
                 // Where the sentence read aloud is, and the key sentences,
                 // in page points.
                 let (mut lit, mut marked) = (Vec::new(), Vec::new());
-                if (job.lit.is_some() || !job.marked.is_empty())
+                if (job.lit.is_some() || !job.marked.is_empty() || job.found.is_some())
                     && let Some(page) = text_of(&mut text, &pdf, job.key.page, &fonts, &settings)
                 {
                     lit = job.lit.map(|k| page.light(k).boxes).unwrap_or_default();
                     marked = page.mark(job.marked).boxes;
+                    let (current, others) = found_on(page, job.found);
+                    lit.extend(current.boxes);
+                    marked.extend(others.boxes);
                 }
                 let image = rasterise(
                     &pdf,
@@ -520,8 +588,12 @@ fn read<'a>(
     // Four pixels a half-block each way, so glyphs are painted out finely.
     let x_scale = 4. * f32::from(size.width) / w;
     let y_scale = 8. * f32::from(size.height) / h;
-    let lit = job.lit.map(|k| text.light(k).glyphs).unwrap_or_default();
-    let marked = text.mark(job.marked).glyphs;
+    let (current, others) = found_on(text, job.found);
+    let lit = either(
+        job.lit.map(|k| text.light(k).glyphs).unwrap_or_default(),
+        &current.glyphs,
+    );
+    let marked = either(text.mark(job.marked).glyphs, &others.glyphs);
     let image = unlit(
         kept,
         key.page,

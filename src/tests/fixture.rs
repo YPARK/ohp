@@ -98,7 +98,6 @@ pub fn next(renderer: &Renderer) -> Done {
         .expect("a render")
 }
 
-#[cfg(feature = "markdown")]
 /// `text` written to `name` in `dir`.
 pub fn write_text(dir: &Path, name: &str, text: &str) -> PathBuf {
     let path = dir.join(name);
@@ -156,4 +155,25 @@ fn running(command: &str) -> bool {
         .args(["-f", &pattern])
         .output()
         .is_ok_and(|o| !o.stdout.is_empty())
+}
+
+/// A fake `lp` in `dir` that writes each argument it is given, a line
+/// each, to `dir/args`, what it reads to `dir/printed.pdf`, and says what
+/// CUPS's says.
+#[cfg(unix)]
+pub fn fake_lp(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let lp = dir.join("lp");
+    // Its folder found from where it is, so no path is written into it to
+    // be read by the shell; its arguments written by printf, which, unlike
+    // dash's echo, takes none of them for its own.
+    let script = r#"#!/bin/sh
+d=$(dirname "$0")
+printf '%s\n' "$@" >> "$d/args"
+cat > "$d/printed.pdf"
+echo 'request id is Office-7 (1 file(s))'
+"#;
+    std::fs::write(&lp, script).unwrap();
+    std::fs::set_permissions(&lp, std::fs::Permissions::from_mode(0o755)).unwrap();
+    lp
 }

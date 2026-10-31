@@ -1,9 +1,13 @@
-//! Signing the PDF presented, as `S` begins it: the pages turned and zoomed
-//! as ever, and each click puts what is picked there, a signature, text,
-//! the date, or a ✓ ✕ ● mark, in a copy beside the PDF, shown in its place
-//! as each is put. `u` takes the last back, `[` `]` make it smaller or
-//! larger, and Shift and the arrows move it. `esc` asks what to call the
-//! copy, its name with `-signed` added, the `signed` picked to type over.
+//! Annotating and signing the PDF presented, as `A` begins it: the pages
+//! turned and zoomed as ever, and each click puts what is picked in the
+//! palette beside the page, by its number or a click on it, there: a
+//! signature, text, the date, or a ✓ ✕ ● mark, in a copy beside the PDF,
+//! shown in its place as each is put. A click on what is put picks it, to
+//! drag, size with the wheel or `[` `]`, nudge with Shift and the arrows,
+//! or take back with `u`. Each kind is put at the size it was last made,
+//! kept for next time; a signature or text clicked in a form field is
+//! fitted to it. `enter` or `esc` asks what to call the copy, its name
+//! with `-signed` added, the `signed` picked to type over.
 //!
 //! The signature is the one kept from the last picked, or `$OHP_SIGNATURE`;
 //! with none, or on `N`, an image of one is picked, a PNG or a photo of it
@@ -12,13 +16,20 @@
 //! The copy kept is written to the file `$OHP_SIGNED` names, if it does,
 //! for what ran ohp, as letterbox, to find it.
 
+use super::draw::{row_line, side_block};
+use super::field::Field;
 use super::{App, View};
 use crate::browse::Browser;
 use crate::render;
-use crate::sign::{self, Mark, Signature, What};
+use crate::sign::{self, Kind, Mark, Signature, Sizes, What};
+use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::Position;
+use ratatui::layout::{Position, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// What a click puts.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -32,7 +43,17 @@ pub(super) enum Tool {
 }
 
 impl Tool {
-    fn name(self) -> &'static str {
+    /// In the palette's order, each picked by its number, from 1.
+    pub(super) const ALL: [Tool; 6] = [
+        Tool::Signature,
+        Tool::Text,
+        Tool::Date,
+        Tool::Check,
+        Tool::Cross,
+        Tool::Dot,
+    ];
+
+    pub(super) fn name(self) -> &'static str {
         match self {
             Tool::Signature => "signature",
             Tool::Text => "text",
@@ -42,98 +63,39 @@ impl Tool {
             Tool::Dot => "●",
         }
     }
-}
 
-/// A line being typed: its text, the cursor, in chars, and what is picked,
-/// typed over, if anything is.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(super) struct Field {
-    pub(super) text: String,
-    at: usize,
-    picked: Option<(usize, usize)>,
-}
-
-impl Field {
-    /// `text`, all of it picked, to be typed over or kept.
-    fn offered(text: &str) -> Self {
-        Field::picking(text, 0, text.chars().count())
-    }
-
-    /// `text`, the chars from `from` to `to` picked.
-    fn picking(text: &str, from: usize, to: usize) -> Self {
-        Field {
-            text: text.to_string(),
-            at: to,
-            picked: Some((from, to)),
-        }
-    }
-
-    fn byte(&self, c: usize) -> usize {
-        self.text
-            .char_indices()
-            .nth(c)
-            .map_or(self.text.len(), |(i, _)| i)
-    }
-
-    /// Cut what is picked; whether anything was.
-    fn cut(&mut self) -> bool {
-        let Some((a, b)) = self.picked.take() else {
-            return false;
-        };
-        let (from, to) = (self.byte(a), self.byte(b));
-        self.text.replace_range(from..to, "");
-        self.at = a;
-        true
-    }
-
-    fn key(&mut self, key: KeyEvent) {
-        let len = self.text.chars().count();
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
-        match key.code {
-            KeyCode::Char('u') if ctrl => *self = Field::default(),
-            KeyCode::Char(c) if !ctrl && !alt => {
-                self.cut();
-                let i = self.byte(self.at);
-                self.text.insert(i, c);
-                self.at += 1;
-            }
-            KeyCode::Backspace => {
-                if !self.cut() && self.at > 0 {
-                    self.at -= 1;
-                    let i = self.byte(self.at);
-                    self.text.remove(i);
-                }
-            }
-            KeyCode::Delete => {
-                if !self.cut() && self.at < len {
-                    let i = self.byte(self.at);
-                    self.text.remove(i);
-                }
-            }
-            KeyCode::Left => {
-                self.at = self
-                    .picked
-                    .take()
-                    .map_or(self.at.saturating_sub(1), |p| p.0)
-            }
-            KeyCode::Right => self.at = self.picked.take().map_or((self.at + 1).min(len), |p| p.1),
-            KeyCode::Home => (self.at, self.picked) = (0, None),
-            KeyCode::End => (self.at, self.picked) = (len, None),
-            _ => {}
-        }
-    }
-
-    /// The text, what is picked in brackets, else the cursor shown.
-    pub(super) fn shown(&self) -> String {
-        let chars: Vec<char> = self.text.chars().collect();
-        let part = |a: usize, b: usize| chars[a..b].iter().collect::<String>();
-        match self.picked {
-            Some((a, b)) => format!("{}[{}]{}", part(0, a), part(a, b), part(b, chars.len())),
-            None => format!("{}▏{}", part(0, self.at), part(self.at, chars.len())),
+    /// Which size it puts at.
+    pub(super) fn kind(self) -> Kind {
+        match self {
+            Tool::Signature => Kind::Signature,
+            Tool::Text | Tool::Date => Kind::Text,
+            Tool::Check | Tool::Cross | Tool::Dot => Kind::Mark,
         }
     }
 }
+
+/// How much larger, or smaller, `[` and `]` make what they size.
+const STEP: f32 = 1.15;
+
+/// How long the wheel rests before what it sized is written to the copy.
+const WHEEL_REST: Duration = Duration::from_millis(250);
+
+/// The palette's first tool's row, below the top of the column: past its
+/// border, what a click does and a blank line.
+const PALETTE_TOP: u16 = 3;
+
+/// The keys the palette lists below the tools, and what each does.
+const KEYS: [(&str, &str); 9] = [
+    ("drag", "move what is put"),
+    ("wheel", "size what it is over"),
+    ("[ ]", "smaller, larger"),
+    ("⇧ arrows", "nudge"),
+    ("u", "take back"),
+    ("N", "new signature image"),
+    ("P", "print"),
+    ("enter", "done: save the copy"),
+    ("n p + -", "turn, zoom"),
+];
 
 /// A page, and a point on it, in points from its top left as it is shown.
 pub(super) type Spot = (usize, (f32, f32));
@@ -144,6 +106,14 @@ pub(super) struct Typing {
     pub(super) field: Field,
     offers: Vec<String>,
     offered: usize,
+}
+
+/// What was put and is being dragged: where the drag began, on the page,
+/// and where what is dragged was then; whether it has moved since.
+pub(super) struct Grab {
+    from: (f32, f32),
+    was: (f32, f32),
+    moved: bool,
 }
 
 /// The PDF being signed.
@@ -165,6 +135,12 @@ pub(super) struct Signing {
     pub(super) naming: Option<Field>,
     /// Where the signature and what is typed are kept, if anywhere.
     pub(super) kept_in: Option<PathBuf>,
+    /// How large each kind is put, as last set, kept in `kept_in`.
+    pub(super) sizes: Sizes,
+    /// What was put, and is last now, being dragged.
+    pub(super) grab: Option<Grab>,
+    /// When the wheel last sized what was put, the copy not yet written.
+    pub(super) wheeled: Option<Instant>,
 }
 
 impl App {
@@ -175,8 +151,14 @@ impl App {
 
     /// Begin signing the PDF presented.
     pub(super) fn sign(&mut self) {
+        // Begun again on the copy, what is put could no longer be moved or
+        // taken back.
+        if self.signing.is_some() {
+            self.notice = Some("annotating: enter when done".into());
+            return;
+        }
         if !render::pdf(&self.deck.paths) || !self.links.is_empty() {
-            self.notice = Some("only a PDF here is signed: S on one".into());
+            self.notice = Some("only a PDF is annotated: A on one".into());
             return;
         }
         let original = match sign::Original::read(&self.deck.data) {
@@ -189,8 +171,8 @@ impl App {
         let kept_in = sign::config();
         self.view = View::Present;
         self.notice = Some(match sign::kept(kept_in.as_deref()) {
-            Some(_) => "signing: click where your signature goes".into(),
-            None => "signing: click where your signature goes, and pick an image of it".into(),
+            Some(_) => "click the page where your signature goes".into(),
+            None => "click the page where your signature goes, and pick an image of it".into(),
         });
         self.signing = Some(Box::new(Signing {
             original,
@@ -202,6 +184,9 @@ impl App {
             waiting: None,
             typing: None,
             naming: None,
+            sizes: sign::sizes(kept_in.as_deref()),
+            grab: None,
+            wheeled: None,
             kept_in,
         }));
     }
@@ -263,29 +248,25 @@ impl App {
         }
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
-            KeyCode::Esc if s.marks.is_empty() => {
+            KeyCode::Esc | KeyCode::Enter if s.marks.is_empty() => {
                 self.signing = None;
-                self.notice = Some("nothing signed".into());
+                self.notice = Some("nothing put".into());
             }
-            KeyCode::Esc => {
+            KeyCode::Esc | KeyCode::Enter => {
                 let name = render::name(&s.copy);
                 let stem = name.trim_end_matches(".pdf").chars().count();
                 let added = sign::SIGNED.chars().count();
                 s.naming = Some(Field::picking(&name, stem - added, stem));
             }
-            KeyCode::Char('S') => self.pick_tool(Tool::Signature),
-            KeyCode::Char('T') => self.pick_tool(Tool::Text),
-            KeyCode::Char('D') => self.pick_tool(Tool::Date),
-            KeyCode::Char('C') => self.pick_tool(Tool::Check),
-            KeyCode::Char('X') => self.pick_tool(Tool::Cross),
-            KeyCode::Char('O') => self.pick_tool(Tool::Dot),
+            KeyCode::Char(c @ '1'..='6') => {
+                let n = c as usize - '1' as usize;
+                self.pick_tool(Tool::ALL[n]);
+            }
             KeyCode::Char('N') => self.pick_signature(None),
-            KeyCode::Char('u') => match s.marks.pop() {
-                Some(_) => self.write_copy(),
-                None => self.notice = Some("nothing put to take back".into()),
-            },
-            KeyCode::Char('[') => self.change_last(|m| m.scale = (m.scale / 1.15).max(0.2)),
-            KeyCode::Char(']') => self.change_last(|m| m.scale = (m.scale * 1.15).min(6.)),
+            KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => self.take_back(),
+            KeyCode::Char('u') | KeyCode::Backspace | KeyCode::Delete => self.take_back(),
+            KeyCode::Char('[') => self.resize(1. / STEP),
+            KeyCode::Char(']') => self.resize(STEP),
             KeyCode::Left if shift => self.change_last(|m| m.at.0 -= 2.),
             KeyCode::Right if shift => self.change_last(|m| m.at.0 += 2.),
             KeyCode::Up if shift => self.change_last(|m| m.at.1 -= 2.),
@@ -293,6 +274,17 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    /// Take back what was put, or picked, last.
+    fn take_back(&mut self) {
+        let Some(s) = &mut self.signing else {
+            return;
+        };
+        match s.marks.pop() {
+            Some(_) => self.write_copy(),
+            None => self.notice = Some("nothing put to take back".into()),
+        }
     }
 
     /// Change what was put last, and the copy with it.
@@ -309,8 +301,63 @@ impl App {
         }
     }
 
-    /// A click on the presented page while signing: what is picked put there.
+    /// Make what was put last `by` larger, and what is put next of its
+    /// kind as large; with nothing put, what is picked to put. The size is
+    /// kept for next time.
+    fn resize(&mut self, by: f32) {
+        if self.resize_only(by) {
+            self.write_copy();
+        }
+    }
+
+    /// Make what was put last `by` larger, as `resize` does, not writing
+    /// the copy: whether there was one to. The size is kept for next time
+    /// with the copy, or at once, with nothing put.
+    fn resize_only(&mut self, by: f32) -> bool {
+        let Some(s) = &mut self.signing else {
+            return false;
+        };
+        let (kind, scale) = match s.marks.last() {
+            Some(m) => (m.what.kind(), m.scale),
+            None => (s.tool.kind(), s.sizes.of(s.tool.kind())),
+        };
+        s.sizes.set(kind, scale * by);
+        let scale = s.sizes.of(kind);
+        match s.marks.last_mut() {
+            Some(mark) => {
+                mark.scale = scale;
+                true
+            }
+            None => {
+                sign::keep_sizes(s.kept_in.as_deref(), &s.sizes);
+                let name = s.tool.name();
+                self.notice = Some(format!("the {name} is put at {}%", percent(scale)));
+                false
+            }
+        }
+    }
+
+    /// The copy written, once the wheel has stopped sizing what was put
+    /// for `WHEEL_REST`, or at once if `now`: a turn of the wheel sends
+    /// many steps.
+    pub(super) fn settle_wheel(&mut self, now: bool) {
+        let due = self
+            .signing
+            .as_ref()
+            .and_then(|s| s.wheeled)
+            .is_some_and(|at| now || at.elapsed() >= WHEEL_REST);
+        if due {
+            self.write_copy();
+        }
+    }
+
+    /// A press on the screen while signing: on the palette, the tool there
+    /// picked; on what was put, it picked, last now, to drag, size or take
+    /// back; elsewhere on the page, what is picked put there.
     pub(super) fn sign_click(&mut self, at: Position) {
+        if let Some(tool) = self.palette_tool(at) {
+            return self.pick_tool(tool);
+        }
         let Some(spot @ (page, point)) = self.page_point(at) else {
             return;
         };
@@ -318,6 +365,18 @@ impl App {
             return;
         };
         if s.typing.is_some() || s.naming.is_some() {
+            return;
+        }
+        if let Some(i) = sign::under(&s.marks, page, point, s.signature.as_ref()) {
+            let mark = s.marks.remove(i);
+            s.grab = Some(Grab {
+                from: point,
+                was: mark.at,
+                moved: false,
+            });
+            s.marks.push(mark);
+            self.notice =
+                Some("picked · drag to move · wheel or [ ] to size · u takes it back".into());
             return;
         }
         let what = match s.tool {
@@ -360,8 +419,106 @@ impl App {
         self.put(Mark::new(page, point, what));
     }
 
+    /// Put `mark`, at the size of its kind.
+    /// The pointer dragged to `at`, with what was put picked: it moved
+    /// there, outlined until let go.
+    pub(super) fn sign_drag(&mut self, at: Position) {
+        let point = self.page_point(at);
+        let Some(s) = &mut self.signing else {
+            return;
+        };
+        let (Some(grab), Some(mark), Some((_, (x, y)))) = (&mut s.grab, s.marks.last_mut(), point)
+        else {
+            return;
+        };
+        mark.at = (grab.was.0 + x - grab.from.0, grab.was.1 + y - grab.from.1);
+        grab.moved = true;
+    }
+
+    /// The pointer let go: what was dragged put where it is now.
+    pub(super) fn sign_release(&mut self) {
+        let moved = self
+            .signing
+            .as_mut()
+            .and_then(|s| s.grab.take())
+            .is_some_and(|g| g.moved);
+        if moved {
+            self.write_copy();
+        }
+    }
+
+    /// The wheel at `at` while signing: over what was put, it picked and
+    /// made larger, `up`, or smaller; whether it was over one.
+    pub(super) fn sign_wheel(&mut self, at: Position, up: bool) -> bool {
+        let Some((page, point)) = self.page_point(at) else {
+            return false;
+        };
+        let Some(s) = &mut self.signing else {
+            return false;
+        };
+        let Some(i) = sign::under(&s.marks, page, point, s.signature.as_ref()) else {
+            return false;
+        };
+        let mark = s.marks.remove(i);
+        s.marks.push(mark);
+        if self.resize_only(if up { STEP } else { 1. / STEP })
+            && let Some(s) = &mut self.signing
+        {
+            s.wheeled = Some(Instant::now());
+        }
+        true
+    }
+
+    /// Where what is being dragged is now, to outline: its page and its box
+    /// on it, as `sign::bounds` has it.
+    pub(super) fn dragged(&self) -> Option<(usize, [f32; 4])> {
+        let s = self.signing.as_ref()?;
+        let mark = s
+            .marks
+            .last()
+            .filter(|_| s.grab.as_ref().is_some_and(|g| g.moved))?;
+        Some((mark.page, sign::bounds(mark, s.signature.as_ref())))
+    }
+
+    /// The tool whose row of the palette is at `at`, if one is.
+    fn palette_tool(&self, at: Position) -> Option<Tool> {
+        let side = self.side.get();
+        if !side.contains(at) {
+            return None;
+        }
+        let row = at.y.checked_sub(side.y + PALETTE_TOP)?;
+        Tool::ALL.get(usize::from(row)).copied()
+    }
+
+    /// The palette, in the column beside the page: the tools, the one
+    /// picked lit, each at the size it is put, and the keys.
+    pub(super) fn draw_palette(&self, f: &mut Frame, area: Rect) {
+        let Some(s) = &self.signing else {
+            return;
+        };
+        let dim = Style::new().fg(Color::DarkGray);
+        let mut lines = vec![Line::styled("click the page to put", dim), Line::raw("")];
+        for (n, tool) in Tool::ALL.into_iter().enumerate() {
+            let size = format!("{:>4}%", percent(s.sizes.of(tool.kind())));
+            let text = format!("{}  {:<10}{size}", n + 1, tool.name());
+            lines.push(row_line(tool == s.tool, &text));
+        }
+        lines.push(Line::raw(""));
+        for (keys, what) in KEYS {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{keys:<8} "),
+                    Style::new().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(what, dim),
+            ]));
+        }
+        f.render_widget(Paragraph::new(lines).block(side_block(" annotate ")), area);
+    }
+
     fn put(&mut self, mark: Mark) {
         if let Some(s) = &mut self.signing {
+            let mark = placed(s, mark);
             s.marks.push(mark);
             self.write_copy();
         }
@@ -417,7 +574,8 @@ impl App {
         match waiting {
             // Put, as the page shows: where it is kept is what is said.
             Some((page, at)) => {
-                s.marks.push(Mark::new(page, at, What::Signature));
+                let mark = placed(s, Mark::new(page, at, What::Signature));
+                s.marks.push(mark);
                 self.write_copy_saying(Some(kept));
             }
             None => self.notice = Some(kept),
@@ -432,23 +590,48 @@ impl App {
     /// Write the copy with all that is put, and show it, saying `said`, else
     /// how many are put.
     fn write_copy_saying(&mut self, said: Option<String>) {
-        let Some(s) = &self.signing else {
-            return;
-        };
-        let written = sign::stamp(&s.original, &s.marks, s.signature.as_ref())
-            .and_then(|pdf| Ok(sign::write(&s.copy, &pdf)?));
-        if let Err(e) = written {
+        if let Err(e) = self.write_stamped() {
             self.notice = Some(format!("cannot sign it: {e:#}"));
             return;
         }
+        let Some(s) = &self.signing else {
+            return;
+        };
         // Read in place of what is shown, the page and zoom kept.
-        let said = said.unwrap_or_else(|| format!("{} put · u takes it back", s.marks.len()));
+        let said = said.unwrap_or_else(|| "click it to move or size it · u takes it back".into());
         self.notice = Some(said.clone());
         self.read(vec![s.copy.clone()], self.deck.options.clone(), Some(said));
     }
 
+    /// The copy written with all that is put, and the sizes kept for next
+    /// time; the wheel's sizing written with it.
+    fn write_stamped(&mut self) -> anyhow::Result<()> {
+        let Some(s) = &mut self.signing else {
+            return Ok(());
+        };
+        sign::keep_sizes(s.kept_in.as_deref(), &s.sizes);
+        let pdf = sign::stamp(&s.original, &s.marks, s.signature.as_ref())?;
+        sign::write(&s.copy, &pdf)?;
+        s.wheeled = None;
+        Ok(())
+    }
+
+    /// The PDF as annotated now: the original with all that is put, though
+    /// the copy last written is still being read.
+    pub(super) fn annotated(&self) -> Option<Vec<u8>> {
+        let s = self.signing.as_ref()?;
+        sign::stamp(&s.original, &s.marks, s.signature.as_ref()).ok()
+    }
+
     /// Done signing: the copy under the name typed, and said where it is.
     fn finish(&mut self) {
+        // Sized by the wheel and not yet written: written here, and read
+        // once named, not before, as it is renamed at once.
+        let wheeled = self.signing.as_ref().is_some_and(|s| s.wheeled.is_some());
+        if wheeled && let Err(e) = self.write_stamped() {
+            self.notice = Some(format!("cannot sign it: {e:#}"));
+            return;
+        }
         let Some(mut s) = self.signing.take() else {
             return;
         };
@@ -473,7 +656,7 @@ impl App {
         report(&kept);
         let said = format!("signed: {}", kept.display());
         self.notice = Some(said.clone());
-        if kept != s.copy {
+        if kept != s.copy || wheeled {
             self.read(vec![kept], self.deck.options.clone(), Some(said));
         }
     }
@@ -506,13 +689,46 @@ impl App {
         }
         Some((
             format!(
-                "signing · click puts the {} · {} put",
+                "annotate · click puts the {} at {}% · {} put",
                 s.tool.name(),
+                percent(s.sizes.of(s.tool.kind())),
                 s.marks.len()
             ),
-            "S signature · T text · D date · C ✓ · X ✕ · O ● · N new signature · u undo · [ ] size · shift-arrows move · n/p +/- turn, zoom · esc done",
+            "1-6 tool · drag move · wheel or [ ] size · u take back · P print · enter done",
         ))
     }
+}
+
+/// `mark` as it is put: in a form field to sign or type in, if it was put
+/// in one, the signature fitted to it, and text at its left edge, halfway
+/// up it, no taller than it; else at the size its kind is put at.
+fn placed(s: &Signing, mark: Mark) -> Mark {
+    let scale = s.sizes.of(mark.what.kind());
+    let fits = matches!(mark.what, What::Signature | What::Text(_));
+    let field = fits
+        .then(|| sign::field_at(&s.original, mark.page, mark.at))
+        .flatten();
+    match (&mark.what, field, &s.signature) {
+        (What::Signature, Some(field), Some(signature)) => {
+            let (at, scale) = sign::fit(signature, field);
+            Mark { at, scale, ..mark }
+        }
+        (What::Text(_), Some([x0, y0, _, y1]), _) => {
+            let tallest = 0.7 * (y1 - y0) / sign::TEXT_SIZE;
+            let at = (x0 + 2., (y0 + y1) / 2.);
+            Mark {
+                at,
+                scale: scale.min(tallest),
+                ..mark
+            }
+        }
+        _ => Mark { scale, ..mark },
+    }
+}
+
+/// A scale as a percent, as `115`.
+fn percent(scale: f32) -> i32 {
+    (scale * 100.).round() as i32
 }
 
 /// Tell what ran ohp where the signed copy is: written to the file

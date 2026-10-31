@@ -109,6 +109,48 @@ pub struct Lit {
     pub boxes: Vec<Rect>,
 }
 
+/// A page's text to search, a char each, with the glyph it is of; none
+/// for the space between words.
+#[derive(Debug, Default)]
+pub struct Searchable(Vec<(char, Option<usize>)>);
+
+impl Searchable {
+    /// Each place `query` is, as the glyphs it is set in, in the order the
+    /// page is read. All in lower case, it is found in any case, as Emacs
+    /// searches; else in its own.
+    pub fn find(&self, query: &str) -> Vec<Vec<usize>> {
+        let query: Vec<char> = query
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .collect();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let any_case = !query.iter().any(|c| c.is_uppercase());
+        let fold = |c: char| match any_case {
+            true => c.to_lowercase().next().unwrap_or(c),
+            false => c,
+        };
+        let text = &self.0;
+        let mut found = Vec::new();
+        let mut i = 0;
+        while i + query.len() <= text.len() {
+            let here = &text[i..i + query.len()];
+            if here.iter().map(|&(c, _)| fold(c)).eq(query.iter().copied()) {
+                let mut glyphs: Vec<usize> = here.iter().filter_map(|&(_, g)| g).collect();
+                glyphs.dedup();
+                found.push(glyphs);
+                i += query.len();
+            } else {
+                i += 1;
+            }
+        }
+        found
+    }
+}
+
 /// Some of a page's sentences, as `Page::light` counts them: only the first
 /// 128 can be.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -251,9 +293,17 @@ pub fn extract<'a>(
 /// The text of `page` of the PDF in `data`, if it has that page and it can
 /// be read.
 pub fn of(data: Arc<Vec<u8>>, page: usize) -> Option<Page> {
-    let pdf = Pdf::new(data).ok()?;
+    of_each(data, &[page]).pop().flatten()
+}
+
+/// The text of each of `pages` of the PDF `data`, parsed once for all.
+pub fn of_each(data: Arc<Vec<u8>>, pages: &[usize]) -> Vec<Option<Page>> {
+    let Ok(pdf) = Pdf::new(data) else {
+        return pages.iter().map(|_| None).collect();
+    };
     let (cache, settings) = (InterpreterCache::new(), InterpreterSettings::default());
-    crate::render::caught(|| extract(&pdf, page, &cache, &settings))
+    let one = |&page: &usize| crate::render::caught(|| extract(&pdf, page, &cache, &settings));
+    pages.iter().map(one).collect()
 }
 
 impl Page {
@@ -376,6 +426,56 @@ impl Page {
                 glyphs[g] = true;
             }
         }
+        self.boxed(&lines, glyphs)
+    }
+
+    /// The page's text to search, read once: in the order the page is
+    /// read, words a space apart, and lines, so a query runs on from one
+    /// line to the next.
+    pub fn searchable(&self) -> Searchable {
+        self.searchable_in(&self.reading_lines())
+    }
+
+    fn searchable_in(&self, lines: &[(f32, Vec<Word>)]) -> Searchable {
+        let mut text: Vec<(char, Option<usize>)> = Vec::new();
+        for (_, words) in lines {
+            for w in words {
+                if !text.is_empty() {
+                    text.push((' ', None));
+                }
+                for &g in &w.glyphs {
+                    text.extend(self.glyphs[g].text.chars().map(|c| (c, Some(g))));
+                }
+            }
+        }
+        Searchable(text)
+    }
+
+    /// What a search for `query` lights: the place `current` of those it
+    /// is, and the others; the page read once for both.
+    pub fn found(&self, query: &str, current: Option<usize>) -> (Lit, Lit) {
+        let lines = self.reading_lines();
+        let mut all = self.searchable_in(&lines).find(query);
+        let current: Vec<Vec<usize>> = current
+            .filter(|&k| k < all.len())
+            .map(|k| all.remove(k))
+            .into_iter()
+            .collect();
+        let glyphs = |found: &[Vec<usize>]| {
+            let mut glyphs = vec![false; self.glyphs.len()];
+            for &g in found.iter().flatten() {
+                glyphs[g] = true;
+            }
+            glyphs
+        };
+        (
+            self.boxed(&lines, glyphs(&current)),
+            self.boxed(&lines, glyphs(&all)),
+        )
+    }
+
+    /// `glyphs` to be lit, and the boxes about them, one a line of `lines`.
+    fn boxed(&self, lines: &[(f32, Vec<Word>)], glyphs: Vec<bool>) -> Lit {
         let boxes = lines
             .iter()
             .filter_map(|(_, words)| {

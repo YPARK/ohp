@@ -33,8 +33,10 @@
 //! sentences on whatever slides they are. Either again closes the column.
 //! `m` picks the model that sums up, in a list over the slides.
 //!
-//! `S` signs a PDF: each click puts a signature, text or a mark where it
-//! is, in a copy shown in place of the PDF, as `signing` has it.
+//! `A` annotates a PDF: each click puts a signature, text or a mark where
+//! it is, in a copy shown in place of the PDF, with a palette of the tools
+//! beside it, as `signing` has it. `P` or ctrl-P prints what is shown, as
+//! `printing` has it.
 
 use crate::browse::{self, Browser};
 #[cfg(feature = "summary")]
@@ -65,7 +67,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 mod draw;
+mod field;
 mod input;
+mod printing;
+mod search;
 #[cfg(feature = "sign")]
 mod signing;
 
@@ -101,9 +106,12 @@ pub fn run(
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
     // Taken, the terminal's own selecting needs Shift, or Option on macOS.
-    // Only presses and the wheel, as SGR codes: crossterm's capture would
+    // Presses, drags and the wheel, as SGR codes: crossterm's capture would
     // send every move of the mouse too, over ssh as well.
-    let _ = execute!(std::io::stdout(), Print("\x1b[?1000h\x1b[?1006h"));
+    let _ = execute!(
+        std::io::stdout(),
+        Print("\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+    );
     let result = (|| {
         let picker = pick();
         quiet_render_panics();
@@ -124,6 +132,8 @@ pub fn run(
             .set_deck(app.deck.data.clone(), app.deck.pages);
         app.run(&mut terminal)?;
         app.quit_signing();
+        // What is being handed to lp, handed over whole before ohp ends.
+        app.wait_for_printing(Duration::from_secs(30));
         app.clear_images()
     })();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
@@ -281,6 +291,11 @@ struct App {
     shown: Cell<Option<Job>>,
     /// The presented slide on screen, and the cells it is drawn in.
     drawn: Cell<Option<(Job, Rect)>>,
+    /// The column beside the slides, as last drawn: the summary, the
+    /// annotate palette or the print form.
+    side: Cell<Rect>,
+    /// Where a drag panning the zoomed slide began, and the zoom then.
+    panning: Option<(ratatui::layout::Position, Zoom)>,
     /// Where slides are drawn: the screen above the status line, but for
     /// the summary's column.
     main: Rect,
@@ -306,6 +321,19 @@ struct App {
     /// The PDF being signed, while it is.
     #[cfg(feature = "sign")]
     signing: Option<Box<signing::Signing>>,
+    /// A search under way, as `ctrl-s` begins it.
+    search: Option<search::Search>,
+    /// The last query searched for, searched again by `ctrl-s` on none.
+    last_query: String,
+    /// The slides' text, as searching reads it, until the deck is read
+    /// again.
+    texts: Option<Vec<crate::text::Searchable>>,
+    /// The slides' text being read for searching, off the screen's thread.
+    reading: Option<Receiver<Vec<crate::text::Searchable>>>,
+    /// What was sent to the printer, each being taken by `lp`.
+    sending: Vec<Receiver<String>>,
+    /// What is picked to print, while `P` is picking it.
+    printing: Option<printing::Printing>,
     /// How files picked with Ctrl-O are read.
     local: Options,
     /// The list another file is picked from, open over the slides.
@@ -359,6 +387,8 @@ impl App {
             zoom: Zoom::FIT,
             shown: Cell::new(None),
             drawn: Cell::new(None),
+            side: Cell::new(Rect::default()),
+            panning: None,
             main: Rect::default(),
             slides: HashMap::new(),
             stale: HashMap::new(),
@@ -371,6 +401,12 @@ impl App {
             asked: None,
             #[cfg(feature = "sign")]
             signing: None,
+            printing: None,
+            sending: Vec::new(),
+            search: None,
+            last_query: String::new(),
+            texts: None,
+            reading: None,
             browser: None,
             signaled,
             notice: None,
@@ -395,10 +431,7 @@ impl App {
         let mut laid = (Rect::default(), false);
         while !self.quit {
             let size = terminal.size()?;
-            let now = (
-                Rect::new(0, 0, size.width, size.height),
-                self.panel.is_some(),
-            );
+            let now = (Rect::new(0, 0, size.width, size.height), self.side_open());
             if now != laid {
                 laid = now;
                 self.main = split(now.0, now.1).0;
@@ -420,6 +453,9 @@ impl App {
             while let Ok(done) = self.renderer.done.try_recv() {
                 self.receive(done);
             }
+            self.settle_wheel(false);
+            self.poll_printing();
+            self.read_texts();
             self.watch();
             self.loaded();
             self.read_along();
@@ -520,6 +556,8 @@ impl App {
 
     /// Read `paths` on a thread of its own, to present in place of the deck.
     fn open(&mut self, paths: Vec<PathBuf>) {
+        // What is annotated is of the file shown: another, it is done.
+        self.quit_signing();
         if self.loading.is_some() {
             self.then = Some(Then::Open(paths));
             return;
@@ -621,6 +659,7 @@ impl App {
                 self.summarizer.set_deck(deck.data.clone(), deck.pages);
                 self.deck = deck;
                 self.renderer = renderer;
+                self.searched_anew();
                 // Its files as they were read: what changed since is read again.
                 if let Some(asked) = asked {
                     self.stamp = asked.stamps;
@@ -863,6 +902,9 @@ impl App {
 
     /// The slides on screen, the current one first.
     fn visible(&self) -> Vec<Key> {
+        if let Some(preview) = self.preview() {
+            return vec![preview.key];
+        }
         match self.view {
             View::Present => vec![self.presented()],
             View::Grid => {
@@ -896,6 +938,7 @@ impl App {
             look: self.look,
             lit: self.lit.filter(|_| reading),
             marked: self.marked(key.page),
+            found: self.found(key.page),
         }
     }
 
@@ -926,6 +969,13 @@ impl App {
         }
         self.renderer.push(jobs);
 
+        let previewed = self.preview().map(|p| p.key);
+        // What a search finds on each slide now: a slide lit otherwise is
+        // not kept, as each letter typed and each step lights anew.
+        let found: Vec<Option<render::Found>> =
+            (0..self.deck.pages).map(|p| self.found(p)).collect();
+        let finding =
+            |job: &Job| job.found.is_none() || found.get(job.key.page) == Some(&job.found);
         let (cur, zoom, shown, lit) = (self.cur, self.zoom, self.shown.get(), self.lit);
         let full = area.as_size();
         let grid = self.grid();
@@ -939,13 +989,16 @@ impl App {
         // Both looks are kept, so `t` back is immediate.
         self.slides.retain(|job, _| {
             let key = job.key;
-            if key.size() == full {
+            if Some(key) == previewed {
+                true
+            } else if key.size() == full {
                 let kept = key.zoom == zoom || key.zoom == Zoom::FIT || Some(*job) == shown;
                 let lighting = job.lit.is_none() || job.lit == lit || Some(*job) == shown;
                 let marking = marking(job) || Some(*job) == shown;
-                key.page.abs_diff(cur) <= KEEP && kept && lighting && marking
+                let finding = finding(job) || Some(*job) == shown;
+                key.page.abs_diff(cur) <= KEEP && kept && lighting && marking && finding
             } else {
-                key.size() == thumb && marking(job)
+                key.size() == thumb && marking(job) && finding(job)
             }
         });
     }
@@ -953,11 +1006,21 @@ impl App {
     // ── drawing ─────────────────────────────────────────────────────────
 }
 
-/// Built without signing, `S` says so, and nothing else is signing's.
+/// What `work` returns, worked out on a thread of its own, off the
+/// screen's: asked for with `try_recv` as the screen is redrawn.
+fn background<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Receiver<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    rx
+}
+
+/// Built without signing, `A` says so, and nothing else is signing's.
 #[cfg(not(feature = "sign"))]
 impl App {
     fn sign(&mut self) {
-        self.notice = Some("ohp was built without signing: --features sign".into());
+        self.notice = Some("ohp was built without annotating: --features sign".into());
     }
 
     fn sign_key(&mut self, _: ratatui::crossterm::event::KeyEvent) -> bool {
@@ -969,6 +1032,26 @@ impl App {
     }
 
     fn sign_click(&mut self, _: ratatui::layout::Position) {}
+
+    fn settle_wheel(&mut self, _: bool) {}
+
+    fn annotated(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn sign_drag(&mut self, _: ratatui::layout::Position) {}
+
+    fn sign_release(&mut self) {}
+
+    fn sign_wheel(&mut self, _: ratatui::layout::Position, _: bool) -> bool {
+        false
+    }
+
+    fn dragged(&self) -> Option<(usize, [f32; 4])> {
+        None
+    }
+
+    fn draw_palette(&self, _: &mut ratatui::Frame, _: Rect) {}
 
     fn sign_status(&self) -> Option<(String, &'static str)> {
         None
