@@ -30,7 +30,7 @@ summary = [
 # A PDF signed: a saved picture of a signature, text such as a name or the
 # date, and ✓ ✕ ● marks, drawn onto its pages by lopdf, in pure Rust, and
 # appended to a copy of it as an incremental update.
-sign = ["dep:libc", "dep:lopdf", "image/png", "image/jpeg"]
+sign = ["dep:jiff", "dep:lopdf", "image/png", "image/jpeg"]
 # Slides read aloud by a speech program, run as R is, in a session of its own.
 speech = ["dep:libc", "dep:signal-hook", "dep:serde_json"]
 # Markdown, R Markdown and HTML, typeset by typst. Typst's evaluator grows
@@ -70,6 +70,8 @@ clap = { version = "4.6", features = ["derive", "env"] }
 hayagriva = { version = "0.10.1", optional = true }
 hayro = "0.7.1"
 image = { version = "0.25", default-features = false }
+# Today's date, in the time zone here, read from the system's tzdb in Rust.
+jiff = { version = "0.2", optional = true }
 lopdf = { version = "0.46", optional = true, default-features = false }
 percent-encoding = { version = "2.3", optional = true }
 pulldown-cmark = { version = "0.13", default-features = false, optional = true }

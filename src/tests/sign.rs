@@ -53,10 +53,13 @@ fn initials_are_each_word_s_first_letter() {
 }
 
 #[test]
-fn days_count_from_1970() {
-    assert_eq!(civil(0), (1970, 1, 1));
-    assert_eq!(civil(20_756), (2026, 10, 30));
-    assert_eq!(civil(11_016), (2000, 2, 29));
+fn today_is_a_date_as_forms_write_it() {
+    let today = today();
+    assert_eq!(today.len(), 10, "{today}");
+    assert!(
+        jiff::civil::Date::strptime("%Y-%m-%d", &today).is_ok(),
+        "{today}"
+    );
 }
 
 #[test]
