@@ -34,6 +34,10 @@ impl App {
             MouseEventKind::ScrollDown => self.key(KeyCode::Down.into()),
             MouseEventKind::ScrollUp => self.key(KeyCode::Up.into()),
             MouseEventKind::Down(MouseButton::Left) => match self.view {
+                View::Present if self.signing() => {
+                    self.sign_click(at);
+                    self.dirty = true;
+                }
                 View::Present if self.speaker.reading() => {
                     if let Some(k) = self.sentence_at(at) {
                         self.notice = None;
@@ -75,15 +79,31 @@ impl App {
         {
             return page.sentence_of(cell.glyph);
         }
+        let (_, (x, y)) = self.page_point(at)?;
+        page.sentence_near(x, y)
+    }
+
+    /// The presented page shown at `at` on the screen, and the point of it
+    /// there, the middle of its cell, in points from its top left as shown.
+    pub(super) fn page_point(&self, at: Position) -> Option<(usize, (f32, f32))> {
+        let (job, area) = self.drawn.get()?;
+        if !area.contains(at) {
+            return None;
+        }
+        let (dx, dy) = (at.x - area.x, at.y - area.y);
         let font = self.picker.font_size();
         let (fw, fh) = (f32::from(font.width), f32::from(font.height));
         let key = job.key;
-        let scale = render::fit(key, (fw, fh), (page.width, page.height)) * key.zoom.scale();
+        let size = *self.deck.sizes.get(key.page)?;
+        let scale = render::fit(key, (fw, fh), size) * key.zoom.scale();
         // The middle of the cell, past the part of the slide panned off.
         let point = |pan: u16, cell: u16, size: f32| {
             (f32::from(pan) + f32::from(cell) + 0.5) * size / scale
         };
-        page.sentence_near(point(key.zoom.x, dx, fw), point(key.zoom.y, dy, fh))
+        Some((
+            key.page,
+            (point(key.zoom.x, dx, fw), point(key.zoom.y, dy, fh)),
+        ))
     }
 
     pub(super) fn key(&mut self, key: KeyEvent) {
@@ -96,11 +116,18 @@ impl App {
         if let Some(browser) = &mut self.browser {
             match browser.key(key) {
                 browse::Outcome::Stay => {}
+                browse::Outcome::Open(paths) if self.picking_signature() => {
+                    self.browser = None;
+                    self.picked_signature(Some(paths));
+                }
                 browse::Outcome::Open(paths) => {
                     self.browser = None;
                     self.open(self.added_first(paths));
                 }
-                browse::Outcome::Quit => self.browser = None,
+                browse::Outcome::Quit => {
+                    self.browser = None;
+                    self.picked_signature(None);
+                }
             }
             self.dirty = true;
             return;
@@ -118,6 +145,10 @@ impl App {
             if let Some(weights) = self.models.key(key) {
                 self.summarize_with(weights);
             }
+            self.dirty = true;
+            return;
+        }
+        if self.sign_key(key) {
             self.dirty = true;
             return;
         }
@@ -161,6 +192,7 @@ impl App {
             KeyCode::Char('k') => self.summarize(Panel::Slide),
             KeyCode::Char('K') => self.summarize(Panel::Whole),
             KeyCode::Char('m') => self.choose_model(),
+            KeyCode::Char('S') => self.sign(),
             _ => return,
         }
         self.dirty = true;

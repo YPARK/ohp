@@ -228,12 +228,17 @@ impl App {
             ),
             View::Present => (
                 "present",
-                "n/p ←/→ next/prev · +/- zoom · g grid · t text · s speak, then click to speak from · v voice · k/K summary · m model · r reload · ^O open · q quit",
+                "n/p ←/→ next/prev · +/- zoom · g grid · t text · s speak, then click to speak from · v voice · k/K summary · m model · S sign · r reload · ^O open · q quit",
             ),
             View::Grid => (
                 "grid",
                 "n/p arrows click move · g/enter/double-click present · +/- zoom · t text · s speak · v voice · k/K summary · m model · r reload · ^O open · q quit",
             ),
+        };
+        let signing = self.sign_status();
+        let (view, keys) = match &signing {
+            Some((doing, keys)) => (doing.as_str(), *keys),
+            None => (view, keys),
         };
         let look = match self.look {
             Look::Image => "",
