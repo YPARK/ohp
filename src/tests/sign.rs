@@ -17,11 +17,15 @@ fn photo() -> DynamicImage {
 fn a_photo_is_cut_to_its_ink_and_its_paper_made_clear() {
     let s = Signature::of(&photo()).unwrap();
     // 120 by 10 of ink, a little room round it.
-    assert!((120..130).contains(&s.width), "{}", s.width);
-    assert!((10..16).contains(&s.height), "{}", s.height);
-    assert_eq!(s.alpha[0], 0, "a corner is paper");
-    let middle = (s.height / 2 * s.width + s.width / 2) as usize;
-    assert_eq!(s.alpha[middle], 255, "the middle is ink");
+    assert!((120..130).contains(&s.width()), "{}", s.width());
+    assert!((10..16).contains(&s.height()), "{}", s.height());
+    assert_eq!(
+        s.image.get_pixel(0, 0).0,
+        [0; 4],
+        "a corner is paper, one colour"
+    );
+    let middle = s.image.get_pixel(s.width() / 2, s.height() / 2);
+    assert_eq!(middle[3], 255, "the middle is ink");
 }
 
 #[test]
@@ -34,7 +38,7 @@ fn all_paper_is_no_signature() {
 fn a_kept_signature_reads_back_the_same() {
     let s = Signature::of(&photo()).unwrap();
     let again = Signature::of(&image::load_from_memory(&s.png().unwrap()).unwrap()).unwrap();
-    assert_eq!((again.width, again.height), (s.width, s.height));
+    assert_eq!(again.image.dimensions(), s.image.dimensions());
 }
 
 #[test]
@@ -93,7 +97,7 @@ fn marks_are_appended_and_the_original_kept_whole() {
         Mark::new(1, (100., 140.), What::Text("Yongjin Park".into())),
         Mark::new(0, (50., 50.), What::Check),
     ];
-    let signed = stamp(&pdf, &marks, Some(&signature)).unwrap();
+    let signed = stamp(&Original::read(&pdf).unwrap(), &marks, Some(&signature)).unwrap();
     assert!(signed.starts_with(&pdf), "an incremental update");
     let doc = Document::load_mem(&signed).unwrap();
     let pages = doc.get_pages();
@@ -123,5 +127,43 @@ fn marks_are_appended_and_the_original_kept_whole() {
 #[test]
 fn a_signature_is_needed_to_put_one() {
     let marks = [Mark::new(0, (1., 1.), What::Signature)];
-    assert!(stamp(&fixture::pdf(1), &marks, None).is_err());
+    let original = Original::read(&fixture::pdf(1)).unwrap();
+    assert!(stamp(&original, &marks, None).is_err());
+}
+
+#[test]
+fn a_photo_s_paper_grain_is_not_kept() {
+    // Paper with grain under the ink: once clear, one colour.
+    let grain = image::RgbImage::from_fn(300, 100, |x, y| {
+        let ink = (100..200).contains(&x) && (45..55).contains(&y);
+        let n = ((x * 7 + y * 13) % 9) as u8;
+        image::Rgb(if ink {
+            [20, 20, 60]
+        } else {
+            [240 + n, 238 + n, 230 + n]
+        })
+    });
+    let s = Signature::of(&DynamicImage::ImageRgb8(grain)).unwrap();
+    // Compressed, the clear part is next to nothing.
+    assert!(s.colour.content.len() < 2_000, "{}", s.colour.content.len());
+}
+
+#[test]
+fn what_is_typed_and_the_signature_are_kept_where_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    let at = Some(dir.path());
+    assert!(typed(at).is_empty());
+    remember(at, "Yongjin Park");
+    remember(at, "Vancouver");
+    remember(at, "Yongjin Park");
+    assert_eq!(typed(at), ["Yongjin Park", "Vancouver"]);
+    let s = Signature::of(&photo()).unwrap();
+    let path = keep(at, &s).unwrap();
+    assert_eq!(kept(at), Some(path));
+    assert_eq!(kept(None), None);
+}
+
+#[test]
+fn a_locked_pdf_is_not_read_to_sign() {
+    assert!(Original::read(b"not a PDF").is_err());
 }

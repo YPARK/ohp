@@ -7,10 +7,12 @@ use crate::sign::{Signature, What};
 /// The deck's one page, as drawn on the 140×39 screen: 139 by 39 cells.
 const PAGE: Rect = Rect::new(0, 0, 139, 39);
 
-/// An app signing a one-page deck, with a signature to put.
+/// An app signing a one-page deck, with a signature to put, keeping what
+/// it keeps in its own folder.
 fn signing() -> (tempfile::TempDir, App) {
     let (dir, mut app) = app(1);
     press(&mut app, &[KeyCode::Char('S')]);
+    app.signing.as_mut().unwrap().kept_in = Some(dir.path().join("kept"));
     let ink = image::RgbImage::from_fn(40, 10, |x, _| {
         image::Rgb(if (5..35).contains(&x) {
             [0; 3]
@@ -107,6 +109,14 @@ fn text_is_typed_where_it_was_clicked_and_put_on_enter() {
     press(&mut app, &[KeyCode::Enter]);
     finish(&mut app);
     assert_eq!(marks(&app)[0].what, What::Text("Yongjin Park".into()));
+    // Next time it is offered first, picked, its initials after it.
+    click(&mut app, 20, 14);
+    assert_eq!(typing_text(&app), "Yongjin Park");
+    press(&mut app, &[KeyCode::Tab]);
+    assert_eq!(typing_text(&app), "YP");
+    // Alt and a letter is no letter typed.
+    app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
+    assert_eq!(typing_text(&app), "YP");
 }
 
 fn typing_text(app: &App) -> String {
@@ -131,6 +141,33 @@ fn done_asks_the_copy_s_name_its_signed_picked_to_type_over() {
     assert!(kept.is_file() && !dir.path().join("deck-signed.pdf").exists());
     assert_eq!(app.deck.paths, std::slice::from_ref(&kept));
     assert_eq!(app.notice, Some(format!("signed: {}", kept.display())));
+}
+
+#[test]
+fn a_signature_picked_is_put_where_clicked_and_kept() {
+    let (dir, mut app) = signing();
+    app.signing.as_mut().unwrap().signature = None;
+    let png = dir.path().join("mine.png");
+    let ink = image::RgbImage::from_fn(40, 10, |x, _| {
+        image::Rgb(if (5..35).contains(&x) {
+            [0; 3]
+        } else {
+            [255; 3]
+        })
+    });
+    ink.save(&png).unwrap();
+    // None kept: a click asks for one, and waits for it.
+    click(&mut app, 20, 10);
+    assert!(app.browser.is_some() && app.picking_signature());
+    app.picked_signature(Some(vec![png]));
+    finish(&mut app);
+    assert_eq!(marks(&app).len(), 1, "put where it was clicked");
+    let notice = app.notice.clone().unwrap();
+    assert!(
+        notice.starts_with("signature kept for next time"),
+        "{notice}"
+    );
+    assert!(dir.path().join("kept/signature.png").is_file());
 }
 
 #[test]

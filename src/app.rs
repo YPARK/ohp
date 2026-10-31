@@ -123,7 +123,6 @@ pub fn run(
         app.summarizer
             .set_deck(app.deck.data.clone(), app.deck.pages);
         app.run(&mut terminal)?;
-        #[cfg(feature = "sign")]
         app.quit_signing();
         app.clear_images()
     })();
@@ -250,9 +249,17 @@ enum Then {
     Reload,
     /// Files picked while another was being read.
     Open(Vec<PathBuf>),
-    /// The copy being signed, written again while it was being read.
-    #[cfg(feature = "sign")]
-    Signed,
+    /// Files asked to be read in place of the deck's, as it is read, and
+    /// what to say once they are: the last asked.
+    Read(Vec<PathBuf>, Option<String>),
+}
+
+/// What a read under way was asked with: its files as they were just
+/// before it, so what changes after is read again, and what to say once
+/// it is done, in place of `reloaded`.
+struct Asked {
+    stamps: Vec<Stamp>,
+    said: Option<String>,
 }
 
 struct App {
@@ -294,8 +301,8 @@ struct App {
     opening: Option<Vec<PathBuf>>,
     /// What to read once the read under way is done.
     then: Option<Then>,
-    /// What to say once the read under way is done, in place of `reloaded`.
-    read_said: Option<String>,
+    /// What the read under way was asked with.
+    asked: Option<Asked>,
     /// The PDF being signed, while it is.
     #[cfg(feature = "sign")]
     signing: Option<Box<signing::Signing>>,
@@ -361,7 +368,7 @@ impl App {
             loading: None,
             opening: None,
             then: None,
-            read_said: None,
+            asked: None,
             #[cfg(feature = "sign")]
             signing: None,
             browser: None,
@@ -461,6 +468,11 @@ impl App {
             self.trouble = trouble;
             self.dirty = true;
         }
+        // What is being read is looked at once it is: it knows its files
+        // as they were.
+        if self.loading.is_some() {
+            return;
+        }
         let now = self.deck.stamps();
         if now == self.stamp {
             self.settling = None;
@@ -480,14 +492,6 @@ impl App {
         }
     }
 
-    /// Whether the PDF presented is being signed.
-    fn signing(&self) -> bool {
-        #[cfg(feature = "sign")]
-        return self.signing.is_some();
-        #[cfg(not(feature = "sign"))]
-        false
-    }
-
     /// Read the deck again on a thread of its own.
     fn reload(&mut self) {
         if self.loading.is_some() {
@@ -495,7 +499,7 @@ impl App {
             self.then.get_or_insert(Then::Reload);
             return;
         }
-        self.read(self.deck.paths.clone(), self.deck.options.clone());
+        self.read(self.deck.paths.clone(), self.deck.options.clone(), None);
     }
 
     /// Files just added, then the ones the deck already had, so the new
@@ -521,10 +525,18 @@ impl App {
             return;
         }
         self.opening = Some(paths.clone());
-        self.read(paths, self.local.clone());
+        self.read(paths, self.local.clone(), None);
     }
 
-    fn read(&mut self, paths: Vec<PathBuf>, options: Options) {
+    /// Read `paths` on a thread of its own, to show in place of the deck,
+    /// `said` once they are; or, while a read is under way, once it is done.
+    fn read(&mut self, paths: Vec<PathBuf>, options: Options, said: Option<String>) {
+        if self.loading.is_some() {
+            self.then = Some(Then::Read(paths, said));
+            return;
+        }
+        let stamps = paths.iter().map(|p| render::stamp(p)).collect();
+        self.asked = Some(Asked { stamps, said });
         let (tx, rx) = std::sync::mpsc::channel();
         // Nothing to do if the app is gone.
         let reader = std::thread::spawn(move || {
@@ -578,6 +590,7 @@ impl App {
             Ok((deck, renderer))
         });
         let opening = self.opening.take();
+        let asked = self.asked.take();
         match fresh {
             Ok((deck, renderer)) => {
                 if opening.is_some() {
@@ -595,22 +608,22 @@ impl App {
                     // A reload asked for was of the file this replaces.
                     self.then = self.then.take().filter(|then| *then != Then::Reload);
                     self.notice = deck.note.clone();
-                } else if let Some(said) = self.read_said.take() {
-                    self.notice = Some(said);
-                } else if !self.signing() {
-                    self.notice = Some(match &deck.note {
-                        Some(note) => format!("reloaded; {note}"),
-                        None => "reloaded".into(),
-                    });
+                } else {
+                    self.notice = Some(
+                        match (asked.as_ref().and_then(|a| a.said.clone()), &deck.note) {
+                            (Some(said), _) => said,
+                            (None, Some(note)) => format!("reloaded; {note}"),
+                            (None, None) => "reloaded".into(),
+                        },
+                    );
                 }
                 self.cur = self.cur.min(deck.pages - 1);
                 self.summarizer.set_deck(deck.data.clone(), deck.pages);
                 self.deck = deck;
                 self.renderer = renderer;
-                // The copy being signed, read as it was written: not a
-                // change on disk to read again.
-                if self.signing() {
-                    self.stamp = self.deck.stamps();
+                // Its files as they were read: what changed since is read again.
+                if let Some(asked) = asked {
+                    self.stamp = asked.stamps;
                     self.settling = None;
                 }
                 self.requested.clear();
@@ -631,8 +644,7 @@ impl App {
         match self.then.take() {
             Some(Then::Open(path)) => self.open(path),
             Some(Then::Reload) => self.reload(),
-            #[cfg(feature = "sign")]
-            Some(Then::Signed) => self.show_copy(),
+            Some(Then::Read(paths, said)) => self.read(paths, self.deck.options.clone(), said),
             None => {}
         }
     }
@@ -939,6 +951,36 @@ impl App {
     }
 
     // ── drawing ─────────────────────────────────────────────────────────
+}
+
+/// Built without signing, `S` says so, and nothing else is signing's.
+#[cfg(not(feature = "sign"))]
+impl App {
+    fn sign(&mut self) {
+        self.notice = Some("ohp was built without signing: --features sign".into());
+    }
+
+    fn sign_key(&mut self, _: ratatui::crossterm::event::KeyEvent) -> bool {
+        false
+    }
+
+    fn signing(&self) -> bool {
+        false
+    }
+
+    fn sign_click(&mut self, _: ratatui::layout::Position) {}
+
+    fn sign_status(&self) -> Option<(String, &'static str)> {
+        None
+    }
+
+    fn picking_signature(&self) -> bool {
+        false
+    }
+
+    fn picked_signature(&mut self, _: Option<Vec<PathBuf>>) {}
+
+    fn quit_signing(&mut self) {}
 }
 
 /// However ohp ends, even by a panic, a reload under way stops with it.

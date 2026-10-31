@@ -11,6 +11,8 @@
 //! signature it carries stays valid.
 
 use anyhow::{Context, bail};
+use image::ImageDecoder;
+use image::imageops::FilterType;
 use image::{DynamicImage, GenericImageView, RgbaImage};
 use lopdf::{Dictionary, Document, IncrementalDocument, Object, ObjectId, Stream, dictionary};
 use std::path::{Path, PathBuf};
@@ -60,25 +62,29 @@ impl Mark {
     }
 }
 
-/// A signature as a picture: each pixel's colour and how opaque it is, the
-/// paper it was on made clear and cut away.
-#[derive(Clone, Debug, PartialEq)]
+/// A signature as a picture, the paper it was on made clear and cut away,
+/// and as the image a page shows it by, compressed once.
+#[derive(Clone, Debug)]
 pub struct Signature {
-    pub width: u32,
-    pub height: u32,
-    rgb: Vec<u8>,
-    alpha: Vec<u8>,
+    image: RgbaImage,
+    /// Its colours, and how clear each is, if any is.
+    colour: Stream,
+    mask: Option<Stream>,
 }
 
 impl Signature {
     /// The signature in the image at `path`: a PNG with its own clear
-    /// background, or a photo or scan of one on paper.
+    /// background, or a photo or scan of one on paper, upright as a phone
+    /// says it took it.
     pub fn read(path: &Path) -> anyhow::Result<Self> {
-        let image = image::ImageReader::open(path)
+        let mut decoder = image::ImageReader::open(path)
             .with_context(|| format!("cannot open {}", path.display()))?
             .with_guessed_format()?
-            .decode()
+            .into_decoder()
             .with_context(|| format!("cannot read {} as an image", path.display()))?;
+        let orientation = decoder.orientation()?;
+        let mut image = DynamicImage::from_decoder(decoder)?;
+        image.apply_orientation(orientation);
         Signature::of(&image)
     }
 
@@ -86,15 +92,29 @@ impl Signature {
     /// its paper is made clear: each pixel is as opaque as it is darker
     /// than the paper, the brightest part of the image.
     pub fn of(image: &DynamicImage) -> anyhow::Result<Self> {
-        let mut rgba = image.to_rgba8();
+        // A phone's photo, ten times the size kept, made smaller first.
+        let most = 2 * MAX_SIDE;
+        let mut rgba = if image.width().max(image.height()) > most {
+            image.resize(most, most, FilterType::Triangle).to_rgba8()
+        } else {
+            image.to_rgba8()
+        };
         let clear = rgba.pixels().any(|p| p[3] < 250);
         if !clear {
             let luma = |p: &image::Rgba<u8>| {
                 0.299 * f32::from(p[0]) + 0.587 * f32::from(p[1]) + 0.114 * f32::from(p[2])
             };
-            let mut lumas: Vec<f32> = rgba.pixels().map(luma).collect();
-            lumas.sort_by(f32::total_cmp);
-            let paper = lumas[lumas.len() * 95 / 100].max(1.);
+            let mut counts = [0usize; 256];
+            for p in rgba.pixels() {
+                counts[luma(p) as usize] += 1;
+            }
+            let mut below = rgba.len() / 4 * 95 / 100;
+            let paper = counts.iter().position(|&n| {
+                let past = n > below;
+                below = below.saturating_sub(n);
+                past
+            });
+            let paper = (paper.unwrap_or(255) as f32).max(1.);
             for p in rgba.pixels_mut() {
                 let dark = (paper - luma(p)) / paper;
                 // Faint shadows and grain clear; ink from a sixth darker on.
@@ -102,38 +122,63 @@ impl Signature {
                 p[3] = (alpha * 255.).round() as u8;
             }
         }
-        let rgba = crop(&rgba).context("no signature in the image: it is all paper")?;
-        let rgba = smaller(rgba);
-        let (width, height) = rgba.dimensions();
-        let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
-        let mut alpha = Vec::with_capacity(rgba.len() / 4);
-        for p in rgba.pixels() {
-            rgb.extend_from_slice(&p.0[..3]);
-            alpha.push(p[3]);
+        // What is clear, one colour: the paper's grain, unseen, would be
+        // kept, and compressed, in every copy signed.
+        for p in rgba.pixels_mut().filter(|p| p[3] == 0) {
+            *p = image::Rgba([0; 4]);
         }
+        let mut rgba = crop(&rgba).context("no signature in the image: it is all paper")?;
+        if rgba.width().max(rgba.height()) > MAX_SIDE {
+            rgba = DynamicImage::ImageRgba8(rgba)
+                .resize(MAX_SIDE, MAX_SIDE, FilterType::Triangle)
+                .to_rgba8();
+        }
+        let image = |space: &str, bytes: Vec<u8>| -> anyhow::Result<Stream> {
+            let mut stream = Stream::new(
+                dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Image",
+                    "Width" => i64::from(rgba.width()),
+                    "Height" => i64::from(rgba.height()),
+                    "ColorSpace" => space,
+                    "BitsPerComponent" => 8,
+                },
+                bytes,
+            );
+            stream.compress()?;
+            Ok(stream)
+        };
+        let rgb = rgba.pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
+        let colour = image("DeviceRGB", rgb)?;
+        let mask = match rgba.pixels().any(|p| p[3] < 255) {
+            true => Some(image("DeviceGray", rgba.pixels().map(|p| p[3]).collect())?),
+            false => None,
+        };
         Ok(Signature {
-            width,
-            height,
-            rgb,
-            alpha,
+            image: rgba,
+            colour,
+            mask,
         })
+    }
+
+    pub fn width(&self) -> u32 {
+        self.image.width()
+    }
+
+    pub fn height(&self) -> u32 {
+        self.image.height()
     }
 
     /// The signature as a PNG, its paper clear.
     pub fn png(&self) -> anyhow::Result<Vec<u8>> {
-        let mut rgba = RgbaImage::new(self.width, self.height);
-        for (i, p) in rgba.pixels_mut().enumerate() {
-            let rgb = &self.rgb[i * 3..i * 3 + 3];
-            *p = image::Rgba([rgb[0], rgb[1], rgb[2], self.alpha[i]]);
-        }
         let mut out = std::io::Cursor::new(Vec::new());
-        DynamicImage::ImageRgba8(rgba).write_to(&mut out, image::ImageFormat::Png)?;
+        self.image.write_to(&mut out, image::ImageFormat::Png)?;
         Ok(out.into_inner())
     }
 
     /// How tall it is put, `width` points wide.
     pub fn height_at(&self, width: f32) -> f32 {
-        width * self.height as f32 / self.width as f32
+        width * self.height() as f32 / self.width() as f32
     }
 }
 
@@ -155,21 +200,6 @@ fn crop(image: &RgbaImage) -> Option<RgbaImage> {
     Some(image.view(x0, y0, x1 - x0 + 1, y1 - y0 + 1).to_image())
 }
 
-/// `image` no larger than `MAX_SIDE` pixels a side.
-fn smaller(image: RgbaImage) -> RgbaImage {
-    let (w, h) = image.dimensions();
-    let side = w.max(h);
-    if side <= MAX_SIDE {
-        return image;
-    }
-    let k = MAX_SIDE as f32 / side as f32;
-    let (w, h) = (
-        ((w as f32 * k).round() as u32).max(1),
-        ((h as f32 * k).round() as u32).max(1),
-    );
-    image::imageops::resize(&image, w, h, image::imageops::FilterType::Triangle)
-}
-
 /// The copy of `path` its marks are put in, beside it: its name with
 /// `-signed`, or what is asked for in its place, added.
 pub fn copy_of(path: &Path, added: &str) -> PathBuf {
@@ -183,11 +213,7 @@ pub fn copy_of(path: &Path, added: &str) -> PathBuf {
 
 /// Where ohp keeps what it is given to sign with: `$XDG_CONFIG_HOME/ohp`,
 /// else `~/.config/ohp`.
-fn config() -> Option<PathBuf> {
-    // Tests keep nothing of theirs among the user's own.
-    if cfg!(test) {
-        return None;
-    }
+pub fn config() -> Option<PathBuf> {
     let var = |name| {
         std::env::var_os(name)
             .filter(|v| !v.is_empty())
@@ -197,27 +223,34 @@ fn config() -> Option<PathBuf> {
     Some(dir.join("ohp"))
 }
 
+/// The signature kept in `dir`, as `keep` keeps it.
+const SIGNATURE: &str = "signature.png";
+/// The texts typed, kept in `dir`, one a line, the latest first.
+const TYPED: &str = "typed";
+
 /// The signature kept to sign with: `$OHP_SIGNATURE`, else the one last
-/// picked, if there is one.
-pub fn kept() -> Option<PathBuf> {
+/// picked, kept in `dir`, if there is one.
+pub fn kept(dir: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("OHP_SIGNATURE").filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    Some(config()?.join("signature.png")).filter(|p| p.is_file())
+    Some(dir?.join(SIGNATURE)).filter(|p| p.is_file())
 }
 
-/// Keep `signature` to sign with from now on, its paper clear; where.
-pub fn keep(signature: &Signature) -> anyhow::Result<PathBuf> {
-    let dir = config().context("no home to keep the signature in")?;
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("signature.png");
+/// Keep `signature` in `dir` to sign with from now on, its paper clear;
+/// where.
+pub fn keep(dir: Option<&Path>, signature: &Signature) -> anyhow::Result<PathBuf> {
+    let dir = dir.context("no home to keep the signature in")?;
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(SIGNATURE);
     write(&path, &signature.png()?)?;
     Ok(path)
 }
 
-/// The texts typed before, the latest first: a name, an address.
-pub fn typed() -> Vec<String> {
-    let Some(path) = config().map(|dir| dir.join("typed")) else {
+/// The texts typed before, kept in `dir`, the latest first: a name, an
+/// address.
+pub fn typed(dir: Option<&Path>) -> Vec<String> {
+    let Some(path) = dir.map(|dir| dir.join(TYPED)) else {
         return Vec::new();
     };
     std::fs::read_to_string(path)
@@ -229,21 +262,21 @@ pub fn typed() -> Vec<String> {
         .collect()
 }
 
-/// Keep `text` first among the texts typed, the ten latest kept.
-pub fn remember(text: &str) {
+/// Keep `text` first among the texts typed, in `dir`, the ten latest kept.
+pub fn remember(dir: Option<&Path>, text: &str) {
     let text = text.trim();
-    let Some(dir) = config() else {
+    let Some(dir) = dir else {
         return;
     };
     if text.is_empty() || text.contains('\n') {
         return;
     }
-    let mut all = typed();
+    let mut all = typed(Some(dir));
     all.retain(|t| t != text);
     all.insert(0, text.to_string());
     all.truncate(10);
-    let _ = std::fs::create_dir_all(&dir)
-        .and_then(|_| write(&dir.join("typed"), all.join("\n").as_bytes()));
+    let _ = std::fs::create_dir_all(dir)
+        .and_then(|_| write(&dir.join(TYPED), all.join("\n").as_bytes()));
 }
 
 /// The initials of `name`: the first letter of each of its words.
@@ -389,18 +422,34 @@ fn shown_box(doc: &Document, page: ObjectId) -> [f32; 4] {
     }
 }
 
-/// `pdf` with `marks` drawn on its pages, `signature` as each signature,
-/// appended to it as an incremental update.
-pub fn stamp(pdf: &[u8], marks: &[Mark], signature: Option<&Signature>) -> anyhow::Result<Vec<u8>> {
-    let mut update = IncrementalDocument::load_from(pdf).context("cannot read the PDF")?;
-    if update.get_prev_documents().is_encrypted() {
-        bail!("the PDF is locked with a password");
+/// A PDF to sign, read once, as it was before anything was put on it.
+#[derive(Clone, Debug)]
+pub struct Original(IncrementalDocument);
+
+impl Original {
+    /// The PDF `pdf`, unless it needs a password to open.
+    pub fn read(pdf: &[u8]) -> anyhow::Result<Self> {
+        let pdf = IncrementalDocument::load_from(pdf).context("cannot read the PDF")?;
+        if pdf.get_prev_documents().is_encrypted() {
+            bail!("the PDF is locked with a password");
+        }
+        Ok(Original(pdf))
     }
+}
+
+/// `original` with `marks` drawn on its pages, `signature` as each
+/// signature, appended to it as an incremental update.
+pub fn stamp(
+    original: &Original,
+    marks: &[Mark],
+    signature: Option<&Signature>,
+) -> anyhow::Result<Vec<u8>> {
+    let mut update = original.0.clone();
     let pages = update.get_prev_documents().get_pages();
     let doc = &mut update.new_document;
     let signs = marks.iter().any(|m| m.what == What::Signature);
     let image = match signature {
-        Some(s) if signs => Some(add_image(doc, s)?),
+        Some(s) if signs => Some(add_image(doc, s)),
         None if signs => bail!("no signature to put"),
         _ => None,
     };
@@ -514,28 +563,13 @@ fn draw(ops: &mut Vec<u8>, view: View, mark: &Mark, signature: Option<&Signature
 }
 
 /// `signature` as an image the pages can show, its clear parts a soft mask.
-fn add_image(doc: &mut Document, signature: &Signature) -> anyhow::Result<ObjectId> {
-    let image = |space: &str, bytes: Vec<u8>| -> anyhow::Result<Stream> {
-        let mut stream = Stream::new(
-            dictionary! {
-                "Type" => "XObject",
-                "Subtype" => "Image",
-                "Width" => i64::from(signature.width),
-                "Height" => i64::from(signature.height),
-                "ColorSpace" => space,
-                "BitsPerComponent" => 8,
-            },
-            bytes,
-        );
-        stream.compress()?;
-        Ok(stream)
-    };
-    let mut colour = image("DeviceRGB", signature.rgb.clone())?;
-    if signature.alpha.iter().any(|&a| a < 255) {
-        let mask = doc.add_object(image("DeviceGray", signature.alpha.clone())?);
+fn add_image(doc: &mut Document, signature: &Signature) -> ObjectId {
+    let mut colour = signature.colour.clone();
+    if let Some(mask) = &signature.mask {
+        let mask = doc.add_object(mask.clone());
         colour.dict.set("SMask", Object::Reference(mask));
     }
-    Ok(doc.add_object(colour))
+    doc.add_object(colour)
 }
 
 #[cfg(test)]

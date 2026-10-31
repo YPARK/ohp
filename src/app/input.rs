@@ -34,8 +34,7 @@ impl App {
             MouseEventKind::ScrollDown => self.key(KeyCode::Down.into()),
             MouseEventKind::ScrollUp => self.key(KeyCode::Up.into()),
             MouseEventKind::Down(MouseButton::Left) => match self.view {
-                #[cfg(feature = "sign")]
-                View::Present if self.signing.is_some() => {
+                View::Present if self.signing() => {
                     self.sign_click(at);
                     self.dirty = true;
                 }
@@ -80,15 +79,31 @@ impl App {
         {
             return page.sentence_of(cell.glyph);
         }
+        let (_, (x, y)) = self.page_point(at)?;
+        page.sentence_near(x, y)
+    }
+
+    /// The presented page shown at `at` on the screen, and the point of it
+    /// there, the middle of its cell, in points from its top left as shown.
+    pub(super) fn page_point(&self, at: Position) -> Option<(usize, (f32, f32))> {
+        let (job, area) = self.drawn.get()?;
+        if !area.contains(at) {
+            return None;
+        }
+        let (dx, dy) = (at.x - area.x, at.y - area.y);
         let font = self.picker.font_size();
         let (fw, fh) = (f32::from(font.width), f32::from(font.height));
         let key = job.key;
-        let scale = render::fit(key, (fw, fh), (page.width, page.height)) * key.zoom.scale();
+        let size = *self.deck.sizes.get(key.page)?;
+        let scale = render::fit(key, (fw, fh), size) * key.zoom.scale();
         // The middle of the cell, past the part of the slide panned off.
         let point = |pan: u16, cell: u16, size: f32| {
             (f32::from(pan) + f32::from(cell) + 0.5) * size / scale
         };
-        page.sentence_near(point(key.zoom.x, dx, fw), point(key.zoom.y, dy, fh))
+        Some((
+            key.page,
+            (point(key.zoom.x, dx, fw), point(key.zoom.y, dy, fh)),
+        ))
     }
 
     pub(super) fn key(&mut self, key: KeyEvent) {
@@ -101,7 +116,6 @@ impl App {
         if let Some(browser) = &mut self.browser {
             match browser.key(key) {
                 browse::Outcome::Stay => {}
-                #[cfg(feature = "sign")]
                 browse::Outcome::Open(paths) if self.picking_signature() => {
                     self.browser = None;
                     self.picked_signature(Some(paths));
@@ -112,7 +126,6 @@ impl App {
                 }
                 browse::Outcome::Quit => {
                     self.browser = None;
-                    #[cfg(feature = "sign")]
                     self.picked_signature(None);
                 }
             }
@@ -135,7 +148,6 @@ impl App {
             self.dirty = true;
             return;
         }
-        #[cfg(feature = "sign")]
         if self.sign_key(key) {
             self.dirty = true;
             return;
@@ -180,12 +192,7 @@ impl App {
             KeyCode::Char('k') => self.summarize(Panel::Slide),
             KeyCode::Char('K') => self.summarize(Panel::Whole),
             KeyCode::Char('m') => self.choose_model(),
-            #[cfg(feature = "sign")]
             KeyCode::Char('S') => self.sign(),
-            #[cfg(not(feature = "sign"))]
-            KeyCode::Char('S') => {
-                self.notice = Some("ohp was built without signing: --features sign".into())
-            }
             _ => return,
         }
         self.dirty = true;

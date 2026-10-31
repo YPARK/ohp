@@ -377,7 +377,7 @@ put each where it goes on any of them.
 | `esc` | done: what to call the copy is asked, `form-signed.pdf`, the `signed` picked to type over |
 
 The signature is an image of yours, picked the first time it is put,
-from a list of images as `ctrl-o` lists files: a PNG with a clear
+from a list of images as `ctrl-o` lists files, begun at home: a PNG with a clear
 background, or a photo or scan of it on paper, whose paper is made clear
 and cut away. It is kept, so, in `~/.config/ohp/signature.png`, to sign
 with next time; `$OHP_SIGNATURE` names another. What you type is kept
@@ -397,9 +397,8 @@ The signature is a picture of yours, not a digital signature with a
 certificate, which Acrobat's Signature panel would show as valid. Text is
 set in Helvetica, which has Latin letters only.
 
-What runs ohp may name the PDF, `$OHP_AS`, as letterbox names a message's
-file, and have the copy kept said, `$OHP_SIGNED` naming a file to write
-its path in.
+What runs ohp, as letterbox, may have the copy kept said, `$OHP_SIGNED`
+naming a file to write its path in.
 
 ## Slides on another machine
 

@@ -9,18 +9,16 @@
 //! with none, or on `N`, an image of one is picked, a PNG or a photo of it
 //! on paper, and kept for next time.
 //!
-//! `$OHP_AS` names the PDF, where its file is named otherwise, as letterbox
-//! keeps a message's files; and the copy kept is written to the file
-//! `$OHP_SIGNED` names, if it does, for what ran ohp to find it.
+//! The copy kept is written to the file `$OHP_SIGNED` names, if it does,
+//! for what ran ohp, as letterbox, to find it.
 
-use super::{App, Then, View};
+use super::{App, View};
 use crate::browse::Browser;
 use crate::render;
 use crate::sign::{self, Mark, Signature, What};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Position;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// What a click puts.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -91,9 +89,10 @@ impl Field {
     fn key(&mut self, key: KeyEvent) {
         let len = self.text.chars().count();
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
             KeyCode::Char('u') if ctrl => *self = Field::default(),
-            KeyCode::Char(c) if !ctrl => {
+            KeyCode::Char(c) if !ctrl && !alt => {
                 self.cut();
                 let i = self.byte(self.at);
                 self.text.insert(i, c);
@@ -136,10 +135,12 @@ impl Field {
     }
 }
 
+/// A page, and a point on it, in points from its top left as it is shown.
+pub(super) type Spot = (usize, (f32, f32));
+
 /// Text being typed to put where it was clicked, and what Tab offers.
 pub(super) struct Typing {
-    page: usize,
-    at: (f32, f32),
+    spot: Spot,
     pub(super) field: Field,
     offers: Vec<String>,
     offered: usize,
@@ -147,60 +148,62 @@ pub(super) struct Typing {
 
 /// The PDF being signed.
 pub(super) struct Signing {
-    /// The PDF as it was before anything was put on it.
-    pub(super) original: Arc<Vec<u8>>,
-    /// The PDF's own file.
-    pub(super) source: PathBuf,
-    /// The copy what is put goes in, as it is put.
+    /// The PDF as it was before anything was put on it, read once.
+    pub(super) original: sign::Original,
+    /// The copy what is put goes in, beside the PDF, as it is put.
     pub(super) copy: PathBuf,
     /// What has been put, the last put last.
     pub(super) marks: Vec<Mark>,
     pub(super) tool: Tool,
     pub(super) signature: Option<Signature>,
-    /// The signature is being picked, and a click waits to put it.
-    pub(super) picking: Option<Option<(usize, (f32, f32))>>,
+    /// The list open is picking the signature.
+    pub(super) picking: bool,
+    /// Where a click waits for the signature being picked to be put.
+    pub(super) waiting: Option<Spot>,
     pub(super) typing: Option<Typing>,
     /// What to call the copy, being typed, once signing is done.
     pub(super) naming: Option<Field>,
-}
-
-/// The name the PDF at `path` is known by: `$OHP_AS`, else its own.
-fn known_as(path: &Path) -> PathBuf {
-    match std::env::var_os("OHP_AS").filter(|n| !n.is_empty()) {
-        Some(name) => path.with_file_name(Path::new(&name).file_name().unwrap_or(&name)),
-        None => path.to_path_buf(),
-    }
+    /// Where the signature and what is typed are kept, if anywhere.
+    pub(super) kept_in: Option<PathBuf>,
 }
 
 impl App {
+    /// Whether the PDF presented is being signed.
+    pub(super) fn signing(&self) -> bool {
+        self.signing.is_some()
+    }
+
     /// Begin signing the PDF presented.
     pub(super) fn sign(&mut self) {
-        if self.signing.is_some() {
-            self.pick_tool(Tool::Signature);
-            return;
-        }
         if !render::pdf(&self.deck.paths) || !self.links.is_empty() {
             self.notice = Some("only a PDF here is signed: S on one".into());
             return;
         }
-        let source = self.deck.paths[0].clone();
-        let copy = sign::copy_of(&known_as(&source), sign::SIGNED);
+        let original = match sign::Original::read(&self.deck.data) {
+            Ok(original) => original,
+            Err(e) => {
+                self.notice = Some(format!("cannot sign it: {e:#}"));
+                return;
+            }
+        };
+        let kept_in = sign::config();
         self.view = View::Present;
-        self.signing = Some(Box::new(Signing {
-            original: self.deck.data.clone(),
-            source,
-            copy,
-            marks: Vec::new(),
-            tool: Tool::Signature,
-            signature: None,
-            picking: None,
-            typing: None,
-            naming: None,
-        }));
-        self.notice = Some(match sign::kept() {
+        self.notice = Some(match sign::kept(kept_in.as_deref()) {
             Some(_) => "signing: click where your signature goes".into(),
             None => "signing: click where your signature goes, and pick an image of it".into(),
         });
+        self.signing = Some(Box::new(Signing {
+            original,
+            copy: sign::copy_of(&self.deck.paths[0], sign::SIGNED),
+            marks: Vec::new(),
+            tool: Tool::Signature,
+            signature: None,
+            picking: false,
+            waiting: None,
+            typing: None,
+            naming: None,
+            kept_in,
+        }));
     }
 
     fn pick_tool(&mut self, tool: Tool) {
@@ -236,9 +239,10 @@ impl App {
                             );
                         }
                         if text != sign::today() {
-                            sign::remember(&text);
+                            sign::remember(s.kept_in.as_deref(), &text);
                         }
-                        self.put(Mark::new(typing.page, typing.at, What::Text(text)));
+                        let (page, at) = typing.spot;
+                        self.put(Mark::new(page, at, What::Text(text)));
                     }
                 }
                 KeyCode::Esc => s.typing = None,
@@ -307,7 +311,7 @@ impl App {
 
     /// A click on the presented page while signing: what is picked put there.
     pub(super) fn sign_click(&mut self, at: Position) {
-        let Some((page, point)) = self.page_point(at) else {
+        let Some(spot @ (page, point)) = self.page_point(at) else {
             return;
         };
         let Some(s) = &mut self.signing else {
@@ -319,10 +323,11 @@ impl App {
         let what = match s.tool {
             Tool::Signature => {
                 if s.signature.is_none() {
-                    s.signature = sign::kept().and_then(|path| Signature::read(&path).ok());
+                    s.signature = sign::kept(s.kept_in.as_deref())
+                        .and_then(|path| Signature::read(&path).ok());
                 }
                 if s.signature.is_none() {
-                    return self.pick_signature(Some((page, point)));
+                    return self.pick_signature(Some(spot));
                 }
                 What::Signature
             }
@@ -331,12 +336,11 @@ impl App {
             Tool::Cross => What::Cross,
             Tool::Dot => What::Dot,
             Tool::Text => {
-                let mut offers = sign::typed();
-                // What was typed last, picked: typed over, or kept on ⏎.
-                let field = offers
-                    .first()
-                    .map_or_else(Field::default, |t| Field::offered(t));
+                let mut offers = sign::typed(s.kept_in.as_deref());
+                let mut field = Field::default();
                 if let Some(first) = offers.first() {
+                    // What was typed last, picked: typed over, or kept on ⏎.
+                    field = Field::offered(first);
                     let initials = sign::initials(first);
                     if initials.chars().count() > 1 && !offers.contains(&initials) {
                         offers.push(initials);
@@ -344,8 +348,7 @@ impl App {
                 }
                 offers.push(sign::today());
                 s.typing = Some(Typing {
-                    page,
-                    at: point,
+                    spot,
                     field,
                     offers,
                     offered: 0,
@@ -364,23 +367,17 @@ impl App {
         }
     }
 
-    /// Pick an image of a signature, from the PDF's folder; then put it
-    /// where `waiting` was clicked, if it was.
-    fn pick_signature(&mut self, waiting: Option<(usize, (f32, f32))>) {
+    /// Pick an image of a signature, from home, where one's own files are,
+    /// not beside the PDF, as a mail's are kept; then put it where
+    /// `waiting` was clicked, if it was.
+    fn pick_signature(&mut self, waiting: Option<Spot>) {
         let Some(s) = &mut self.signing else {
             return;
         };
-        let dir = s.source.parent().filter(|d| !d.as_os_str().is_empty());
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let dir = match (dir, home) {
-            // A message's files are kept where its signature never is.
-            (_, Some(home)) if std::env::var_os("OHP_AS").is_some() => home,
-            (Some(dir), _) => dir.to_path_buf(),
-            (None, _) => PathBuf::from("."),
-        };
+        let dir = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
         match Browser::images(&dir) {
             Ok(browser) => {
-                s.picking = Some(waiting);
+                (s.picking, s.waiting) = (true, waiting);
                 self.browser = Some(browser);
                 self.notice =
                     Some("pick an image of your signature: a PNG, or a photo of it".into());
@@ -391,7 +388,7 @@ impl App {
 
     /// Whether the list open is picking a signature.
     pub(super) fn picking_signature(&self) -> bool {
-        self.signing.as_ref().is_some_and(|s| s.picking.is_some())
+        self.signing.as_ref().is_some_and(|s| s.picking)
     }
 
     /// The list picking a signature closed: `paths` picked, if any were.
@@ -399,7 +396,8 @@ impl App {
         let Some(s) = &mut self.signing else {
             return;
         };
-        let waiting = s.picking.take().flatten();
+        s.picking = false;
+        let waiting = s.waiting.take();
         let Some(path) = paths.and_then(|p| p.into_iter().last()) else {
             return;
         };
@@ -410,21 +408,30 @@ impl App {
                 return;
             }
         };
-        self.notice = Some(match sign::keep(&signature) {
+        let kept = match sign::keep(s.kept_in.as_deref(), &signature) {
             Ok(kept) => format!("signature kept for next time in {}", kept.display()),
             Err(e) => format!("signature not kept for next time: {e:#}"),
-        });
+        };
         s.signature = Some(signature);
         s.tool = Tool::Signature;
-        if let Some((page, at)) = waiting {
-            let notice = self.notice.take();
-            self.put(Mark::new(page, at, What::Signature));
-            self.notice = self.notice.take().or(notice);
+        match waiting {
+            // Put, as the page shows: where it is kept is what is said.
+            Some((page, at)) => {
+                s.marks.push(Mark::new(page, at, What::Signature));
+                self.write_copy_saying(Some(kept));
+            }
+            None => self.notice = Some(kept),
         }
     }
 
     /// Write the copy with all that is put, and show it.
     fn write_copy(&mut self) {
+        self.write_copy_saying(None);
+    }
+
+    /// Write the copy with all that is put, and show it, saying `said`, else
+    /// how many are put.
+    fn write_copy_saying(&mut self, said: Option<String>) {
         let Some(s) = &self.signing else {
             return;
         };
@@ -434,24 +441,10 @@ impl App {
             self.notice = Some(format!("cannot sign it: {e:#}"));
             return;
         }
-        self.notice = Some(format!("{} put · u takes it back", s.marks.len()));
-        // Written here, and read next: not a change on disk to watch settle.
-        if self.deck.paths == [s.copy.clone()] {
-            self.stamp = self.deck.stamps();
-            self.settling = None;
-        }
-        if self.loading.is_some() {
-            self.then = Some(Then::Signed);
-        } else {
-            self.show_copy();
-        }
-    }
-
-    /// Read the copy, in place of what is shown, the page and zoom kept.
-    pub(super) fn show_copy(&mut self) {
-        if let Some(s) = &self.signing {
-            self.read(vec![s.copy.clone()], self.deck.options.clone());
-        }
+        // Read in place of what is shown, the page and zoom kept.
+        let said = said.unwrap_or_else(|| format!("{} put · u takes it back", s.marks.len()));
+        self.notice = Some(said.clone());
+        self.read(vec![s.copy.clone()], self.deck.options.clone(), Some(said));
     }
 
     /// Done signing: the copy under the name typed, and said where it is.
@@ -470,20 +463,18 @@ impl App {
             false => format!("{name}.pdf"),
         };
         let kept = s.copy.with_file_name(name.replace('/', "-"));
-        if kept != s.copy {
-            if let Err(e) = std::fs::rename(&s.copy, &kept) {
-                self.notice = Some(format!("cannot name it {name}: {e}"));
-                self.signing = Some(s);
-                return;
-            }
-            self.read(vec![kept.clone()], self.deck.options.clone());
+        if kept != s.copy
+            && let Err(e) = std::fs::rename(&s.copy, &kept)
+        {
+            self.notice = Some(format!("cannot name it {name}: {e}"));
+            self.signing = Some(s);
+            return;
         }
         report(&kept);
         let said = format!("signed: {}", kept.display());
-        if self.loading.is_some() {
-            self.read_said = Some(said);
-        } else {
-            self.notice = Some(said);
+        self.notice = Some(said.clone());
+        if kept != s.copy {
+            self.read(vec![kept], self.deck.options.clone(), Some(said));
         }
     }
 
@@ -495,28 +486,6 @@ impl App {
         {
             report(&s.copy);
         }
-    }
-
-    /// The page shown at `at`, and the point of it, in points from its top
-    /// left, as it is shown.
-    fn page_point(&self, at: Position) -> Option<(usize, (f32, f32))> {
-        let (job, area) = self.drawn.get()?;
-        if !area.contains(at) {
-            return None;
-        }
-        let (dx, dy) = (at.x - area.x, at.y - area.y);
-        let font = self.picker.font_size();
-        let (fw, fh) = (f32::from(font.width), f32::from(font.height));
-        let key = job.key;
-        let size = *self.deck.sizes.get(key.page)?;
-        let scale = render::fit(key, (fw, fh), size) * key.zoom.scale();
-        let point = |pan: u16, cell: u16, size: f32| {
-            (f32::from(pan) + f32::from(cell) + 0.5) * size / scale
-        };
-        Some((
-            key.page,
-            (point(key.zoom.x, dx, fw), point(key.zoom.y, dy, fh)),
-        ))
     }
 
     /// What the status line says while signing: what is being done, and the

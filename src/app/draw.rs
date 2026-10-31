@@ -235,10 +235,7 @@ impl App {
                 "n/p arrows click move · g/enter/double-click present · +/- zoom · t text · s speak · v voice · k/K summary · m model · r reload · ^O open · q quit",
             ),
         };
-        #[cfg(feature = "sign")]
         let signing = self.sign_status();
-        #[cfg(not(feature = "sign"))]
-        let signing: Option<(String, &str)> = None;
         let (view, keys) = match &signing {
             Some((doing, keys)) => (doing.as_str(), *keys),
             None => (view, keys),
