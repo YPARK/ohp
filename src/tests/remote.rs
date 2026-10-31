@@ -1,23 +1,19 @@
 use super::*;
 use crate::fixture;
 use crate::render::Deck;
-use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
 /// An ssh that runs the command here, and cannot reach the host `down`.
 fn fake_ssh(dir: &Path) -> PathBuf {
-    let ssh = dir.join("ssh");
-    std::fs::write(
-        &ssh,
+    fixture::script(
+        dir,
+        "ssh",
         "#!/bin/sh\n\
          while :; do case \"$1\" in -o) shift 2 ;; -T) shift ;; *) break ;; esac; done\n\
          if [ \"$1\" = down ]; then echo 'ssh: connect to host down: Connection refused' >&2; exit 255; fi\n\
          shift\n\
          exec sh -c \"$1\"\n",
     )
-    .unwrap();
-    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
-    ssh
 }
 
 #[test]

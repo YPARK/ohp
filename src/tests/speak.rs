@@ -290,12 +290,12 @@ fn sherpa_onnx_speaks_its_own_voices_and_piper_the_rest() {
 fn sherpa_onnx_is_given_the_text_as_an_argument_and_its_wav_is_written_out() {
     let dir = tempfile::tempdir().unwrap();
     // As sherpa-onnx: the WAV to the file named, chatter on its output.
-    let sherpa = dir.path().join("sherpa");
-    let script = "#!/bin/sh\nfor a; do case $a in --output-filename=*) out=${a#*=};; esac; done\n\
-                  eval \"t=\\${$#}\"\necho saved\nprintf 'RIFF:%s' \"$t\" > \"$out\"\n";
-    std::fs::write(&sherpa, script).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&sherpa, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let sherpa = fixture::script(
+        dir.path(),
+        "sherpa",
+        "#!/bin/sh\nfor a; do case $a in --output-filename=*) out=${a#*=};; esac; done\n\
+                  eval \"t=\\${$#}\"\necho saved\nprintf 'RIFF:%s' \"$t\" > \"$out\"\n",
+    );
     let command = sherpa_with(&sherpa, &dir.path().join("v/en.onnx")).unwrap();
 
     let (text, wav) = (dir.path().join("s.txt"), dir.path().join("s.wav"));
