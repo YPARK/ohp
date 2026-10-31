@@ -69,10 +69,24 @@ pub struct Browser {
     entries: Vec<Entry>,
     /// Files marked to open together, in the order they were.
     marked: Vec<PathBuf>,
+    /// Which files are listed, by their names.
+    wants: fn(&Path) -> bool,
+    /// What enter does to the file picked, as the list's title says.
+    verb: &'static str,
 }
 
 impl Browser {
     pub fn new(start: &Path) -> anyhow::Result<Self> {
+        Browser::listing(start, slides, "open")
+    }
+
+    /// A list of the images in `start` and the folders about it, to pick
+    /// one from.
+    pub fn images(start: &Path) -> anyhow::Result<Self> {
+        Browser::listing(start, crate::render::image, "pick")
+    }
+
+    fn listing(start: &Path, wants: fn(&Path) -> bool, verb: &'static str) -> anyhow::Result<Self> {
         let dir = start.canonicalize()?;
         let mut browser = Browser {
             here: dir.clone(),
@@ -81,6 +95,8 @@ impl Browser {
             listing: None,
             entries: Vec::new(),
             marked: Vec::new(),
+            wants,
+            verb,
         };
         browser.refresh();
         Ok(browser)
@@ -149,7 +165,7 @@ impl Browser {
         let (dir, stem) = self.split();
         let stem = stem.to_lowercase();
         if self.listing.as_ref().is_none_or(|(at, _)| *at != dir) {
-            let listed = list(&dir).map_err(|e| format!("{}: {e}", dir.display()));
+            let listed = list(&dir, self.wants).map_err(|e| format!("{}: {e}", dir.display()));
             self.here = dir.canonicalize().unwrap_or_else(|_| dir.clone());
             self.listing = Some((dir.clone(), listed));
         }
@@ -289,7 +305,10 @@ impl Browser {
             dir.push('/');
         }
         let prompt = vec![
-            Span::styled(" open ", Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" {} ", self.verb),
+                Style::new().add_modifier(Modifier::BOLD),
+            ),
             Span::styled(dir, dim()),
         ];
         let items = self.entries.iter().map(|e| {
@@ -310,8 +329,11 @@ impl Browser {
             let marked = format!(" {} marked ", self.marked.len());
             notes.push(Span::styled(marked, Style::new().fg(Color::Green)));
         }
-        let keys = "type to narrow · a/b/ go to a path · ↑/↓ move · tab mark · shift-tab unmark all · enter open · ←/→ up/into · esc cancel";
-        self.menu.draw(f, area, prompt, items, notes, keys);
+        let keys = format!(
+            "type to narrow · a/b/ go to a path · ↑/↓ move · tab mark · shift-tab unmark all · enter {} · ←/→ up/into · esc cancel",
+            self.verb
+        );
+        self.menu.draw(f, area, prompt, items, notes, &keys);
     }
 }
 
@@ -333,7 +355,7 @@ fn resolve(dir: &Path, typed: &str) -> PathBuf {
 
 /// The folders and slides in `dir`, hidden ones too, folders first, each
 /// by name.
-fn list(dir: &Path) -> std::io::Result<Vec<Entry>> {
+fn list(dir: &Path, wants: fn(&Path) -> bool) -> std::io::Result<Vec<Entry>> {
     let mut entries: Vec<Entry> = std::fs::read_dir(dir)?
         .filter_map(Result::ok)
         .filter_map(|e| {
@@ -341,7 +363,7 @@ fn list(dir: &Path) -> std::io::Result<Vec<Entry>> {
             let kind = e.file_type().ok()?;
             // Through a symlink, as a link to a folder is a folder.
             let dir = kind.is_dir() || kind.is_symlink() && e.path().is_dir();
-            (dir || slides(Path::new(&name))).then(|| Entry {
+            (dir || wants(Path::new(&name))).then(|| Entry {
                 lower: name.to_lowercase(),
                 name,
                 dir,

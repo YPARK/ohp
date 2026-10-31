@@ -783,3 +783,7 @@ fn a_summary_takes_a_column_beside_the_slides() {
 #[cfg(feature = "speech")]
 #[path = "app/speaking.rs"]
 mod speaking;
+
+#[cfg(feature = "sign")]
+#[path = "app/signing.rs"]
+mod signing;

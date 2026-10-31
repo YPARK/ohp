@@ -36,7 +36,7 @@ use std::time::Duration;
 /// presents the slide picked in the grid, t switches between images and
 /// text, s reads the slides aloud from this one on, k sums up the slide on
 /// screen and marks its key sentences, K sums up the whole file, m picks
-/// the model that sums up, q quits.
+/// the model that sums up, S signs the PDF, q quits.
 ///
 /// +/- zoom the slide, or the grid. Zoomed in, arrows pan the slide and 0
 /// fits it back to the screen.
