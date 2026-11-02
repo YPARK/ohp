@@ -8,7 +8,7 @@
 //! the pages themselves are read here, so they can be read with no ohp
 //! running, and a deck is read once while its files are unchanged.
 
-use crate::control::{self, Request};
+use crate::control::{self, Request, Status};
 use crate::notes;
 use crate::render::{self, Deck, Options, Stamp};
 use base64::Engine;
@@ -49,47 +49,18 @@ fn error(id: Value, code: i32, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
-/// What the ohp running here shows.
-#[derive(Debug, Default, PartialEq)]
-pub struct Status {
-    pub files: Vec<PathBuf>,
-    /// From 0.
-    pub page: usize,
-    pub pages: usize,
-    pub view: String,
-    pub presenting: bool,
-    /// How the running ohp reads the deck, so it is read here alike.
-    pub paper: Option<String>,
-    pub knit: bool,
-    pub screen: bool,
-}
-
-impl Status {
-    fn parse(lines: &[String]) -> Status {
-        let mut status = Status::default();
-        for line in lines {
-            let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
-            match word {
-                "file" => status.files.push(rest.into()),
-                "page" => status.page = rest.parse::<usize>().unwrap_or(1).saturating_sub(1),
-                "pages" => status.pages = rest.parse().unwrap_or(0),
-                "view" => status.view = rest.into(),
-                "presenting" => status.presenting = rest == "1",
-                "paper" => status.paper = Some(rest.into()),
-                "knit" => status.knit = rest == "1",
-                "screen" => status.screen = rest == "1",
-                _ => {}
-            }
-        }
-        status
-    }
-}
-
 /// What the ohp running here shows, if one is, and answers.
 fn running() -> Option<Status> {
     control::ask(&Request::Status)
         .map(|lines| Status::parse(&lines))
         .filter(|s| !s.files.is_empty())
+}
+
+/// A slide or page counted from 1, from 0.
+fn from_one(n: u64) -> Result<usize, String> {
+    (n as usize)
+        .checked_sub(1)
+        .ok_or_else(|| "slides and pages are counted from 1".into())
 }
 
 /// `args`' whole number `key`, if given; an error if it is anything else.
@@ -105,8 +76,18 @@ fn number(args: &Value, key: &str) -> Result<Option<u64>, String> {
 
 #[derive(Default)]
 pub struct Server {
-    /// The deck last read, and when its files were changed then.
-    kept: Option<(Vec<PathBuf>, Vec<Stamp>, Arc<Deck>)>,
+    kept: Option<Kept>,
+    /// What the running ohp showed, asked once a tool call.
+    shown: Option<Option<Status>>,
+}
+
+/// The deck last read, when its files were changed then, and its pages'
+/// titles, once they are found.
+struct Kept {
+    paths: Vec<PathBuf>,
+    stamps: Vec<Stamp>,
+    deck: Arc<Deck>,
+    titles: Option<Arc<Vec<Option<String>>>>,
 }
 
 impl Server {
@@ -149,8 +130,10 @@ impl Server {
 
     fn call(&mut self, name: &str, args: &Value) -> Result<Vec<Value>, String> {
         let text = |t: String| Ok(vec![json!({"type": "text", "text": t})]);
+        // Asked anew each call: the screen changes between them.
+        self.shown = None;
         match name {
-            "status" => text(status()),
+            "status" => text(status(self.running())),
             "open" => text(open(args)?),
             "goto" => text(self.goto(args)?),
             "slides" => text(self.slides(args)?),
@@ -159,6 +142,12 @@ impl Server {
             "notes" => text(self.notes(args)?),
             _ => Err(format!("ohp has no tool {name}")),
         }
+    }
+
+    /// What the ohp running here shows, if one is, and answers: asked
+    /// once a call, however many times it is wanted.
+    fn running(&mut self) -> Option<Status> {
+        self.shown.get_or_insert_with(running).clone()
     }
 
     /// The deck in `path`, else the one the running ohp shows.
@@ -175,7 +164,7 @@ impl Server {
                 },
             ),
             None => {
-                let shown = running().ok_or(
+                let shown = self.running().ok_or(
                     "no ohp is running here, or it does not answer: name the file with `path`, or `open` one",
                 )?;
                 let options = Options {
@@ -188,28 +177,55 @@ impl Server {
             }
         };
         let stamps: Vec<Stamp> = paths.iter().map(|p| render::stamp(p)).collect();
-        if let Some((kept, at, deck)) = &self.kept
-            && *kept == paths
-            && *at == stamps
+        if let Some(kept) = &self.kept
+            && kept.paths == paths
+            && kept.stamps == stamps
         {
-            return Ok(deck.clone());
+            return Ok(kept.deck.clone());
         }
         let deck = Arc::new(
             Deck::open_with(&paths, options)
                 .map_err(|e| format!("cannot read {}: {e:#}", render::shown(&paths)))?,
         );
-        self.kept = Some((paths, stamps, deck.clone()));
+        self.kept = Some(Kept {
+            paths,
+            stamps,
+            deck: deck.clone(),
+            titles: None,
+        });
         Ok(deck)
+    }
+
+    /// Each page's title of `deck`, as its text has it: found once a deck.
+    fn titles(&mut self, deck: &Arc<Deck>) -> Arc<Vec<Option<String>>> {
+        if let Some(kept) = &self.kept
+            && Arc::ptr_eq(&kept.deck, deck)
+            && let Some(titles) = &kept.titles
+        {
+            return titles.clone();
+        }
+        let pages: Vec<usize> = (0..deck.pages).collect();
+        let titles: Arc<Vec<Option<String>>> = Arc::new(
+            crate::text::of_each(deck.data.clone(), &pages)
+                .into_iter()
+                .map(|t| t.and_then(|t| t.title()))
+                .collect(),
+        );
+        if let Some(kept) = &mut self.kept
+            && Arc::ptr_eq(&kept.deck, deck)
+        {
+            kept.titles = Some(titles.clone());
+        }
+        titles
     }
 
     /// The page, from 0, `args` name from 1; else the running ohp's, where
     /// it shows the deck asked about; else the first.
     fn page(&mut self, args: &Value, deck: &Deck) -> Result<usize, String> {
         let page = match number(args, "page")? {
-            Some(n) => (n as usize)
-                .checked_sub(1)
-                .ok_or("pages are counted from 1")?,
-            None => running()
+            Some(n) => from_one(n)?,
+            None => self
+                .running()
                 .filter(|s| s.files == deck.paths)
                 .map_or(0, |s| s.page),
         };
@@ -224,14 +240,14 @@ impl Server {
     }
 
     fn goto(&mut self, args: &Value) -> Result<String, String> {
-        let shown = running().ok_or("no ohp is running here: `open` a file first")?;
+        let shown = self
+            .running()
+            .ok_or("no ohp is running here: `open` a file first")?;
         let page = match (number(args, "page")?, args.get("title")) {
-            (Some(n), _) => (n as usize)
-                .checked_sub(1)
-                .ok_or("slides are counted from 1")?,
+            (Some(n), _) => from_one(n)?,
             (None, Some(Value::String(title))) => {
                 let deck = self.deck(&json!({}))?;
-                let titles = titles(&deck);
+                let titles = self.titles(&deck);
                 let want = title.to_lowercase();
                 titles
                     .iter()
@@ -256,9 +272,9 @@ impl Server {
 
     fn slides(&mut self, args: &Value) -> Result<String, String> {
         let deck = self.deck(args)?;
-        let titles = titles(&deck);
+        let titles = self.titles(&deck);
         let notes = all_notes(&deck);
-        let shown = running().filter(|s| s.files == deck.paths);
+        let shown = self.running().filter(|s| s.files == deck.paths);
         let mut out = format!("{}: {} pages\n", render::shown(&deck.paths), deck.pages);
         for (i, title) in titles.iter().enumerate() {
             let (w, h) = deck.sizes[i];
@@ -287,20 +303,23 @@ impl Server {
             Some(_) => vec![self.page(args, &deck)?],
             None => (0..deck.pages).collect(),
         };
-        let texts = crate::text::of_each(deck.data.clone(), &pages);
         let mut out = String::new();
-        for (page, text) in pages.iter().zip(texts) {
-            if pages.len() > 1 {
-                out.push_str(&format!("--- page {} ---\n", page + 1));
-            }
-            out.push_str(&text.map(|t| t.plain()).unwrap_or_default());
-            out.push('\n');
-            if out.len() > MOST_TEXT {
-                out.push_str(&format!(
-                    "… cut here, after page {}: ask for a `page` to read on",
-                    page + 1
-                ));
-                break;
+        // Read some pages at a time, so no more are read than are given.
+        for chunk in pages.chunks(8) {
+            let texts = crate::text::of_each(deck.data.clone(), chunk);
+            for (page, text) in chunk.iter().zip(texts) {
+                if pages.len() > 1 {
+                    out.push_str(&format!("--- page {} ---\n", page + 1));
+                }
+                out.push_str(&text.map(|t| t.plain()).unwrap_or_default());
+                out.push('\n');
+                if out.len() > MOST_TEXT {
+                    out.push_str(&format!(
+                        "… cut here, after page {}: ask for a `page` to read on",
+                        page + 1
+                    ));
+                    return Ok(out);
+                }
             }
         }
         Ok(out)
@@ -360,8 +379,8 @@ impl Server {
     }
 }
 
-fn status() -> String {
-    let Some(shown) = running() else {
+fn status(shown: Option<Status>) -> String {
+    let Some(shown) = shown else {
         return "no ohp is running here; `open` shows a file in a new window".into();
     };
     let view = match (shown.presenting, shown.view.as_str()) {
@@ -384,12 +403,10 @@ fn open(args: &Value) -> Result<String, String> {
         .and_then(Value::as_str)
         .ok_or("say which file to `open`: `path`")?;
     let path = resolve(path)?;
-    let page = match number(args, "page")? {
-        Some(n) => (n as usize)
-            .checked_sub(1)
-            .ok_or("slides are counted from 1")?,
-        None => 0,
-    };
+    let page = number(args, "page")?
+        .map(from_one)
+        .transpose()?
+        .unwrap_or(0);
     if let Some(answer) = control::ask(&Request::Open(path.clone(), page)) {
         return reply(&answer);
     }
@@ -431,15 +448,6 @@ fn resolve(path: &str) -> Result<PathBuf, String> {
         return Err(format!("there is no {}", whole.display()));
     }
     Ok(whole)
-}
-
-/// Each page's title, as its text has it.
-fn titles(deck: &Deck) -> Vec<Option<String>> {
-    let pages: Vec<usize> = (0..deck.pages).collect();
-    crate::text::of_each(deck.data.clone(), &pages)
-        .into_iter()
-        .map(|t| t.and_then(|t| t.title()))
-        .collect()
 }
 
 /// The deck's notes, from it and the files beside its files.

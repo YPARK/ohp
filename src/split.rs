@@ -42,12 +42,9 @@ pub fn split(data: &[u8]) -> anyhow::Result<Option<Split>> {
         .map_err(|_| anyhow!("the PDF's pages are not where they should be"))?;
     let mut notes = Vec::with_capacity(pages.len());
     for &id in &pages {
-        let media = inherited(&doc, id, b"MediaBox")
-            .and_then(|o| rect(&doc, &o))
+        let media = crate::sign::page_box(&doc, id, b"MediaBox")
             .ok_or_else(|| anyhow!("a page has no size"))?;
-        let [x0, y0, x1, y1] = inherited(&doc, id, b"CropBox")
-            .and_then(|o| rect(&doc, &o))
-            .unwrap_or(media);
+        let [x0, y0, x1, y1] = crate::sign::shown_box(&doc, id);
         let mid = (x0 + x1) / 2.;
         // What a page takes from those above it, as its note will be put
         // straight under the root.
@@ -119,7 +116,9 @@ fn save(doc: &mut Document) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// `key` of the page `id`, or of the nearest node above it that has it.
+/// `key` of the page `id`, or of the nearest node above it that has it,
+/// as it is written there: a reference kept a reference, so what pages
+/// share stays shared. ([`crate::sign`]'s reads it through.)
 fn inherited(doc: &Document, id: ObjectId, key: &[u8]) -> Option<Object> {
     let mut dict = doc.get_dictionary(id).ok()?;
     for _ in 0..64 {
@@ -130,28 +129,6 @@ fn inherited(doc: &Document, id: ObjectId, key: &[u8]) -> Option<Object> {
         dict = doc.get_dictionary(parent).ok()?;
     }
     None
-}
-
-/// A rectangle, `[x0 y0 x1 y1]`, ordered.
-fn rect(doc: &Document, o: &Object) -> Option<[f32; 4]> {
-    let o = match o {
-        Object::Reference(id) => doc.get_object(*id).ok()?,
-        o => o,
-    };
-    let numbers: Vec<f32> = o
-        .as_array()
-        .ok()?
-        .iter()
-        .filter_map(|n| match n {
-            Object::Integer(i) => Some(*i as f32),
-            Object::Real(r) => Some(*r),
-            _ => None,
-        })
-        .collect();
-    let [a, b, c, d] = numbers[..] else {
-        return None;
-    };
-    Some([a.min(c), b.min(d), a.max(c), b.max(d)])
 }
 
 fn boxed(r: [f32; 4]) -> Object {

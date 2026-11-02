@@ -588,21 +588,24 @@ fn inherited<'a>(doc: &'a Document, page: ObjectId, key: &[u8]) -> Option<&'a Ob
     None
 }
 
-/// The box of `page` that is shown: its crop box within its media box.
-fn shown_box(doc: &Document, page: ObjectId) -> [f32; 4] {
-    let read = |key: &[u8]| -> Option<[f32; 4]> {
-        let array = inherited(doc, page, key)?.as_array().ok()?;
-        let n: Vec<f32> = array
-            .iter()
-            .filter_map(|o| doc.dereference(o).ok()?.1.as_float().ok())
-            .collect();
-        let [a, b, c, d] = n[..] else {
-            return None;
-        };
-        Some([a.min(c), b.min(d), a.max(c), b.max(d)])
+/// `page`'s box `key`, as `MediaBox`, as it has it or takes it from
+/// above: `[left, bottom, right, top]`.
+pub(crate) fn page_box(doc: &Document, page: ObjectId, key: &[u8]) -> Option<[f32; 4]> {
+    let array = inherited(doc, page, key)?.as_array().ok()?;
+    let n: Vec<f32> = array
+        .iter()
+        .filter_map(|o| doc.dereference(o).ok()?.1.as_float().ok())
+        .collect();
+    let [a, b, c, d] = n[..] else {
+        return None;
     };
-    let media = read(b"MediaBox").unwrap_or([0., 0., 612., 792.]);
-    match read(b"CropBox") {
+    Some([a.min(c), b.min(d), a.max(c), b.max(d)])
+}
+
+/// The box of `page` that is shown: its crop box within its media box.
+pub(crate) fn shown_box(doc: &Document, page: ObjectId) -> [f32; 4] {
+    let media = page_box(doc, page, b"MediaBox").unwrap_or([0., 0., 612., 792.]);
+    match page_box(doc, page, b"CropBox") {
         Some(c) => [
             c[0].max(media[0]),
             c[1].max(media[1]),

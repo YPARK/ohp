@@ -225,7 +225,7 @@ impl App {
             if ctrl && key.code == KeyCode::Char('c') {
                 self.quit = self.finish_writing();
             } else if !(ctrl && key.code == KeyCode::Char('g')) {
-                self.notice = Some("C-x C-c quits".into());
+                self.notice = Some(super::stage::QUIT_HINT.into());
             }
             self.dirty = true;
             return;
@@ -237,7 +237,7 @@ impl App {
             return;
         }
         if ctrl && key.code == KeyCode::Char('c') {
-            self.notice = Some("C-x C-c quits".into());
+            self.notice = Some(super::stage::QUIT_HINT.into());
             self.dirty = true;
             return;
         }
@@ -246,17 +246,10 @@ impl App {
             self.dirty = true;
             return;
         }
-        // C-g gives up what is under way, as in Emacs: picking privately in
-        // the grid goes back to the slide shown; a search, back to where it
-        // began; else as esc does, closing a list or a form.
+        // C-g gives up what is under way, as in Emacs: a search, back to
+        // where it began; else as esc does, closing a list or a form, or
+        // leaving the grid picked from privately for the slide shown.
         if ctrl && key.code == KeyCode::Char('g') && self.search.is_none() {
-            // A list open over the grid is closed first.
-            if self.presenting() && self.view == View::Grid && !self.listing() {
-                self.cur = self.live;
-                self.view = View::Present;
-                self.dirty = true;
-                return;
-            }
             key = KeyEvent::from(KeyCode::Esc);
         }
         if self.seat.is_some() {
@@ -315,7 +308,7 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Char('q') => self.notice = Some("C-x C-c quits".into()),
+            KeyCode::Char('q') => self.notice = Some(super::stage::QUIT_HINT.into()),
             KeyCode::Char('w') => self.toggle_stage(),
             KeyCode::Char(' ') | KeyCode::PageDown => self.step(1),
             KeyCode::PageUp => self.step(-1),
@@ -324,8 +317,7 @@ impl App {
             KeyCode::Esc | KeyCode::Char('g') | KeyCode::Tab
                 if self.presenting() && self.view == View::Grid =>
             {
-                self.cur = self.live;
-                self.view = View::Present;
+                self.back_to_shown();
             }
             KeyCode::Home => self.cur = 0,
             KeyCode::End => self.cur = self.deck.pages - 1,

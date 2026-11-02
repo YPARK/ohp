@@ -2,7 +2,7 @@
 //! what is shown, turning to a slide, and showing another file.
 
 use super::{App, View};
-use crate::control::{Listener, Request};
+use crate::control::{Listener, Request, Status};
 
 impl App {
     /// Listen for other programs, as `ohp mcp`, if a socket can be made.
@@ -17,9 +17,10 @@ impl App {
         };
         let asked: Vec<_> = control.asked.try_iter().collect();
         for (request, reply) in asked {
+            // Only what changes the screen draws it again.
+            self.dirty |= request != Request::Status;
             let answer = self.answer_one(request);
             let _ = reply.send(answer);
-            self.dirty = true;
         }
     }
 
@@ -27,25 +28,23 @@ impl App {
         match request {
             Request::Status => {
                 // Whole, as the asker is somewhere else.
-                let whole = |p: &std::path::Path| std::path::absolute(p).unwrap_or(p.into());
-                let mut out: Vec<String> = (self.deck.paths.iter())
-                    .map(|p| format!("file {}", whole(p).display()))
-                    .collect();
-                out.push(format!("page {}", self.cur + 1));
-                out.push(format!("pages {}", self.deck.pages));
-                let view = match self.view {
-                    View::Present => "present",
-                    View::Grid => "grid",
-                };
-                out.push(format!("view {view}"));
-                out.push(format!("presenting {}", u8::from(self.presenting())));
+                let whole = |p: &std::path::PathBuf| std::path::absolute(p).unwrap_or(p.clone());
                 let options = &self.deck.options;
-                if let Some(paper) = &options.paper {
-                    out.push(format!("paper {paper}"));
+                Status {
+                    files: self.deck.paths.iter().map(whole).collect(),
+                    page: self.cur,
+                    pages: self.deck.pages,
+                    view: match self.view {
+                        View::Present => "present",
+                        View::Grid => "grid",
+                    }
+                    .into(),
+                    presenting: self.presenting(),
+                    paper: options.paper.clone(),
+                    knit: options.knit,
+                    screen: options.screen,
                 }
-                out.push(format!("knit {}", u8::from(options.knit)));
-                out.push(format!("screen {}", u8::from(options.screen)));
-                out
+                .lines()
             }
             Request::Goto(n) if n < self.deck.pages => {
                 self.cur = n;

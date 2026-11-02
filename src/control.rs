@@ -4,8 +4,10 @@
 //!
 //! A request is a line, and so is each line of the answer, ended by `end`:
 //!
-//! - `status`: `file <path>`, one a file of the deck, `page <n>` from 1,
-//!   `pages <n>`, `view <present|grid>`, `presenting <0|1>`;
+//! - `status`: a [`Status`], a line a field: `file <path>`, one a file
+//!   of the deck, `page <n>` from 1, `pages <n>`, `view <present|grid>`,
+//!   `presenting <0|1>`, and how the deck is read, `paper <name>`,
+//!   `knit <0|1>`, `screen <0|1>`;
 //! - `goto <n>`: turn to slide `n`, from 1, and show it;
 //! - `open <n> <path>`: show the file, from slide `n`.
 //!
@@ -52,6 +54,57 @@ impl Request {
     }
 }
 
+/// What the running ohp shows, as `status` answers.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Status {
+    /// Whole, as the asker is somewhere else.
+    pub files: Vec<PathBuf>,
+    /// From 0.
+    pub page: usize,
+    pub pages: usize,
+    pub view: String,
+    pub presenting: bool,
+    /// How the deck is read, so another reads it alike.
+    pub paper: Option<String>,
+    pub knit: bool,
+    pub screen: bool,
+}
+
+impl Status {
+    pub fn lines(&self) -> Vec<String> {
+        let mut out: Vec<String> = (self.files.iter())
+            .map(|p| format!("file {}", p.display()))
+            .collect();
+        out.push(format!("page {}", self.page + 1));
+        out.push(format!("pages {}", self.pages));
+        out.push(format!("view {}", self.view));
+        out.push(format!("presenting {}", u8::from(self.presenting)));
+        out.extend(self.paper.as_ref().map(|p| format!("paper {p}")));
+        out.push(format!("knit {}", u8::from(self.knit)));
+        out.push(format!("screen {}", u8::from(self.screen)));
+        out
+    }
+
+    pub fn parse(lines: &[String]) -> Status {
+        let mut status = Status::default();
+        for line in lines {
+            let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
+            match word {
+                "file" => status.files.push(rest.into()),
+                "page" => status.page = rest.parse::<usize>().unwrap_or(1).saturating_sub(1),
+                "pages" => status.pages = rest.parse().unwrap_or(0),
+                "view" => status.view = rest.into(),
+                "presenting" => status.presenting = rest == "1",
+                "paper" => status.paper = Some(rest.into()),
+                "knit" => status.knit = rest == "1",
+                "screen" => status.screen = rest == "1",
+                _ => {}
+            }
+        }
+        status
+    }
+}
+
 /// A request, and where its answer goes, a line at a time.
 pub type Asked = (Request, Sender<Vec<String>>);
 
@@ -76,11 +129,13 @@ fn private(dir: &Path) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(dir) else {
         return false;
     };
-    // This user is who owns a file made now.
-    let me = tempfile::tempfile()
-        .and_then(|f| f.metadata())
-        .map(|m| m.uid());
-    meta.is_dir() && me.is_ok_and(|me| meta.uid() == me) && meta.mode() & 0o077 == 0
+    // This user is who owns a file made now; found once.
+    static ME: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    let me = *ME.get_or_init(|| {
+        let file = tempfile::tempfile().ok()?;
+        Some(file.metadata().ok()?.uid())
+    });
+    meta.is_dir() && me.is_some_and(|me| meta.uid() == me) && meta.mode() & 0o077 == 0
 }
 
 /// The running ohp's end: requests, as they come.

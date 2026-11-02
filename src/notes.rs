@@ -52,13 +52,22 @@ pub fn is_notes(text: &str) -> bool {
 
 /// The notes file beside `path`, if there is one.
 pub fn beside(path: &Path) -> Option<PathBuf> {
-    let stem = path.file_stem()?.to_string_lossy();
+    let own = same_name(path);
+    candidates(path).into_iter().find(|p| {
+        p.is_file()
+            && (Some(p) != own.as_ref()
+                || std::fs::read_to_string(p).is_ok_and(|text| is_notes(&text)))
+    })
+}
+
+/// The files that may be `path`'s notes, in the order looked for.
+fn candidates(path: &Path) -> Vec<PathBuf> {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
     let dir = path.parent().unwrap_or(Path::new(""));
-    let own =
-        same_name(path).filter(|md| std::fs::read_to_string(md).is_ok_and(|text| is_notes(&text)));
-    own.into_iter()
+    same_name(path)
+        .into_iter()
         .chain(ENDINGS.iter().map(|end| dir.join(format!("{stem}.{end}"))))
-        .find(|p| p.is_file())
+        .collect()
 }
 
 /// The notes file to write `path`'s notes into: the one beside it, else a
@@ -144,13 +153,7 @@ pub struct Beside {
 /// When each file that may be `path`'s notes last changed: only when one
 /// has is any read, to see which is its notes.
 fn stamps(path: &Path) -> Vec<Stamp> {
-    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-    let dir = path.parent().unwrap_or(Path::new(""));
-    same_name(path)
-        .into_iter()
-        .chain(ENDINGS.iter().map(|end| dir.join(format!("{stem}.{end}"))))
-        .map(|p| render::stamp(&p))
-        .collect()
+    candidates(path).iter().map(|p| render::stamp(p)).collect()
 }
 
 impl Beside {

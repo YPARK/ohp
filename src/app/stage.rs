@@ -18,6 +18,20 @@ use std::time::{Duration, Instant};
 /// How long the audience's window says what to do with it.
 const HINT: Duration = Duration::from_secs(12);
 
+/// What a key that used to quit says now.
+pub(super) const QUIT_HINT: &str = "C-x C-c quits";
+/// What printing or annotating, presenting, says.
+const NOT_PRESENTING: &str = "w ends presenting, to print or annotate";
+
+/// The presenter's colours.
+const LIT: Style = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+const DIM: Style = Style::new().fg(Color::DarkGray);
+const RED: Style = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
+const CAP: Style = Style::new()
+    .fg(Color::Black)
+    .bg(Color::Rgb(255, 214, 10))
+    .add_modifier(Modifier::BOLD);
+
 /// Time since the talk began, but for while it was paused.
 pub(super) struct Clock {
     pub(super) began: Instant,
@@ -101,6 +115,9 @@ pub(super) struct Boxes {
 /// The audience's end, in its window.
 pub(super) struct Seat {
     pub link: link::Audience,
+    /// The slide told, which may be past the end of the deck until the
+    /// deck it is of is read.
+    pub page: usize,
     /// Until when the window says what to do with it.
     pub hint: Instant,
 }
@@ -128,11 +145,7 @@ impl App {
                 if self.hover {
                     self.toggle_hover();
                 }
-                // Its pages whole again, notes and all.
-                if self.note_pages {
-                    self.note_pages = false;
-                    self.reload();
-                }
+                self.uncut_notes();
                 self.notice = Some("presenting to one window again".into());
             }
             None => match Stage::new() {
@@ -147,18 +160,49 @@ impl App {
                     }
                     self.open_audience();
                 }
-                Err(e) => self.notice = Some(format!("cannot present to a second window: {e}")),
+                Err(e) => self.cannot_present(&e),
             },
         }
         self.forget();
     }
 
-    /// `W`: open the audience's window, again.
+    fn cannot_present(&mut self, e: &dyn std::fmt::Display) {
+        self.notice = Some(format!("cannot present to a second window: {e}"));
+    }
+
+    /// The audience's window is gone.
+    fn lost_audience(&mut self) {
+        if let Some(stage) = &mut self.stage {
+            stage.peer = None;
+        }
+        self.notice = Some("the audience's window closed: W opens it again".into());
+        self.dirty = true;
+    }
+
+    /// `W`: open the audience's window, again: off this thread, as the
+    /// terminal may take a while to say it did.
     pub(super) fn open_audience(&mut self) {
         let Some(stage) = &self.stage else {
             return;
         };
-        self.notice = Some(match link::open_window(&stage.socket()) {
+        let socket = stage.socket();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(link::open_window(&socket)));
+        self.opening_window = Some(rx);
+        self.notice = Some("opening the audience's window…".into());
+    }
+
+    /// Say whether the audience's window was opened, once it is known.
+    fn opened_audience(&mut self) {
+        let Some(rx) = &self.opening_window else {
+            return;
+        };
+        let Ok(opened) = rx.try_recv() else {
+            return;
+        };
+        self.opening_window = None;
+        self.dirty = true;
+        self.notice = Some(match opened {
             Ok(terminal) => format!(
                 "opened the audience's window in {terminal}: drag it to the projector and make it full screen"
             ),
@@ -175,7 +219,9 @@ impl App {
     /// beamer's slides with their notes beside them, the slides alone,
     /// while the presenter's shows both.
     pub(super) fn restage(&mut self) {
+        // The deck is new: the one cut before is not to come back.
         self.note_pages = false;
+        self.uncut = None;
         if self.stage.is_some() {
             let audience = self.cut_notes();
             // The slide told again, after the deck it is of.
@@ -184,7 +230,7 @@ impl App {
                 && let Err(e) = stage.write(&audience)
             {
                 self.stage = None;
-                self.notice = Some(format!("cannot present to a second window: {e}"));
+                self.cannot_present(&e);
             }
         }
         self.read_notes();
@@ -237,13 +283,32 @@ impl App {
         match crate::render::Renderer::spawn(&deck, &self.picker, self.workers) {
             Ok(renderer) => {
                 self.summarizer.set_deck(data, deck.pages);
-                self.deck = deck;
+                self.uncut = Some(std::mem::replace(&mut self.deck, deck));
                 self.renderer = renderer;
                 self.note_pages = true;
                 self.shown.set(None);
                 self.forget();
             }
             Err(e) => self.notice = Some(format!("cannot show the notes: {e:#}")),
+        }
+    }
+
+    /// The deck as it was before its notes were cut off, back, as
+    /// presenting ends.
+    fn uncut_notes(&mut self) {
+        self.note_pages = false;
+        let Some(deck) = self.uncut.take() else {
+            return;
+        };
+        match crate::render::Renderer::spawn(&deck, &self.picker, self.workers) {
+            Ok(renderer) => {
+                self.summarizer.set_deck(deck.data.clone(), deck.pages);
+                self.deck = deck;
+                self.renderer = renderer;
+                self.shown.set(None);
+            }
+            // Read again from its files, as it cannot be shown as kept.
+            Err(_) => self.reload(),
         }
     }
 
@@ -264,7 +329,7 @@ impl App {
                     // Kept as told, as it may be past the end of the deck
                     // until the deck it is of is read.
                     Said::Page(n) => {
-                        self.live = n;
+                        seat.page = n;
                         self.cur = n.min(self.deck.pages - 1);
                     }
                     Said::Black(on) => self.black = on,
@@ -280,6 +345,7 @@ impl App {
             }
             return;
         }
+        self.opened_audience();
         let Some(stage) = &mut self.stage else {
             return;
         };
@@ -305,42 +371,34 @@ impl App {
                 Said::Key(Turn::Next) => self.turn(1),
                 Said::Key(Turn::Prev) => self.turn(-1),
                 Said::Key(Turn::Black) => self.black = !self.black,
-                Said::Bye => {
-                    if let Some(stage) = &mut self.stage {
-                        stage.peer = None;
-                    }
-                    self.notice = Some("the audience's window closed: w opens it again".into());
-                }
+                Said::Bye => self.lost_audience(),
                 Said::Deck(_) | Said::Page(_) | Said::Black(_) | Said::Laser(_) => continue,
             }
             self.dirty = true;
         }
-        // Picking in the grid, the audience goes on seeing the slide shown.
-        if self.view != View::Grid {
-            self.live = self.cur;
-        }
-        // The laser is on the slide shown, only.
+        // Picking in the grid, the audience goes on seeing the slide shown,
+        // and no laser on it.
         if self.view == View::Grid {
             self.laser = None;
+        } else {
+            self.live = self.cur;
         }
-        if let Some(stage) = &mut self.stage
-            && let Some(peer) = stage.peer.as_mut()
-            && self.told_laser != self.laser
-            && peer.say(&Said::Laser(self.laser))
-        {
-            self.told_laser = self.laser;
-        }
+        // What changed, told the audience; a window that cannot hear it is gone.
         let now = (self.live, self.black);
         if let Some(stage) = &mut self.stage
             && let Some(peer) = stage.peer.as_mut()
-            && self.told != Some(now)
         {
-            if peer.say(&Said::Page(now.0)) && peer.say(&Said::Black(now.1)) {
+            let mut heard = true;
+            if self.told != Some(now) {
+                heard = peer.say(&Said::Page(now.0)) && peer.say(&Said::Black(now.1));
                 self.told = Some(now);
-            } else {
-                stage.peer = None;
-                self.notice = Some("the audience's window closed: w opens it again".into());
-                self.dirty = true;
+            }
+            if heard && self.told_laser != self.laser {
+                heard = peer.say(&Said::Laser(self.laser));
+                self.told_laser = self.laser;
+            }
+            if !heard {
+                self.lost_audience();
             }
         }
         // Each second, the clock is drawn again, and the notes files
@@ -376,7 +434,7 @@ impl App {
             }
             KeyCode::Char('b' | '.') => Turn::Black,
             KeyCode::Char('q') | KeyCode::Esc => {
-                self.notice = Some("C-x C-c closes this window".into());
+                self.notice = Some(QUIT_HINT.into());
                 self.dirty = true;
                 return;
             }
@@ -391,20 +449,29 @@ impl App {
     /// picking in the grid, the one shown, and the pick with it.
     fn turn(&mut self, by: isize) {
         if self.view == View::Grid {
-            self.cur = self.live;
-            self.step(by);
-            self.live = self.cur;
-        } else {
-            self.step(by);
+            self.back_to_shown();
         }
+        self.step(by);
     }
 
-    /// `N`, or a click on the notes: write the current slide's notes, into the notes file beside
-    /// the file it is from.
+    /// Picking privately in the grid, given up: back to the slide shown.
+    pub(super) fn back_to_shown(&mut self) {
+        self.cur = self.live;
+        self.view = View::Present;
+    }
+
+    /// The file slide `slide` is from, by its place among the deck's, and
+    /// its page there, from 0.
+    fn page_in_file(&self, slide: usize) -> (usize, usize) {
+        let source = self.deck.source(slide);
+        (source, slide - self.deck.starts()[source])
+    }
+
+    /// `N`, or a click on the notes: write the current slide's notes, into
+    /// the notes file beside the file it is from.
     fn begin_writing(&mut self) {
-        let source = self.deck.source(self.cur);
+        let (source, page) = self.page_in_file(self.cur);
         let file = notes::file_for(&self.deck.paths[source]);
-        let page = self.cur - self.deck.starts()[source];
         let text = notes::written(&file, page);
         self.writing = Some(Writing {
             slide: self.cur,
@@ -415,7 +482,6 @@ impl App {
         });
     }
 
-    /// Save the notes being written, and stop writing.
     /// Save the notes being written, and stop writing; if they cannot be
     /// saved, go on writing them, and say so. True if saved, or none were
     /// being written.
@@ -507,11 +573,11 @@ impl App {
             KeyCode::Char('b' | '.') => self.black = !self.black,
             // Annotating and printing want the slide alone on the screen,
             // and the deck as it is, not cut from its notes.
-            KeyCode::Char('A' | 'P') => {
-                self.notice = Some("w ends presenting, to print or annotate".into());
-            }
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.notice = Some("w ends presenting, to print or annotate".into());
+            KeyCode::Char(c)
+                if matches!(c, 'A' | 'P')
+                    || (c == 'p' && key.modifiers.contains(KeyModifiers::CONTROL)) =>
+            {
+                self.notice = Some(NOT_PRESENTING.into());
             }
             KeyCode::Char('W') => self.open_audience(),
             KeyCode::Char('T') => self.clock.pause(),
@@ -587,8 +653,8 @@ impl App {
     }
 
     /// The slides the presenter's view shows, the current one first.
-    pub(super) fn stage_keys(&self) -> Vec<Key> {
-        let boxes = self.boxes();
+    pub(super) fn stage_keys(&self, boxes: &Boxes) -> Vec<Key> {
+        let boxes = *boxes;
         let inner = |r: Rect| Block::bordered().inner(r);
         let mut keys = vec![Key::new(self.cur, inner(boxes.current))];
         if self.cur + 1 < self.deck.pages {
@@ -606,8 +672,8 @@ impl App {
     }
 
     /// The sizes of the presenter's view's boxes, whose slides are kept.
-    pub(super) fn stage_sizes(&self) -> [Size; 4] {
-        let boxes = self.boxes();
+    pub(super) fn stage_sizes(&self, boxes: &Boxes) -> [Size; 4] {
+        let boxes = *boxes;
         let inner = |r: Rect| Block::bordered().inner(r).as_size();
         let slot = Rect::new(0, 0, boxes.slot.width, boxes.slot.height);
         [
@@ -635,7 +701,7 @@ impl App {
     /// The laser pointer at `at` on the screen, if that is on the current
     /// slide as drawn; off if not.
     pub(super) fn point(&mut self, at: Position) {
-        self.laser = self.drawn.get().and_then(|(job, area)| {
+        let laser = self.drawn.get().and_then(|(job, area)| {
             (job.key.page == self.cur && area.contains(at)).then(|| {
                 let frac =
                     |at: u16, from: u16, len: u16| (f32::from(at - from) + 0.5) / f32::from(len);
@@ -645,28 +711,23 @@ impl App {
                 )
             })
         });
-        self.dirty = true;
+        if laser != self.laser {
+            self.laser = laser;
+            self.dirty = true;
+        }
     }
 
     /// `L`: the laser follows the mouse with no button held, or no longer.
     fn toggle_hover(&mut self) {
-        use ratatui::crossterm::{execute, style::Print};
         self.hover = !self.hover;
-        // Every move of the mouse is told only while it is wanted.
-        let mode = if self.hover {
-            "\x1b[?1003h"
+        super::mouse_modes(self.hover);
+        let notice = if self.hover {
+            "the laser follows the mouse over the slide: L again stops it"
         } else {
-            "\x1b[?1003l"
-        };
-        let _ = execute!(std::io::stdout(), Print(mode));
-        if !self.hover {
             self.laser = None;
-        }
-        self.notice = Some(if self.hover {
-            "the laser follows the mouse over the slide: L again stops it".into()
-        } else {
-            "the laser shows while the mouse is held down on the slide".into()
-        });
+            "the laser shows while the mouse is held down on the slide"
+        };
+        self.notice = Some(notice.into());
     }
 
     /// A click in the presenter's view: on the strip, turn to that slide;
@@ -730,7 +791,7 @@ impl App {
             Tool::Grid => self.view = View::Grid,
             Tool::Window => self.open_audience(),
             Tool::End => self.toggle_stage(),
-            Tool::Quit => self.notice = Some("C-x C-c quits: press C-x, then C-c".into()),
+            Tool::Quit => self.notice = Some(format!("{QUIT_HINT}: press C-x, then C-c")),
         }
         self.dirty = true;
     }
@@ -755,10 +816,6 @@ impl App {
         buf.set_style(boxes.bar, Style::new().bg(Color::Rgb(30, 30, 46)));
         for (tool, at) in self.tools(boxes) {
             let (key, icon, word) = tool.label();
-            let cap = Style::new()
-                .fg(Color::Black)
-                .bg(Color::Rgb(255, 214, 10))
-                .add_modifier(Modifier::BOLD);
             let body = match self.lit(tool) {
                 Some(on) => Style::new()
                     .fg(Color::Black)
@@ -773,7 +830,7 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             };
             let line = Line::from(vec![
-                Span::styled(format!(" {key} "), cap),
+                Span::styled(format!(" {key} "), CAP),
                 Span::styled(format!(" {icon} {word} "), body),
             ]);
             f.render_widget(Paragraph::new(line), at);
@@ -783,9 +840,7 @@ impl App {
     pub(super) fn draw_stage(&self, f: &mut Frame) {
         let boxes = self.boxes();
         self.draw_tools(f, &boxes);
-        let lit = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-        let dim = Style::new().fg(Color::DarkGray);
-        let red = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
+        let (lit, dim, red) = (LIT, DIM, RED);
 
         let paused = self.clock.paused();
         let face = clock_face(self.clock.elapsed());
@@ -824,10 +879,7 @@ impl App {
         }
 
         if let Some(writing) = &self.writing {
-            let file = writing
-                .file
-                .file_name()
-                .map_or_else(String::new, |n| n.to_string_lossy().into());
+            let file = crate::render::name(&writing.file);
             let block = Block::bordered()
                 .border_type(BorderType::Thick)
                 .border_style(lit)
@@ -846,58 +898,11 @@ impl App {
                 Paragraph::new(writing.lines(inner.width)).scroll((scroll, 0)),
                 inner,
             );
-            return self.draw_strip_and_current(f, &boxes);
+        } else {
+            self.draw_notes(f, &boxes);
         }
-        let block = Block::bordered()
-            .border_style(dim)
-            .title(Span::styled(" notes · N or a click writes ", dim));
-        let inner = block.inner(boxes.notes);
-        f.render_widget(block, boxes.notes);
-        let mut inner = inner;
-        if self.note_pages {
-            let at = self.note_box(&boxes);
-            self.draw_slide(f, self.job(Key::new(self.deck.pages + self.cur, at)), at);
-            inner.y += at.height;
-            inner.height -= at.height;
-        }
-        let text = match self.notes.get(&self.cur) {
-            Some(note) => Paragraph::new(shown_markdown(note)),
-            None if self.note_pages => Paragraph::new(""),
-            None => {
-                let file = &self.deck.paths[self.deck.source(self.cur)];
-                let stem = file
-                    .file_stem()
-                    .map_or_else(String::new, |s| s.to_string_lossy().into());
-                let page = self.cur + 1 - self.deck.starts()[self.deck.source(self.cur)];
-                Paragraph::new(format!(
-                    "No notes for this slide. Write them in {stem}.notes.md, under a heading # {page}, or in ::: notes in markdown."
-                ))
-                .style(dim)
-            }
-        };
-        f.render_widget(text.wrap(Wrap { trim: false }), inner);
-        self.draw_strip_and_current(f, &boxes);
-    }
-
-    fn draw_strip_and_current(&self, f: &mut Frame, boxes: &Boxes) {
-        let boxes = *boxes;
-        let lit = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-        let dim = Style::new().fg(Color::DarkGray);
-        let red = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
         for (i, rect) in self.strip(&boxes) {
-            let on = i == self.cur;
-            let style = if on { lit } else { dim };
-            let block = Block::bordered()
-                .border_type(if on {
-                    BorderType::Thick
-                } else {
-                    BorderType::Plain
-                })
-                .border_style(style)
-                .title(Span::styled(format!(" {} ", i + 1), style));
-            let inner = block.inner(rect);
-            f.render_widget(block, rect);
-            self.draw_slide(f, self.job(Key::new(i, inner)), inner);
+            self.draw_cell(f, i, rect);
         }
 
         // Last, so it is the slide noted as drawn, which clicks read from.
@@ -917,6 +922,35 @@ impl App {
             self.shown.set(Some(drawn));
         }
         self.draw_laser(f);
+    }
+
+    /// The notes box: beamer's note for the slide, and the notes written.
+    fn draw_notes(&self, f: &mut Frame, boxes: &Boxes) {
+        let block = Block::bordered()
+            .border_style(DIM)
+            .title(Span::styled(" notes · N or a click writes ", DIM));
+        let mut inner = block.inner(boxes.notes);
+        f.render_widget(block, boxes.notes);
+        if self.note_pages {
+            let at = self.note_box(boxes);
+            self.draw_slide(f, self.job(Key::new(self.deck.pages + self.cur, at)), at);
+            inner.y += at.height;
+            inner.height -= at.height;
+        }
+        let text = match self.notes.get(&self.cur) {
+            Some(note) => Paragraph::new(shown_markdown(note)),
+            None if self.note_pages => Paragraph::new(""),
+            None => {
+                let (source, page) = self.page_in_file(self.cur);
+                let file = crate::render::name(&notes::file_for(&self.deck.paths[source]));
+                Paragraph::new(format!(
+                    "No notes for this slide. N writes them, into {file} under a heading # {}; or write ::: notes in markdown.",
+                    page + 1
+                ))
+                .style(DIM)
+            }
+        };
+        f.render_widget(text.wrap(Wrap { trim: false }), inner);
     }
 
     /// The laser pointer, where it is, over the current slide as drawn.

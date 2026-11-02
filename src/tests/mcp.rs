@@ -128,29 +128,19 @@ fn a_file_that_is_not_there_is_said_to_be_missing() {
 }
 
 #[test]
-fn the_running_ohps_status_is_read_from_its_lines() {
-    let lines: Vec<String> = [
-        "file /a/talk.pdf",
-        "page 3",
-        "pages 9",
-        "view grid",
-        "presenting 1",
-    ]
-    .map(String::from)
-    .to_vec();
-    assert_eq!(
-        Status::parse(&lines),
-        Status {
-            files: vec!["/a/talk.pdf".into()],
-            page: 2,
-            pages: 9,
-            view: "grid".into(),
-            presenting: true,
-            ..Status::default()
-        }
-    );
+fn the_running_ohps_status_is_heard_as_said() {
+    let status = Status {
+        files: vec!["/a/talk.pdf".into(), "/b/more.md".into()],
+        page: 2,
+        pages: 9,
+        view: "grid".into(),
+        presenting: true,
+        paper: Some("a4".into()),
+        knit: true,
+        screen: false,
+    };
+    assert_eq!(Status::parse(&status.lines()), status);
 }
-
 #[test]
 fn a_page_that_is_not_a_whole_number_is_refused_not_guessed() {
     let dir = tempfile::tempdir().unwrap();

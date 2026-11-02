@@ -221,35 +221,40 @@ impl App {
     fn draw_grid(&self, f: &mut Frame) {
         let grid = self.grid();
         for (i, rect) in self.slots(&grid) {
-            let on = i == self.cur;
-            // Presenting, the slide the audience sees, while another is picked.
-            let shown = self.presenting() && i == self.live;
-            let (style, border) = if on {
-                (
-                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                    BorderType::Thick,
-                )
-            } else if shown {
-                (
-                    Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
-                    BorderType::Double,
-                )
-            } else {
-                (Style::new().fg(Color::DarkGray), BorderType::Plain)
-            };
-            let title = if shown {
-                format!(" {} · on screen ", i + 1)
-            } else {
-                format!(" {} ", i + 1)
-            };
-            let block = Block::bordered()
-                .border_type(border)
-                .border_style(style)
-                .title(Span::styled(title, style));
-            let inner = block.inner(rect);
-            f.render_widget(block, rect);
-            self.draw_slide(f, self.job(Key::new(i, inner)), inner);
+            self.draw_cell(f, i, rect);
         }
+    }
+
+    /// Slide `i` in a slot of the grid, or of the presenter's strip: lit if
+    /// it is the current one; presenting, marked if it is the one on screen.
+    pub(super) fn draw_cell(&self, f: &mut Frame, i: usize, rect: Rect) {
+        let on = i == self.cur;
+        let shown = self.presenting() && i == self.live && self.view == View::Grid;
+        let (style, border) = if on {
+            (
+                Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                BorderType::Thick,
+            )
+        } else if shown {
+            (
+                Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+                BorderType::Double,
+            )
+        } else {
+            (Style::new().fg(Color::DarkGray), BorderType::Plain)
+        };
+        let title = if shown {
+            format!(" {} · on screen ", i + 1)
+        } else {
+            format!(" {} ", i + 1)
+        };
+        let block = Block::bordered()
+            .border_type(border)
+            .border_style(style)
+            .title(Span::styled(title, style));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        self.draw_slide(f, self.job(Key::new(i, inner)), inner);
     }
 
     pub(super) fn status(&self) -> Line<'_> {

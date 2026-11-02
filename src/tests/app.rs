@@ -878,7 +878,7 @@ fn presenting_shows_the_slide_the_next_and_the_strip() {
     assert_eq!(keys[0].page, 4);
     assert_eq!(keys[1].page, 5);
     assert!(keys[2..].iter().any(|k| k.page == 4));
-    let sizes = app.stage_sizes();
+    let sizes = app.stage_sizes(&app.boxes());
     assert_eq!(keys[0].size(), sizes[0]);
     assert_eq!(keys[1].size(), sizes[1]);
 }

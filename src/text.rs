@@ -306,6 +306,15 @@ pub fn of_each(data: Arc<Vec<u8>>, pages: &[usize]) -> Vec<Option<Page>> {
     pages.iter().map(one).collect()
 }
 
+/// A line's words, a space apart.
+fn joined(words: &[Word]) -> String {
+    words
+        .iter()
+        .map(|w| w.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl Page {
     /// Set the page on a `cols` × `rows` grid over `image`, a render of it,
     /// painting each glyph set out of the image, and lighting the cells of
@@ -412,14 +421,11 @@ impl Page {
     /// The page's text, a line of it a line, in the order it is read.
     #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
     pub fn plain(&self) -> String {
-        let line = |words: &[Word]| {
-            words
-                .iter()
-                .map(|w| w.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        let lines: Vec<String> = self.reading_lines().iter().map(|(_, w)| line(w)).collect();
+        let lines: Vec<String> = self
+            .reading_lines()
+            .iter()
+            .map(|(_, w)| joined(w))
+            .collect();
         lines.join("\n")
     }
 
@@ -429,13 +435,7 @@ impl Page {
     pub fn title(&self) -> Option<String> {
         let lines = self.reading_lines();
         let size = |words: &[Word]| words.iter().map(|w| w.size).fold(0f32, f32::max);
-        let text = |words: &[Word]| {
-            words
-                .iter()
-                .map(|w| w.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
+        let text = joined;
         let best = lines
             .iter()
             .filter(|(y, words)| *y <= self.height / 2. && !text(words).trim().is_empty())

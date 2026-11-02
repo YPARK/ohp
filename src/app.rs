@@ -123,13 +123,7 @@ pub fn run(
     page: usize,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
-    // Taken, the terminal's own selecting needs Shift, or Option on macOS.
-    // Presses, drags and the wheel, as SGR codes: crossterm's capture would
-    // send every move of the mouse too, over ssh as well.
-    let _ = execute!(
-        std::io::stdout(),
-        Print("\x1b[?1000h\x1b[?1002h\x1b[?1006h")
-    );
+    mouse_modes(false);
     let result = (|| {
         let picker = pick();
         quiet_render_panics();
@@ -156,6 +150,7 @@ pub fn run(
                 app.cur = link.page.min(app.deck.pages - 1);
                 app.black = link.black;
                 app.seat = Some(Seat {
+                    page: link.page,
                     link,
                     hint: Instant::now(),
                 });
@@ -173,6 +168,19 @@ pub fn run(
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
+}
+
+/// Take the mouse: presses, drags and the wheel, as SGR codes, and, with
+/// `hover`, every move of it too, as the laser following it wants. The
+/// terminal's own selecting then needs Shift, or Option on macOS.
+/// crossterm's capture would send every move always, over ssh as well;
+/// its `DisableMouseCapture` ends all of these.
+fn mouse_modes(hover: bool) {
+    let moves = if hover { "\x1b[?1003h" } else { "\x1b[?1003l" };
+    let _ = execute!(
+        std::io::stdout(),
+        Print(format!("\x1b[?1000h\x1b[?1002h\x1b[?1006h{moves}"))
+    );
 }
 
 fn pick() -> Picker {
@@ -438,6 +446,12 @@ struct App {
     told_laser: Option<(f32, f32)>,
     /// The laser follows the mouse, no button held, as `L` has it.
     hover: bool,
+    /// The deck as it was before beamer's notes were cut off it, to show
+    /// again as presenting ends.
+    uncut: Option<Deck>,
+    /// The audience's window being opened: the terminal's name, or the
+    /// command to run, once it is known.
+    opening_window: Option<Receiver<Result<&'static str, String>>>,
     /// Where other programs, as `ohp mcp`, ask things of this ohp.
     control: Option<crate::control::Listener>,
     /// The slide to show once the file being opened is read.
@@ -526,6 +540,8 @@ impl App {
             laser: None,
             told_laser: None,
             hover: false,
+            uncut: None,
+            opening_window: None,
             control: None,
             landing: None,
             notes_looked: Instant::now(),
@@ -827,8 +843,8 @@ impl App {
                 }
                 // The audience's window turns to the slide it was told,
                 // which may be past the end of the deck it had.
-                if self.seat.is_some() {
-                    self.cur = self.live;
+                if let Some(seat) = &self.seat {
+                    self.cur = seat.page;
                 }
                 self.cur = self.cur.min(deck.pages - 1);
                 self.summarizer.set_deck(deck.data.clone(), deck.pages);
@@ -1083,7 +1099,7 @@ impl App {
             return vec![preview.key];
         }
         match self.view {
-            View::Present if self.stage_view() => self.stage_keys(),
+            View::Present if self.stage_view() => self.stage_keys(&self.boxes()),
             View::Present => vec![self.presented()],
             View::Grid => {
                 let grid = self.grid();
@@ -1131,7 +1147,7 @@ impl App {
         let fitted = [self.cur + 1, self.cur.wrapping_sub(1), self.cur + 2];
         // Presenting, the slides either side are fitted to the presenter's
         // boxes for the current and the next slide.
-        let stage_sizes = self.stage.as_ref().map(|_| self.stage_sizes());
+        let stage_sizes = self.presenting().then(|| self.stage_sizes(&self.boxes()));
         match stage_sizes {
             Some([current, next, ..]) => {
                 let at = |size: Size| Rect::new(0, 0, size.width, size.height);

@@ -781,15 +781,39 @@ pub fn png(data: Arc<Vec<u8>>, page: usize, width: u32) -> anyhow::Result<Vec<u8
     let Some(one) = pages.get(page) else {
         anyhow::bail!("there is no page {} of {}", page + 1, pages.len());
     };
-    let (w, _) = one.render_dimensions();
-    let scale = width as f32 / w;
     let (cache, settings) = (RenderCache::new(), InterpreterSettings::default());
-    let image = caught(|| raster(one, &cache, &settings, scale, scale))
+    let image = caught(|| at_width(one, &cache, &settings, width))
         .ok_or_else(|| anyhow!("cannot render page {}", page + 1))?;
     let mut out = Vec::new();
     DynamicImage::ImageRgba8(image)
         .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
     Ok(out)
+}
+
+/// `page` drawn `width` pixels across, on white.
+pub fn at_width<'a>(
+    page: &'a Page<'a>,
+    cache: &RenderCache<'a>,
+    settings: &InterpreterSettings,
+    width: u32,
+) -> Option<RgbaImage> {
+    let width = width.max(1);
+    let (w, _) = page.render_dimensions();
+    let scale = width as f32 / w;
+    let drawn = raster(page, cache, settings, scale, scale)?;
+    if drawn.width() == width {
+        return Some(drawn);
+    }
+    // Rounded a pixel off: made the width asked.
+    let height = (drawn.height() as f32 * width as f32 / drawn.width() as f32)
+        .round()
+        .max(1.0) as u32;
+    Some(imageops::resize(
+        &drawn,
+        width,
+        height,
+        FilterType::Triangle,
+    ))
 }
 
 /// Light the boxes in `lit`, and mark those in `marked`, in page points, on
