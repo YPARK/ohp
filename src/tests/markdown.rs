@@ -365,7 +365,7 @@ fn a_link_to_nowhere_shows_its_text() {
 fn a_fence_is_closed_only_by_one_as_long_with_nothing_after() {
     let inner = "```{r}\n:::\n. . .\n\\newcommand{\\x}{y}\n```\n";
     let text = format!("````markdown\n{inner}````\n");
-    assert_eq!(strip_divs(&text), (text.clone(), Vec::new()));
+    assert_eq!(strip_divs(&text), (text.clone(), Vec::new(), Vec::new()));
     let text = "```\na\n```r\n:::\n```\n";
     assert_eq!(strip_divs(text).0, text);
 }
@@ -413,8 +413,9 @@ fn a_backtick_fence_has_no_backtick_after_it() {
     assert_eq!(open_fence("```x```"), None);
     assert_eq!(open_fence("``x"), None);
     // Inline code on a line of its own leaves the notes after it out.
-    let (out, _) = strip_divs("```x```\n\n::: notes\nsecret\n:::\n");
+    let (out, _, speaker) = strip_divs("```x```\n\n::: notes\nsecret\n:::\n");
     assert!(!out.contains("secret"), "{out}");
+    assert_eq!(speaker, ["secret"]);
 }
 
 #[test]

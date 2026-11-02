@@ -52,6 +52,7 @@ ohp                                  # pick the file from a list
 ohp ~/talks                          # pick it from a list there
 ohp talk.pdf
 ohp --text talk.pdf                  # slides as text, even where images can be shown
+ohp --presenter talk.pdf             # present to a second window, as w does
 ohp user@host:~/talks/talk.pdf       # slides on another machine
 ohp talk.Rmd                         # R Markdown slides, chunks run by knitr
 ohp --paper a4 notes.md              # a markdown document, on A4 pages
@@ -84,6 +85,8 @@ set by typst, so need the `markdown` feature, as in the default build.
 | Key | |
 |---|---|
 | `n` / `p`, arrows | next / previous slide; up and down move a row in the grid |
+| `space`, `page down` / `page up` | next / previous slide, as presentation clickers send them |
+| `home` / `end` | first / last slide |
 | `g`, `tab` | switch between the slide and a grid of all slides |
 | `enter` | present the slide picked in the grid |
 | `+` / `-` | zoom the slide, or the grid |
@@ -101,7 +104,9 @@ set by typst, so need the `markdown` feature, as in the default build.
 | `ctrl-s`, `ctrl-r` | search forward, or back, as [Searching](#searching) shows |
 | `A` | annotate and sign the PDF: a signature, your name, the date, ✓ ✕ ●, put where you click, in a copy, as [Annotating and signing](#annotating-and-signing) shows |
 | `P`, `ctrl-p` | print what is shown, as [Printing](#printing) shows |
-| `q` | quit |
+| `w` | present to a second window, for the projector, as [Presenter view](#presenter-view) shows |
+| `C-x C-c` | quit, as in Emacs, so no one key ends a talk by mistake |
+| `C-g` | give up what is under way, as in Emacs: a `C-x`, a search, a list or a form |
 
 ohp takes the mouse, so selecting text in the terminal needs Shift held,
 or Option in macOS terminals; the wheel turns slides as the arrows do.
@@ -114,6 +119,67 @@ shown as its text over a coarse image of it.
 
 Over ssh, images are sent compressed: slides are flat colour, and the link,
 not the CPU, limits how fast a slide appears.
+
+## Presenter view
+
+`w`, or `ohp --presenter talk.pdf`, opens a second terminal window for
+the audience, which shows the slide alone, and turns this one into the
+presenter's view: the slide, the next one, your notes, the time since you
+began, and a strip of the slides along the bottom, the current one in its
+middle. Drag the audience's window to the projector and make it full
+screen; its slides are drawn anew for that screen's resolution.
+
+```
+┏ 3 / 13 ━━━━━━━━━━━━━━━━━━━━━━━━┓┌ time ──────────────┐
+┃                                 ┃│ 4:12  audience ●   │
+┃         the slide               ┃┌ next · 4 ──────────┐
+┃                                 ┃│   the next slide   │
+┃                                 ┃┌ notes ─────────────┐
+┃                                 ┃│ what to say        │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────┘
+     ┌ 1 ─┐┌ 2 ─┐┏ 3 ━┓┌ 4 ─┐┌ 5 ─┐   a click turns to it
+```
+
+The window is opened in kitty, Ghostty, WezTerm, iTerm2 and macOS's
+Terminal. In another terminal, over ssh, or in tmux, the status line says
+the command to run in a window on the projector, and puts it on the
+clipboard. Keys pressed in either window turn the slides in both.
+
+| Key, presenting | |
+|---|---|
+| `n` / `p`, arrows, `space`, `page down` / `page up` | next / previous slide, in both windows |
+| click | on the strip, turn to that slide; on the next slide, turn to it |
+| `g` | pick from a grid of all the slides, privately: the audience goes on seeing the slide shown, marked *on screen*, until `enter`, or a double click, shows the one picked; `esc`, `g` or `C-g` go back to it |
+| `e` | write the slide's notes, as you practise: `enter` begins a line, arrows and Emacs's `C-a` `C-e` `C-f` `C-b` `C-n` `C-p` `C-d` `C-k` move and delete, `esc` saves them into the notes file beside the slides, and `C-g` drops them |
+| `b`, `.` | black out the audience's screen, or show it again |
+| `T` | pause the time, or go on |
+| `0` | start the time again from nought |
+| `w` | end: the audience's window closes; with it closed, `w` opens it again |
+
+Notes come from three places, and are shown together:
+
+- **A notes file beside the slides**: `talk.notes.md` for `talk.pdf` (or
+  `talk.notes.txt`, `talk.notes`), in which a heading that is a page's
+  number, as `# 3` or `## Slide 3`, begins that page's notes. It is read
+  again whenever it is saved, and `e` writes into it, making it if need
+  be, the rest of it left as it was.
+- **Markdown's speaker notes**, written as pandoc has them, which are
+  never shown on the slides:
+
+  ```markdown
+  ## Results
+
+  The effect held in every cohort.
+
+  ::: notes
+  Mention the 2024 replication.
+  :::
+  ```
+
+- **Beamer's `\note{}`**, set beside each slide with
+  `\setbeameroption{show notes on second screen=right}`: each page, twice
+  a slide wide, is cut in two, the slide going to the audience and the
+  note to the notes box.
 
 ## Markdown and R Markdown
 

@@ -41,6 +41,8 @@ pub struct Shown {
     data: Arc<[u8]>,
     kind: Kind,
     note: Option<String>,
+    /// Speaker notes, by page of the file, from 0.
+    speaker: Vec<(usize, String)>,
 }
 
 enum Kind {
@@ -171,17 +173,20 @@ pub fn gather(paths: &[PathBuf], options: &Options) -> anyhow::Result<(Typeset, 
         let mut files = Vec::new();
         let mut spans: Vec<Range<usize>> = Vec::new();
         let mut from = Vec::new();
+        let mut speaker = Vec::new();
         for (n, (i, file)) in shown.iter().enumerate() {
             let start = source.len();
             files.push((file.set(n, &mut source), file.data.clone()));
             spans.push(start..source.len());
+            let first = from.len();
+            speaker.extend(file.speaker.iter().map(|(p, s)| (first + p, s.clone())));
             from.extend(std::iter::repeat_n(*i, file.pages()));
         }
         let world = Doc::new(source, &[], &files, &mut HashMap::new());
         let errors = match typeset::compile(&world) {
             Ok(pdf) => {
                 let note = (!notes.is_empty()).then(|| notes.join("; "));
-                return Ok((Typeset { pdf, note }, from));
+                return Ok((Typeset { pdf, note, speaker }, from));
             }
             Err(errors) => errors,
         };
@@ -212,7 +217,9 @@ pub fn gather(paths: &[PathBuf], options: &Options) -> anyhow::Result<(Typeset, 
 fn show(path: &Path, options: &Options) -> anyhow::Result<Shown> {
     if render::document(path) {
         let done = typeset::typeset(path, options)?;
-        return pdf(done.pdf.into(), done.note);
+        let mut shown = pdf(done.pdf.into(), done.note)?;
+        shown.speaker = done.speaker;
+        return Ok(shown);
     }
     let data: Arc<[u8]> = std::fs::read(path)
         .with_context(|| format!("reading {}", path.display()))?
@@ -225,6 +232,7 @@ fn show(path: &Path, options: &Options) -> anyhow::Result<Shown> {
             data,
             kind: Kind::Svg,
             note: None,
+            speaker: Vec::new(),
         });
     }
     match image::guess_format(&data) {
@@ -259,6 +267,7 @@ fn raster(data: Arc<[u8]>, format: ImageFormat) -> anyhow::Result<Shown> {
             data,
             kind: Kind::Image(width, height),
             note: None,
+            speaker: Vec::new(),
         });
     }
     let mut image = DynamicImage::from_decoder(decoder)?;
@@ -276,6 +285,7 @@ fn raster(data: Arc<[u8]>, format: ImageFormat) -> anyhow::Result<Shown> {
         data: data.into(),
         kind: Kind::Image(width, height),
         note: None,
+        speaker: Vec::new(),
     })
 }
 
@@ -290,6 +300,7 @@ fn pdf(data: Arc<[u8]>, note: Option<String>) -> anyhow::Result<Shown> {
         data,
         kind: Kind::Pdf(sizes),
         note,
+        speaker: Vec::new(),
     })
 }
 

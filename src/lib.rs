@@ -26,6 +26,7 @@ mod hub;
 mod knit;
 #[cfg(feature = "markdown")]
 mod latex;
+pub mod link;
 #[cfg(feature = "summary")]
 mod llm;
 #[cfg(feature = "markdown")]
@@ -37,6 +38,7 @@ mod menu;
 mod mermaid;
 #[cfg(feature = "summary")]
 mod models;
+mod notes;
 pub mod print;
 #[cfg(any(feature = "markdown", feature = "speech", feature = "summary"))]
 pub mod process;
@@ -46,6 +48,8 @@ mod salient;
 #[cfg(feature = "sign")]
 pub mod sign;
 pub mod speak;
+#[cfg(feature = "sign")]
+mod split;
 pub mod summary;
 mod text;
 #[cfg(feature = "markdown")]

@@ -18,6 +18,10 @@ use std::io::Write;
 
 impl App {
     pub(super) fn draw(&self, f: &mut Frame) {
+        if self.seat.is_some() {
+            self.draw_seat(f);
+            return;
+        }
         let (main, side, status) = split(f.area(), self.side_open());
         self.side.set(side);
         if self.printing.is_some() {
@@ -39,6 +43,7 @@ impl App {
             self.draw_preview(f, main);
         } else if !covered {
             match self.view {
+                View::Present if self.stage_view() => self.draw_stage(f),
                 View::Present => {
                     let job = self.job(self.presented());
                     let shown = self.draw_slide(f, job, main);
@@ -217,18 +222,30 @@ impl App {
         let grid = self.grid();
         for (i, rect) in self.slots(&grid) {
             let on = i == self.cur;
+            // Presenting, the slide the audience sees, while another is picked.
+            let shown = self.presenting() && i == self.live;
             let (style, border) = if on {
                 (
                     Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                     BorderType::Thick,
                 )
+            } else if shown {
+                (
+                    Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    BorderType::Double,
+                )
             } else {
                 (Style::new().fg(Color::DarkGray), BorderType::Plain)
+            };
+            let title = if shown {
+                format!(" {} · on screen ", i + 1)
+            } else {
+                format!(" {} ", i + 1)
             };
             let block = Block::bordered()
                 .border_type(border)
                 .border_style(style)
-                .title(Span::styled(format!(" {} ", i + 1), style));
+                .title(Span::styled(title, style));
             let inner = block.inner(rect);
             f.render_widget(block, rect);
             self.draw_slide(f, self.job(Key::new(i, inner)), inner);
@@ -238,18 +255,35 @@ impl App {
     pub(super) fn status(&self) -> Line<'_> {
         let dim = Style::new().fg(Color::DarkGray);
         let zoom = format!("present {}%", self.zoom.percent);
+        let picking = format!(
+            "picking · audience sees {} · {}",
+            self.live + 1,
+            super::stage::clock_face(self.clock.elapsed())
+        );
         let (view, keys) = match self.view {
+            View::Grid if self.presenting() => (
+                picking.as_str(),
+                "arrows click pick · enter/double-click show it · esc/g back to the one shown · b black · C-x C-c quit",
+            ),
+            View::Present if self.writing.is_some() => (
+                "writing notes",
+                "type · enter new line · arrows move · esc saves to the notes file",
+            ),
+            View::Present if self.stage_view() => (
+                "presenter",
+                "n/p ←/→ space next/prev · click a slide to go · e write notes · b black · T pause · 0 restart time · g pick privately · w end · C-x C-c quit",
+            ),
             View::Present if self.zoomed() => (
                 zoom.as_str(),
-                "arrows pan · +/- zoom · 0 fit · n/p next/prev · t text · s speak · v voice · k/K summary · m model · r reload · ^O open · q quit",
+                "arrows pan · +/- zoom · 0 fit · n/p next/prev · t text · s speak · v voice · k/K summary · m model · r reload · ^O open · C-x C-c quit",
             ),
             View::Present => (
                 "present",
-                "n/p ←/→ next/prev · ^S search · +/- zoom · g grid · t text · A annotate · P print · s speak, then click to speak from · v voice · k/K summary · m model · r reload · ^O open · q quit",
+                "n/p ←/→ next/prev · ^S search · +/- zoom · g grid · t text · A annotate · P print · s speak, then click to speak from · v voice · k/K summary · m model · r reload · ^O open · C-x C-c quit",
             ),
             View::Grid => (
                 "grid",
-                "n/p arrows click move · g/enter/double-click present · +/- zoom · t text · s speak · v voice · k/K summary · m model · r reload · ^O open · q quit",
+                "n/p arrows click move · g/enter/double-click present · +/- zoom · t text · s speak · v voice · k/K summary · m model · r reload · ^O open · C-x C-c quit",
             ),
         };
         let signing = (self.search_status())

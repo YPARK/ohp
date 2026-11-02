@@ -33,6 +33,7 @@ use std::time::SystemTime;
 /// Name of the worker threads, so their panics can be told apart.
 pub const THREAD: &str = "render";
 
+#[derive(Clone)]
 pub struct Deck {
     /// The files the deck is made of, most often one.
     pub paths: Vec<PathBuf>,
@@ -45,6 +46,8 @@ pub struct Deck {
     pub options: Options,
     /// What the status line should say about how the deck was made.
     pub note: Option<String>,
+    /// Speaker notes set in the deck's markdown, by page.
+    pub speaker: crate::notes::Notes,
 }
 
 /// Making a deck stopped, as ohp quits: not worth saying as an error.
@@ -182,9 +185,10 @@ pub fn sizes(pdf: &Pdf) -> Vec<(f32, f32)> {
     pdf.pages().iter().map(Page::render_dimensions).collect()
 }
 
-/// A PDF made of files, what the status line should say about how, and
-/// which file each page is from, if they are several; else empty.
-type Made = (Vec<u8>, Option<String>, Vec<usize>);
+/// A PDF made of files, what the status line should say about how, which
+/// file each page is from, if they are several, else empty, and the speaker
+/// notes set in them.
+type Made = (Vec<u8>, Option<String>, Vec<usize>, crate::notes::Notes);
 
 #[cfg(feature = "markdown")]
 fn typeset(paths: &[PathBuf], options: &Options) -> anyhow::Result<Made> {
@@ -192,7 +196,11 @@ fn typeset(paths: &[PathBuf], options: &Options) -> anyhow::Result<Made> {
         [path] if document(path) => (crate::typeset::typeset(path, options)?, Vec::new()),
         _ => crate::album::gather(paths, options)?,
     };
-    Ok((done.pdf, done.note, from))
+    let mut speaker = crate::notes::Notes::new();
+    for (page, note) in done.speaker {
+        crate::notes::add(&mut speaker, page, note);
+    }
+    Ok((done.pdf, done.note, from, speaker))
 }
 
 #[cfg(not(feature = "markdown"))]
@@ -219,10 +227,10 @@ impl Deck {
         let [first, ..] = paths else {
             anyhow::bail!("no file to present");
         };
-        let (data, note, from) = if pdf(paths) {
+        let (data, note, from, speaker) = if pdf(paths) {
             let data =
                 std::fs::read(first).with_context(|| format!("reading {}", first.display()))?;
-            (data, None, Vec::new())
+            (data, None, Vec::new(), Default::default())
         } else {
             typeset(paths, &options)?
         };
@@ -246,7 +254,20 @@ impl Deck {
             data,
             options,
             note,
+            speaker,
         })
+    }
+
+    /// The page each of the deck's files begins on.
+    pub fn starts(&self) -> Vec<usize> {
+        (0..self.paths.len())
+            .map(|file| {
+                self.from
+                    .iter()
+                    .position(|&f| f == file)
+                    .unwrap_or(self.pages)
+            })
+            .collect()
     }
 
     /// Which of `paths` page `page` is from.

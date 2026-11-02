@@ -26,7 +26,7 @@ impl App {
     /// again, so a double click presents it. The wheel is the arrow keys,
     /// as the terminal makes it when the mouse is not taken.
     pub(super) fn mouse(&mut self, mouse: MouseEvent) {
-        if self.listing() {
+        if self.listing() || self.seat.is_some() {
             return;
         }
         let at = Position::new(mouse.column, mouse.row);
@@ -73,6 +73,12 @@ impl App {
                 self.dirty = true;
             }
             MouseEventKind::Down(MouseButton::Left) => match self.view {
+                View::Present if self.stage_view() && !self.speaker.reading() => {
+                    if self.stage_click(at) {
+                        self.notice = None;
+                        self.dirty = true;
+                    }
+                }
                 View::Present if self.signing() => {
                     self.sign_click(at);
                     self.dirty = true;
@@ -186,11 +192,49 @@ impl App {
         (b >= a && d >= c).then(|| Rect::new(a, c, b - a + 1, d - c + 1))
     }
 
-    pub(super) fn key(&mut self, key: KeyEvent) {
+    pub(super) fn key(&mut self, mut key: KeyEvent) {
         self.notice = None;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // C-x C-c quits, as in Emacs: no one key ends a talk by mistake.
+        if std::mem::take(&mut self.prefix) {
+            if ctrl && key.code == KeyCode::Char('c') {
+                self.quit = true;
+            } else if !(ctrl && key.code == KeyCode::Char('g')) {
+                self.notice = Some("C-x C-c quits".into());
+            }
+            self.dirty = true;
+            return;
+        }
+        if ctrl && key.code == KeyCode::Char('x') {
+            self.prefix = true;
+            self.notice = Some("C-x-".into());
+            self.dirty = true;
+            return;
+        }
         if ctrl && key.code == KeyCode::Char('c') {
-            self.quit = true;
+            self.notice = Some("C-x C-c quits".into());
+            self.dirty = true;
+            return;
+        }
+        if self.writing.is_some() {
+            self.write_key(key);
+            self.dirty = true;
+            return;
+        }
+        // C-g gives up what is under way, as in Emacs: picking privately in
+        // the grid goes back to the slide shown; a search, back to where it
+        // began; else as esc does, closing a list or a form.
+        if ctrl && key.code == KeyCode::Char('g') && self.search.is_none() {
+            if self.presenting() && self.view == View::Grid {
+                self.cur = self.live;
+                self.view = View::Present;
+                self.dirty = true;
+                return;
+            }
+            key = KeyEvent::from(KeyCode::Esc);
+        }
+        if self.seat.is_some() {
+            self.seat_key(key);
             return;
         }
         if let Some(browser) = &mut self.browser {
@@ -239,8 +283,25 @@ impl App {
             self.dirty = true;
             return;
         }
+        if self.stage_key(key) {
+            self.dirty = true;
+            return;
+        }
         match key.code {
-            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('q') => self.notice = Some("C-x C-c quits".into()),
+            KeyCode::Char('w') => self.toggle_stage(),
+            KeyCode::Char(' ') | KeyCode::PageDown => self.step(1),
+            KeyCode::PageUp => self.step(-1),
+            // Presenting, a slide picked in the grid is shown only once
+            // enter shows it; esc or g goes back to the one shown.
+            KeyCode::Esc | KeyCode::Char('g') | KeyCode::Tab
+                if self.presenting() && self.view == View::Grid =>
+            {
+                self.cur = self.live;
+                self.view = View::Present;
+            }
+            KeyCode::Home => self.cur = 0,
+            KeyCode::End => self.cur = self.deck.pages - 1,
             KeyCode::Char('o') if ctrl => self.browse(),
             KeyCode::Char('p') if ctrl => self.print(),
             KeyCode::Right if self.zoomed() => self.pan(1, 0),
@@ -336,7 +397,7 @@ impl App {
         self.zoom.y = self.zoom.y.min(most(ph * scale / fh, rows));
     }
 
-    fn step(&mut self, by: isize) {
+    pub(super) fn step(&mut self, by: isize) {
         let last = self.deck.pages - 1;
         self.cur = self.cur.saturating_add_signed(by).min(last);
     }

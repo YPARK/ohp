@@ -286,3 +286,23 @@ fn a_stopped_typeset_ends_without_a_pdf() {
     let why = typeset(&path, &stopped).err().unwrap();
     assert!(why.is::<Stopped>(), "{why}");
 }
+
+#[test]
+fn speaker_notes_are_kept_for_the_page_their_slide_is_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(
+        dir.path(),
+        "talk.md",
+        "---\ntitle: A talk\noutput: beamer_presentation\n---\n## One\nx\n\n::: notes\nsay *one*\n:::\n\n## Two\ny\n\n## Three\n\n::: notes\nfirst\n:::\n\nz\n\n::: {.notes}\nsecond\n:::\n",
+    );
+    let deck = Deck::open(&path).unwrap();
+    // The title, then the three slides.
+    assert_eq!(deck.pages, 4);
+    let notes: Vec<(usize, &str)> = deck.speaker.iter().map(|(p, n)| (*p, n.as_str())).collect();
+    assert_eq!(notes, [(1, "say *one*"), (3, "first\n\nsecond")]);
+    let text = crate::text::of(deck.data.clone(), 1).unwrap();
+    assert!(
+        !format!("{text:?}").contains("say"),
+        "a note is not on its slide"
+    );
+}
