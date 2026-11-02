@@ -773,6 +773,25 @@ pub fn raster<'a>(
     )
 }
 
+/// Page `page` of the PDF `data`, `width` pixels across, as a PNG.
+#[cfg(feature = "mcp")]
+pub fn png(data: Arc<Vec<u8>>, page: usize, width: u32) -> anyhow::Result<Vec<u8>> {
+    let pdf = Pdf::new(data).map_err(|e| anyhow!("cannot read the PDF: {e:?}"))?;
+    let pages = pdf.pages();
+    let Some(one) = pages.get(page) else {
+        anyhow::bail!("there is no page {} of {}", page + 1, pages.len());
+    };
+    let (w, _) = one.render_dimensions();
+    let scale = width as f32 / w;
+    let (cache, settings) = (RenderCache::new(), InterpreterSettings::default());
+    let image = caught(|| raster(one, &cache, &settings, scale, scale))
+        .ok_or_else(|| anyhow!("cannot render page {}", page + 1))?;
+    let mut out = Vec::new();
+    DynamicImage::ImageRgba8(image)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
+    Ok(out)
+}
+
 /// Light the boxes in `lit`, and mark those in `marked`, in page points, on
 /// `image`: the part from pixel `at` of the page drawn `scale` pixels a
 /// point. The light multiplies what is there, so text stays as dark as it

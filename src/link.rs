@@ -257,12 +257,20 @@ pub fn join(socket: &Path) -> anyhow::Result<Audience> {
 /// terminal's name, or, where no window can be opened from here, the
 /// command to run in one.
 pub fn open_window(socket: &Path) -> Result<&'static str, String> {
+    open_terminal(
+        &["--audience".into(), socket.as_os_str().to_owned()],
+        "ohp audience",
+    )
+}
+
+/// Open a terminal window running this ohp with `args`, titled `title`.
+/// Returns the terminal's name, or, where no window can be opened from
+/// here, the command to run in one.
+pub fn open_terminal(args: &[OsString], title: &str) -> Result<&'static str, String> {
     let exe = std::env::current_exe().unwrap_or_else(|_| "ohp".into());
-    let args: Vec<OsString> = vec![
-        exe.clone().into(),
-        "--audience".into(),
-        socket.as_os_str().to_owned(),
-    ];
+    let args: Vec<OsString> = std::iter::once(exe.into_os_string())
+        .chain(args.iter().cloned())
+        .collect();
     let shell = args
         .iter()
         .map(|a| crate::remote::quote(&a.to_string_lossy()))
@@ -275,7 +283,7 @@ pub fn open_window(socket: &Path) -> Result<&'static str, String> {
         return Err(shell);
     }
     let (name, mut command) = if var("KITTY_WINDOW_ID").is_some() || var("KITTY_PID").is_some() {
-        ("kitty", kitty(&args))
+        ("kitty", kitty(&args, title))
     } else if var("GHOSTTY_RESOURCES_DIR").is_some() {
         ("Ghostty", ghostty(&args))
     } else if let Some(wezterm) = var("WEZTERM_EXECUTABLE") {
@@ -313,13 +321,13 @@ pub fn open_window(socket: &Path) -> Result<&'static str, String> {
 
 /// kitty: a window of this kitty's, where it lets itself be controlled,
 /// else a kitty of its own.
-fn kitty(args: &[OsString]) -> Command {
+fn kitty(args: &[OsString], title: &str) -> Command {
     if let Some(to) = std::env::var_os("KITTY_LISTEN_ON").filter(|v| !v.is_empty()) {
         let mut c = Command::new("kitty");
         c.arg("@")
             .arg("--to")
             .arg(to)
-            .args(["launch", "--type=os-window", "--title", "ohp audience"])
+            .args(["launch", "--type=os-window", "--title", title])
             .args(args);
         return c;
     }
@@ -327,7 +335,7 @@ fn kitty(args: &[OsString]) -> Command {
         .map(|dir| Path::new(&dir).join("../../MacOS/kitty"))
         .filter(|p| p.is_file());
     let mut c = Command::new(bundled.map_or_else(|| "kitty".into(), PathBuf::into_os_string));
-    c.args(["--title", "ohp audience"]).args(args);
+    c.args(["--title", title]).args(args);
     c
 }
 

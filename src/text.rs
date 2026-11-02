@@ -409,6 +409,45 @@ impl Page {
         self.light_all(|k| picked.has(k))
     }
 
+    /// The page's text, a line of it a line, in the order it is read.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+    pub fn plain(&self) -> String {
+        let line = |words: &[Word]| {
+            words
+                .iter()
+                .map(|w| w.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let lines: Vec<String> = self.reading_lines().iter().map(|(_, w)| line(w)).collect();
+        lines.join("\n")
+    }
+
+    /// What the page is called: the line set largest in its top half, the
+    /// first of those as large; else its first line.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+    pub fn title(&self) -> Option<String> {
+        let lines = self.reading_lines();
+        let size = |words: &[Word]| words.iter().map(|w| w.size).fold(0f32, f32::max);
+        let text = |words: &[Word]| {
+            words
+                .iter()
+                .map(|w| w.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let best = lines
+            .iter()
+            .filter(|(y, words)| *y <= self.height / 2. && !text(words).trim().is_empty())
+            .fold(None::<&(f32, Vec<Word>)>, |best, line| match best {
+                Some(b) if size(&b.1) >= size(&line.1) => Some(b),
+                _ => Some(line),
+            })
+            .or_else(|| lines.first())?;
+        let title = text(&best.1).trim().to_string();
+        (!title.is_empty()).then(|| title.chars().take(120).collect())
+    }
+
     /// The sentences read aloud, as `light` counts them.
     pub fn said(&self) -> Vec<String> {
         (self.read_sentences().into_iter())

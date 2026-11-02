@@ -1089,3 +1089,23 @@ fn the_laser_is_a_red_dot_kept_on_the_slide() {
     // At the edge, nothing outside the slide.
     assert!(red(24, 2) && !red(25, 2) && !red(24, 1));
 }
+
+#[test]
+fn another_program_is_told_what_is_shown_and_turns_the_slides() {
+    use crate::control::Request;
+    let (dir, mut app) = app(5);
+    let status = app.answer_one(Request::Status);
+    assert!(status.contains(&format!("file {}", dir.path().join("deck.pdf").display())));
+    assert!(status.contains(&"page 1".to_string()) && status.contains(&"pages 5".to_string()));
+    app.view = View::Grid;
+    assert_eq!(
+        app.answer_one(Request::Goto(3)),
+        ["ok showing slide 4 of 5"]
+    );
+    assert_eq!((app.cur, app.view), (3, View::Present));
+    assert!(app.answer_one(Request::Goto(9))[0].starts_with("err"));
+    // The file shown, opened again, is turned to.
+    let same = app.answer_one(Request::Open(dir.path().join("deck.pdf"), 1));
+    assert_eq!(same, ["ok showing slide 2 of 5"]);
+    assert!(app.answer_one(Request::Open(dir.path().join("nope.pdf"), 0))[0].starts_with("err"));
+}

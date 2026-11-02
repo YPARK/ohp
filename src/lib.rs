@@ -12,6 +12,7 @@ pub mod app;
 pub mod browse;
 #[cfg(feature = "markdown")]
 mod cite;
+pub mod control;
 #[cfg(feature = "markdown")]
 mod csl;
 #[cfg(feature = "summary")]
@@ -33,6 +34,8 @@ mod llm;
 mod markdown;
 #[cfg(feature = "markdown")]
 mod math;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 mod menu;
 #[cfg(feature = "markdown")]
 mod mermaid;

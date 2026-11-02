@@ -43,6 +43,10 @@ use std::time::Duration;
 /// +/- zoom the slide, or the grid. Zoomed in, arrows pan the slide and 0
 /// fits it back to the screen.
 ///
+/// `ohp mcp` serves the Model Context Protocol on stdio, so an assistant
+/// shows files in the ohp running here, turns its slides, and reads,
+/// renders and writes the notes of any deck's pages.
+///
 /// The file is reloaded whenever it changes on disk, so recompiling or
 /// saving it updates the slides in place; r reloads it at once. Ctrl-O
 /// picks another file to present, or several, marked with tab, or adds one
@@ -74,6 +78,9 @@ struct Args {
     /// projector shows the slide alone.
     #[arg(long, conflicts_with = "print")]
     presenter: bool,
+    /// Slide, or page, to show first, from 1.
+    #[arg(long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+    page: u32,
     /// Be the audience's window of a presenter's ohp, at this socket, as
     /// the presenter's opens it.
     #[arg(long, value_name = "SOCKET", hide = true, conflicts_with_all = ["print", "presenter"])]
@@ -167,6 +174,11 @@ fn main() -> anyhow::Result<ExitCode> {
 }
 
 fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
+    // `ohp mcp`: a Model Context Protocol server on stdio, not slides.
+    #[cfg(feature = "mcp")]
+    if std::env::args_os().nth(1).is_some_and(|a| a == "mcp") && std::env::args_os().len() == 2 {
+        return ohp::mcp::serve();
+    }
     let args = Args::parse();
     if let Some(socket) = &args.audience {
         let audience = ohp::link::join(socket)?;
@@ -183,6 +195,7 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
             summary::Summarizer::new(None),
             signaled.clone(),
             app::Role::Audience(audience),
+            0,
         );
     }
     let files = match args.files.as_slice() {
@@ -228,6 +241,7 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
         } else {
             app::Role::Alone
         },
+        args.page as usize - 1,
     )
 }
 

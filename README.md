@@ -193,6 +193,39 @@ bold, italics, code, lists and quotes as such.
   a slide wide, is cut in two, the slide going to the audience and the
   note to the notes box.
 
+## For assistants: MCP
+
+`ohp mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
+server, on stdio, so an assistant can show you a file, turn to the slide
+it is talking about, and read, see and annotate the pages of any deck
+itself, PDF, markdown or the rest:
+
+| Tool | |
+|---|---|
+| `status` | what the ohp running here shows: the file, the slide on screen, whether it is presenting |
+| `open` | show a file in the running ohp, from a slide; with none running, open ohp on it in a new terminal window |
+| `goto` | turn to a slide, by number or by words of its title; presenting, the audience sees it too |
+| `slides` | the page count, and each page's title and size, and whether it has notes |
+| `text` | a page's text, or every page's |
+| `render` | a page as a PNG, to see its layout, figures and tables |
+| `notes` | read a slide's speaker notes, or write them into the notes file presenter view shows |
+
+`slides`, `text`, `render` and `notes` take a `path`, and read the file
+themselves, so they work with no ohp running; without one, they read the
+deck on screen. Each running ohp listens on a socket of its own, in a
+directory only you can enter, and `ohp mcp` speaks to the one started
+last. Add it to a client as any stdio server:
+
+```sh
+claude mcp add ohp -- ohp mcp
+```
+
+```json
+{ "mcpServers": { "ohp": { "command": "ohp", "args": ["mcp"] } } }
+```
+
+`--page N` starts ohp on slide `N`, as `open` does.
+
 ## Markdown and R Markdown
 
 `.md` and `.Rmd` files are typeset into a PDF in memory, with the fonts

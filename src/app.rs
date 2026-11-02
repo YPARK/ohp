@@ -66,6 +66,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+mod control;
 mod draw;
 mod field;
 mod input;
@@ -107,7 +108,8 @@ const WATCH_EVERY: Duration = Duration::from_millis(250);
 /// `local` is how files picked with Ctrl-O, which are here, are read.
 /// `signaled` is set when a signal asks ohp to stop.
 /// `speaker` reads the slides aloud, and `summarizer` sums them up.
-/// `role` says which window of a talk with two this is, if it is one.
+/// `role` says which window of a talk with two this is, if it is one, and
+/// `page` the slide, from 0, to show first.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     deck: Deck,
@@ -118,6 +120,7 @@ pub fn run(
     summarizer: Summarizer,
     signaled: Arc<AtomicUsize>,
     role: Role,
+    page: usize,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
     // Taken, the terminal's own selecting needs Shift, or Option on macOS.
@@ -145,6 +148,7 @@ pub fn run(
         app.summarizer = summarizer;
         app.summarizer
             .set_deck(app.deck.data.clone(), app.deck.pages);
+        app.cur = page.min(app.deck.pages - 1);
         match role {
             Role::Alone => {}
             Role::Presenter => app.toggle_stage(),
@@ -156,6 +160,9 @@ pub fn run(
                     hint: Instant::now(),
                 });
             }
+        }
+        if app.seat.is_none() {
+            app.listen();
         }
         app.run(&mut terminal)?;
         app.quit_signing();
@@ -431,6 +438,10 @@ struct App {
     told_laser: Option<(f32, f32)>,
     /// The laser follows the mouse, no button held, as `L` has it.
     hover: bool,
+    /// Where other programs, as `ohp mcp`, ask things of this ohp.
+    control: Option<crate::control::Listener>,
+    /// The slide to show once the file being opened is read.
+    landing: Option<usize>,
     /// Speaker notes, by page.
     notes: crate::notes::Notes,
     /// The deck's pages cut into slides and beamer's notes, the notes
@@ -513,6 +524,8 @@ impl App {
             laser: None,
             told_laser: None,
             hover: false,
+            control: None,
+            landing: None,
             notes: crate::notes::Notes::new(),
             note_pages: false,
             beside: crate::notes::Beside::default(),
@@ -540,6 +553,7 @@ impl App {
                 self.forget();
             }
             self.tend();
+            self.answer();
             if self.dirty {
                 self.dirty = false;
                 self.scroll();
@@ -788,6 +802,10 @@ impl App {
                     self.slides.clear();
                     self.shown.set(None);
                     (self.cur, self.top) = (0, 0);
+                    // Asked for, by another program.
+                    if let Some(n) = self.landing.take() {
+                        self.cur = n.min(deck.pages - 1);
+                    }
                     self.zoom = Zoom::FIT;
                     self.view = View::Present;
                     self.links.clear();
