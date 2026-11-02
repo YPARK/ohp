@@ -65,9 +65,8 @@ pub(super) struct Printing {
     copies: u32,
     sides: Sides,
     scale: Scale,
-    /// The paper the printer picked is set to, its name and size, if CUPS
-    /// says.
-    pub(super) paper: Option<(String, (f32, f32))>,
+    /// The paper the printer picked is set to, if CUPS says.
+    pub(super) paper: Option<print::Paper>,
     /// Which of the pages picked the preview shows, from 0.
     pub(super) sheet: usize,
     /// The row the keys change.
@@ -84,7 +83,7 @@ pub(super) struct Printing {
 /// of the first, or of the one asked about.
 pub(super) struct Lookup {
     pub(super) printers: Option<print::Printers>,
-    pub(super) paper: Option<(String, (f32, f32))>,
+    pub(super) paper: Option<print::Paper>,
 }
 
 /// Ask CUPS, off the screen's thread, for the paper of `printer`; with
@@ -207,7 +206,7 @@ impl App {
 
     /// Print what is picked; with pages not there, say so and stay.
     fn send(&mut self) {
-        let Some(p) = &self.printing else {
+        let Some(p) = &mut self.printing else {
             return;
         };
         let pages = match print::pages(&p.pages.text, self.cur, self.deck.pages) {
@@ -223,15 +222,23 @@ impl App {
             pages: pages.as_ref().map(ToString::to_string),
             sides: p.sides,
             scale: p.scale,
+            media: None,
             wide: print::wide(&self.deck.sizes, pages.as_ref()),
             title: render::name(&self.deck.paths[0]),
         };
+        // The paper, or, not yet said, what CUPS is being asked, waited
+        // for off the screen's thread: sent without, the printer would take
+        // the PDF's own page size.
+        let known = p.paper.as_ref().map(|paper| paper.name.clone());
+        let lookup = p.lookup.take();
         let programs = p.programs.clone();
         // As annotated, though the copy last written is still being read.
         let pdf = self.annotated().unwrap_or_else(|| self.deck.data.to_vec());
         // Off the screen's thread: lp may set up a printer found on the
         // network first, which takes a while.
         self.sending.push(background(move || {
+            let media = known.or_else(|| Some(lookup?.recv().ok()?.paper?.name));
+            let job = Job { media, ..job };
             let programs: Vec<&OsStr> = programs.iter().map(OsString::as_os_str).collect();
             print::print_with(&programs, &pdf, &job).unwrap_or_else(|e| format!("{e:#}"))
         }));
@@ -251,7 +258,11 @@ impl App {
         let at = p.sheet.min(pages.len().saturating_sub(1));
         let page = *pages.get(at)?;
         let size = *self.deck.sizes.get(page)?;
-        let paper = p.paper.as_ref().map_or(size, |(_, size)| *size);
+        let paper = p
+            .paper
+            .as_ref()
+            .and_then(|paper| paper.size)
+            .unwrap_or(size);
         let (sheet, [x, y, w, h]) = print::placed(size, paper, p.scale);
         // The sheet and the page on it, all of each, fitted in the area,
         // past a border round the sheet.
@@ -301,7 +312,7 @@ impl App {
         let paper = p
             .paper
             .as_ref()
-            .map_or("paper not known".into(), |(name, _)| name.clone());
+            .map_or("paper not known".into(), |paper| paper.name.clone());
         let title = format!(
             " {paper} · {} · page {} · {} of {} ",
             p.value(Row::Scale),

@@ -52,6 +52,10 @@ pub struct Job {
     pub pages: Option<String>,
     pub sides: Sides,
     pub scale: Scale,
+    /// The paper, as CUPS names it, `Letter`: what the printer is set to,
+    /// so it is not left to take the PDF's own page size, which, odd, it
+    /// may not print two-sided; the printer's own if `None`.
+    pub media: Option<String>,
     /// Its pages are wider than tall, as slides: printed across the sheet,
     /// so turned on its short edge, two-sided.
     pub wide: bool,
@@ -68,6 +72,7 @@ impl Job {
             pages: None,
             sides: Sides::Printer,
             scale: Scale::Auto,
+            media: None,
             wide: false,
             title: title.to_string(),
         }
@@ -192,19 +197,21 @@ pub fn destinations(queues: &str, found: &str) -> Printers {
 
 /// The printers here, the default first; none where CUPS is not.
 pub fn printers() -> Printers {
-    let lpstat = |flags: &[&str]| {
-        // In English, whatever the language here: macOS's heeds the
-        // locale only with SOFTWARE set.
-        Command::new("lpstat")
-            .args(flags)
-            .env("LC_ALL", "C")
-            .env("LANG", "C")
-            .env("SOFTWARE", "ohp")
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default()
-    };
-    destinations(&lpstat(&["-p", "-d"]), &lpstat(&["-e"]))
+    destinations(&cups("lpstat", &["-p", "-d"]), &cups("lpstat", &["-e"]))
+}
+
+/// What CUPS's `program`, asked `args`, says, in English whatever the
+/// language here: macOS's heed the locale only with SOFTWARE set. Nothing
+/// where it is not.
+fn cups(program: &str, args: &[&str]) -> String {
+    Command::new(program)
+        .args(args)
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .env("SOFTWARE", "ohp")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
 }
 
 /// The flags a printing program names the printer, the copies and the
@@ -251,6 +258,9 @@ pub fn args(job: &Job, flags: &Flags) -> Vec<OsString> {
         Sides::One => push("-o", "sides=one-sided"),
         Sides::Two if job.wide => push("-o", "sides=two-sided-short-edge"),
         Sides::Two => push("-o", "sides=two-sided-long-edge"),
+    }
+    if let Some(media) = &job.media {
+        push("-o", &format!("media={media}"));
     }
     match job.scale {
         Scale::Auto => {}
@@ -313,28 +323,37 @@ pub fn paper(name: &str) -> Option<(f32, f32)> {
     Some(size)
 }
 
+/// A paper, as a printer is set to it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Paper {
+    /// As CUPS names it, `Letter`.
+    pub name: String,
+    /// Wide by tall, in points, where ohp knows it.
+    pub size: Option<(f32, f32)>,
+}
+
 /// The paper `lpoptions -l` says a printer is set to: its page size marked
 /// `*`, the default.
-pub fn default_paper(options: &str) -> Option<String> {
+pub fn default_paper(options: &str) -> Option<Paper> {
     let line = options.lines().find(|l| l.starts_with("PageSize"))?;
     let (_, choices) = line.split_once(':')?;
     let marked = choices
         .split_whitespace()
         .find_map(|c| c.strip_prefix('*'))?;
-    Some(marked.to_string())
+    Some(Paper {
+        name: marked.to_string(),
+        size: paper(marked),
+    })
 }
 
-/// The name and size of the paper `printer` is set to, the default
-/// printer's if `None`; none where CUPS does not say.
-pub fn paper_of(printer: Option<&str>) -> Option<(String, (f32, f32))> {
-    let mut lpoptions = Command::new("lpoptions");
+/// The paper `printer` is set to, the default printer's if `None`; none
+/// where CUPS does not say.
+pub fn paper_of(printer: Option<&str>) -> Option<Paper> {
+    let mut args = vec!["-l"];
     if let Some(printer) = printer {
-        lpoptions.args(["-p", printer]);
+        args.extend(["-p", printer]);
     }
-    let out = lpoptions.arg("-l").env("LC_ALL", "C").output().ok()?;
-    let name = default_paper(&String::from_utf8_lossy(&out.stdout))?;
-    let size = paper(&name)?;
-    Some((name, size))
+    default_paper(&cups("lpoptions", &args))
 }
 
 /// Where a page `page` big, wide by tall in points, is printed on paper

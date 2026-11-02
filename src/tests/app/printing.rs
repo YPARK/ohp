@@ -150,6 +150,36 @@ fn with_no_printer_listed_lp_s_default_is_used() {
 }
 
 #[test]
+fn the_paper_the_printer_is_set_to_is_asked_for() {
+    let (dir, mut app) = printing();
+    app.printing.as_mut().unwrap().paper = Some(crate::print::Paper {
+        name: "PAPER1".into(),
+        size: Some((612., 792.)),
+    });
+    press(&mut app, &[KeyCode::Enter]);
+    sent(&mut app);
+    assert!(args(&dir).contains("media=PAPER1\n"), "{}", args(&dir));
+}
+
+#[test]
+fn enter_before_cups_says_the_paper_waits_for_it() {
+    let (dir, mut app) = printing();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.printing.as_mut().unwrap().lookup = Some(rx);
+    press(&mut app, &[KeyCode::Enter]);
+    tx.send(crate::app::printing::Lookup {
+        printers: None,
+        paper: Some(crate::print::Paper {
+            name: "PAPER2".into(),
+            size: None,
+        }),
+    })
+    .unwrap();
+    sent(&mut app);
+    assert!(args(&dir).contains("media=PAPER2\n"), "{}", args(&dir));
+}
+
+#[test]
 fn a_zoomed_slide_is_dragged_to_pan() {
     let (_dir, mut app) = app(1);
     press(&mut app, &[KeyCode::Char('+'), KeyCode::Char('+')]);
@@ -177,7 +207,10 @@ fn the_preview_shows_each_page_picked_on_the_paper_as_it_prints() {
     let (_dir, mut app) = printing();
     app.main = MAIN;
     let p = app.printing.as_mut().unwrap();
-    p.paper = Some(("Letter".into(), (612., 792.)));
+    p.paper = Some(crate::print::Paper {
+        name: "Letter".into(),
+        size: Some((612., 792.)),
+    });
     p.pages = super::field::Field::offered("2-3");
     let first = app.preview().unwrap();
     assert_eq!((first.key.page, first.at, first.of), (1, 0, 2));
@@ -202,7 +235,10 @@ fn fitting_to_the_paper_previews_the_page_larger() {
     app.main = MAIN;
     let p = app.printing.as_mut().unwrap();
     // A small card: as it is, unless fitted.
-    p.paper = Some(("Tabloid".into(), (792., 1224.)));
+    p.paper = Some(crate::print::Paper {
+        name: "Tabloid".into(),
+        size: Some((792., 1224.)),
+    });
     let auto = app.preview().unwrap().page;
     let p = app.printing.as_mut().unwrap();
     p.row = crate::app::printing::Row::Scale;
@@ -238,14 +274,17 @@ fn printers_and_paper_found_off_the_screen_s_thread_are_taken_in() {
             names: vec!["Lab".into()],
             default: true,
         }),
-        paper: Some(("A4".into(), (595., 842.))),
+        paper: Some(crate::print::Paper {
+            name: "A4".into(),
+            size: Some((595., 842.)),
+        }),
     })
     .unwrap();
     app.poll_printing();
     let p = app.printing.as_ref().unwrap();
     assert!(p.lookup.is_none());
     assert_eq!(p.value(Row::Printer), "Lab (default)");
-    assert_eq!(p.paper.as_ref().unwrap().0, "A4");
+    assert_eq!(p.paper.as_ref().unwrap().name, "A4");
 }
 
 #[test]

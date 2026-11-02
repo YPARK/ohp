@@ -215,6 +215,7 @@ fn print(deck: &render::Deck, args: &Args) -> anyhow::Result<()> {
             true => print::Sides::Two,
             false => print::Sides::Printer,
         },
+        media: print::paper_of(args.printer.as_deref()).map(|paper| paper.name),
         wide: print::wide(&deck.sizes, pages.as_ref()),
         title: render::name(&deck.paths[0]),
     };
