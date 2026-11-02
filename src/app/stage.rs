@@ -507,17 +507,23 @@ impl App {
     }
 
     /// A click while writing notes: in them, the cursor goes there;
-    /// elsewhere, they are saved, as esc saves them.
-    pub(super) fn writing_click(&mut self, at: Position) {
-        let inner = Block::bordered().inner(self.boxes().notes);
+    /// elsewhere, they are saved, as esc saves them. True if the click is
+    /// left to do what it does elsewhere: the notes saved.
+    pub(super) fn writing_click(&mut self, at: Position) -> bool {
+        let notes = self.boxes().notes;
+        let inner = Block::bordered().inner(notes);
         match &mut self.writing {
             Some(writing) if inner.contains(at) => {
                 writing.click(at.x - inner.x, at.y - inner.y, inner.width);
+                false
             }
-            Some(_) => {
+            // On the notes' border, nothing more: it would write them again.
+            Some(_) if notes.contains(at) => {
                 self.finish_writing();
+                false
             }
-            None => {}
+            Some(_) => self.finish_writing(),
+            None => true,
         }
     }
 
@@ -1353,16 +1359,17 @@ pub(super) fn laser(f: &mut Frame, area: Rect, (x, y): (f32, f32)) {
     ];
     let buf = f.buffer_mut();
     for (dy, cells) in rows {
+        let py = i32::from(cy) + dy;
+        if py < i32::from(area.y) || py >= i32::from(area.bottom()) {
+            continue;
+        }
+        let py = py as u16;
         for (dx, symbol) in (-2i32..2).zip(cells) {
-            if symbol == " " {
+            let px = i32::from(cx) + dx;
+            if symbol == " " || px < i32::from(area.x) || px >= i32::from(area.right()) {
                 continue;
             }
-            let (px, py) = (i32::from(cx) + dx, i32::from(cy) + dy);
-            let inside = px >= i32::from(area.x)
-                && px < i32::from(area.right())
-                && py >= i32::from(area.y)
-                && py < i32::from(area.bottom());
-            if inside && let Some(cell) = buf.cell_mut((px as u16, py as u16)) {
+            if let Some(cell) = buf.cell_mut((px as u16, py)) {
                 cell.set_symbol(symbol).set_fg(red);
             }
         }

@@ -18,6 +18,14 @@ use std::io::Write;
 
 impl App {
     pub(super) fn draw(&self, f: &mut Frame) {
+        self.draw_screen(f);
+        // What was drawn over a slide kitty shows breaks its rows: mended.
+        if self.picker.protocol_type() == ProtocolType::Kitty {
+            super::kitty::repair(f.buffer_mut());
+        }
+    }
+
+    fn draw_screen(&self, f: &mut Frame) {
         if self.seat.is_some() {
             self.draw_seat(f);
             return;

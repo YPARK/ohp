@@ -1190,3 +1190,38 @@ fn a_slide_asked_of_a_file_that_cannot_be_read_is_forgotten() {
     finish(&mut app);
     assert_eq!(app.landing, None);
 }
+
+#[test]
+fn a_click_on_the_strip_while_writing_saves_the_notes_and_turns() {
+    let (dir, mut app) = app(6);
+    staged(&mut app);
+    press(&mut app, &[KeyCode::Char('N'), KeyCode::Char('x')]);
+    let boxes = app.boxes();
+    let (i, slot) = *app.strip(&boxes).iter().find(|(i, _)| *i == 3).unwrap();
+    click(&mut app, Position::new(slot.x + 1, slot.y + 1));
+    assert!(app.writing.is_none());
+    assert_eq!(app.cur, i);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("deck.md")).unwrap(),
+        "# 1\nx\n"
+    );
+}
+
+#[test]
+fn the_wheel_turns_the_presenters_slides() {
+    let (_dir, mut app) = app(5);
+    staged(&mut app);
+    let wheel = |app: &mut App, kind| {
+        app.mouse(MouseEvent {
+            kind,
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    wheel(&mut app, MouseEventKind::ScrollDown);
+    wheel(&mut app, MouseEventKind::ScrollDown);
+    assert_eq!(app.cur, 2);
+    wheel(&mut app, MouseEventKind::ScrollUp);
+    assert_eq!(app.cur, 1);
+}

@@ -70,6 +70,7 @@ mod control;
 mod draw;
 mod field;
 mod input;
+mod kitty;
 mod printing;
 mod search;
 #[cfg(feature = "sign")]

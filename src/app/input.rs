@@ -29,12 +29,16 @@ impl App {
         if self.listing() || self.seat.is_some() {
             return;
         }
+        // Writing notes, a click in them moves the cursor; one elsewhere
+        // saves them, and then does what it does, as turning to a slide.
         if self.writing.is_some() {
-            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                self.writing_click(Position::new(mouse.column, mouse.row));
-                self.dirty = true;
+            if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+                return;
             }
-            return;
+            self.dirty = true;
+            if !self.writing_click(Position::new(mouse.column, mouse.row)) {
+                return;
+            }
         }
         let at = Position::new(mouse.column, mouse.row);
         // While printing, only the form's rows are clicked: the preview is
@@ -92,12 +96,18 @@ impl App {
                 self.dirty = true;
             }
             MouseEventKind::Down(MouseButton::Left) => match self.view {
-                View::Present
-                    if self.stage_view() && !self.speaker.reading() && !self.signing() =>
-                {
+                // The presenter's tools, strip and boxes, reading aloud or
+                // not; on the slide, reading aloud, read from the sentence
+                // clicked, else point the laser.
+                View::Present if self.stage_view() && !self.signing() => {
                     if self.stage_click(at) {
                         self.notice = None;
                         self.dirty = true;
+                    } else if self.speaker.reading() {
+                        if let Some(k) = self.sentence_at(at) {
+                            self.notice = None;
+                            self.speak_from(k);
+                        }
                     } else {
                         self.point(at);
                     }
