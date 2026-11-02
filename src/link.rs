@@ -9,7 +9,7 @@
 //! to each other over the socket:
 //!
 //! - presenter to audience: `deck <path>` once, then `page <n>`,
-//!   `black <0|1>`, and `bye` as it stops;
+//!   `black <0|1>`, `laser <x> <y>` or `laser off`, and `bye` as it stops;
 //! - audience to presenter: `key next`, `key prev`, `key black`, and `bye`
 //!   as its window closes, so keys pressed in either window turn the
 //!   slides.
@@ -33,6 +33,9 @@ pub enum Said {
     Black(bool),
     /// A key pressed in the audience's window, for the presenter to act on.
     Key(Turn),
+    /// Where the laser pointer is on the slide, as fractions of its width
+    /// and height from its top left, or that it is off.
+    Laser(Option<(f32, f32)>),
     /// The other window is gone, or going.
     Bye,
 }
@@ -54,6 +57,8 @@ impl Said {
             Said::Key(Turn::Next) => "key next".into(),
             Said::Key(Turn::Prev) => "key prev".into(),
             Said::Key(Turn::Black) => "key black".into(),
+            Said::Laser(Some((x, y))) => format!("laser {x:.4} {y:.4}"),
+            Said::Laser(None) => "laser off".into(),
             Said::Bye => "bye".into(),
         }
     }
@@ -70,6 +75,11 @@ impl Said {
             ("key", "next") => Said::Key(Turn::Next),
             ("key", "prev") => Said::Key(Turn::Prev),
             ("key", "black") => Said::Key(Turn::Black),
+            ("laser", "off") => Said::Laser(None),
+            ("laser", at) => {
+                let (x, y) = at.split_once(' ')?;
+                Said::Laser(Some((x.parse().ok()?, y.parse().ok()?)))
+            }
             ("bye", _) => Said::Bye,
             _ => return None,
         })
@@ -230,7 +240,7 @@ pub fn join(socket: &Path) -> anyhow::Result<Audience> {
             Ok(Said::Page(n)) => page = n,
             Ok(Said::Black(on)) => black = on,
             Ok(Said::Bye) => anyhow::bail!("the presenter stopped"),
-            Ok(Said::Key(_)) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(Said::Key(_) | Said::Laser(_)) | Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => anyhow::bail!("the presenter stopped"),
         }
     }

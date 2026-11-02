@@ -87,6 +87,8 @@ pub(super) fn clock_face(d: Duration) -> String {
 /// Where the presenter's view puts things, each a bordered box.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Boxes {
+    /// The row of tools along the top.
+    pub bar: Rect,
     pub current: Rect,
     pub clock: Rect,
     pub next: Rect,
@@ -254,6 +256,7 @@ impl App {
                 match said {
                     Said::Page(n) => self.cur = n.min(self.deck.pages - 1),
                     Said::Black(on) => self.black = on,
+                    Said::Laser(at) => self.laser = at,
                     Said::Bye => quit = true,
                     Said::Deck(_) | Said::Key(_) => continue,
                 }
@@ -270,6 +273,7 @@ impl App {
         };
         if stage.arrived() {
             self.told = None;
+            self.told_laser = None;
             self.notice = Some(
                 "the audience's window is connected: drag it to the projector, then full screen"
                     .into(),
@@ -295,13 +299,24 @@ impl App {
                     }
                     self.notice = Some("the audience's window closed: w opens it again".into());
                 }
-                Said::Deck(_) | Said::Page(_) | Said::Black(_) => continue,
+                Said::Deck(_) | Said::Page(_) | Said::Black(_) | Said::Laser(_) => continue,
             }
             self.dirty = true;
         }
         // Picking in the grid, the audience goes on seeing the slide shown.
         if self.view != View::Grid {
             self.live = self.cur;
+        }
+        // The laser is on the slide shown, only.
+        if self.view == View::Grid {
+            self.laser = None;
+        }
+        if let Some(stage) = &mut self.stage
+            && let Some(peer) = stage.peer.as_mut()
+            && self.told_laser != self.laser
+            && peer.say(&Said::Laser(self.laser))
+        {
+            self.told_laser = self.laser;
         }
         let now = (self.live, self.black);
         if let Some(stage) = &mut self.stage
@@ -468,6 +483,7 @@ impl App {
             KeyCode::Char('T') => self.clock.pause(),
             KeyCode::Char('N') if self.stage_view() => self.begin_writing(),
             KeyCode::Char('Z') => self.clock.reset(),
+            KeyCode::Char('L') if self.stage_view() => self.toggle_hover(),
             // The presenter's slides are fitted to their boxes.
             KeyCode::Char('+' | '=' | '-' | '_') if self.stage_view() => {}
             _ => return false,
@@ -486,6 +502,7 @@ impl App {
             .get(self.cur)
             .copied()
             .unwrap_or(self.deck.sizes[0]);
+        let [bar, area] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
         let strip_h = (area.height / 5).clamp(4, 12).min(area.height / 2);
         let [top, strip] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(strip_h)]).areas(area);
@@ -503,6 +520,7 @@ impl App {
         let inner_h = f32::from(strip_h.saturating_sub(2));
         let slot_w = (inner_h * fh * pw / ph / fw).ceil() as u16 + 2;
         Boxes {
+            bar,
             current,
             clock,
             next,
@@ -580,11 +598,52 @@ impl App {
         }
     }
 
+    /// The laser pointer at `at` on the screen, if that is on the current
+    /// slide as drawn; off if not.
+    pub(super) fn point(&mut self, at: Position) {
+        self.laser = self.drawn.get().and_then(|(job, area)| {
+            (job.key.page == self.cur && area.contains(at)).then(|| {
+                let frac =
+                    |at: u16, from: u16, len: u16| (f32::from(at - from) + 0.5) / f32::from(len);
+                (
+                    frac(at.x, area.x, area.width),
+                    frac(at.y, area.y, area.height),
+                )
+            })
+        });
+        self.dirty = true;
+    }
+
+    /// `L`: the laser follows the mouse with no button held, or no longer.
+    fn toggle_hover(&mut self) {
+        use ratatui::crossterm::{execute, style::Print};
+        self.hover = !self.hover;
+        // Every move of the mouse is told only while it is wanted.
+        let mode = if self.hover {
+            "\x1b[?1003h"
+        } else {
+            "\x1b[?1003l"
+        };
+        let _ = execute!(std::io::stdout(), Print(mode));
+        if !self.hover {
+            self.laser = None;
+        }
+        self.notice = Some(if self.hover {
+            "the laser follows the mouse over the slide: L again stops it".into()
+        } else {
+            "the laser shows while the mouse is held down on the slide".into()
+        });
+    }
+
     /// A click in the presenter's view: on the strip, turn to that slide;
     /// on the next slide, turn to it; on the time, pause it or go on; on
     /// the notes, write them. True if it was one of those.
     pub(super) fn stage_click(&mut self, at: Position) -> bool {
         let boxes = self.boxes();
+        if let Some((tool, _)) = self.tools(&boxes).into_iter().find(|(_, r)| r.contains(at)) {
+            self.use_tool(tool);
+            return true;
+        }
         if boxes.clock.contains(at) {
             self.clock.click();
             return true;
@@ -604,8 +663,83 @@ impl App {
         false
     }
 
+    /// The tools along the top, and where each is, as many as fit.
+    pub(super) fn tools(&self, boxes: &Boxes) -> Vec<(Tool, Rect)> {
+        let bar = boxes.bar;
+        let mut x = bar.x;
+        let mut out = Vec::new();
+        for tool in Tool::ALL {
+            let width = tool.width();
+            if x + width > bar.right() {
+                break;
+            }
+            out.push((tool, Rect::new(x, bar.y, width, 1)));
+            x += width + 1;
+        }
+        out
+    }
+
+    /// What a tool does, clicked: as its key does.
+    fn use_tool(&mut self, tool: Tool) {
+        match tool {
+            Tool::Prev => self.step(-1),
+            Tool::Next => self.step(1),
+            Tool::Black => self.black = !self.black,
+            Tool::Laser => self.toggle_hover(),
+            Tool::Notes => self.begin_writing(),
+            Tool::Pause => self.clock.pause(),
+            Tool::Restart => self.clock.reset(),
+            Tool::Grid => self.view = View::Grid,
+            Tool::End => self.toggle_stage(),
+            Tool::Quit => self.notice = Some("C-x C-c quits: press C-x, then C-c".into()),
+        }
+        self.dirty = true;
+    }
+
+    /// Whether a tool's mode is on, and the colour it is lit in then.
+    fn lit(&self, tool: Tool) -> Option<Color> {
+        match tool {
+            Tool::Black if self.black => Some(Color::Red),
+            Tool::Laser if self.hover || self.laser.is_some() => Some(Color::Red),
+            Tool::Pause if self.clock.paused() => Some(Color::Yellow),
+            Tool::Notes if self.writing.is_some() => Some(Color::Yellow),
+            _ => None,
+        }
+    }
+
+    fn draw_tools(&self, f: &mut Frame, boxes: &Boxes) {
+        let buf = f.buffer_mut();
+        buf.set_style(boxes.bar, Style::new().bg(Color::Rgb(30, 30, 46)));
+        for (tool, at) in self.tools(boxes) {
+            let (key, icon, word) = tool.label();
+            let cap = Style::new()
+                .fg(Color::Black)
+                .bg(Color::Rgb(255, 214, 10))
+                .add_modifier(Modifier::BOLD);
+            let body = match self.lit(tool) {
+                Some(on) => Style::new()
+                    .fg(Color::Black)
+                    .bg(on)
+                    .add_modifier(Modifier::BOLD),
+                None if tool == Tool::Quit => {
+                    Style::new().fg(Color::Gray).bg(Color::Rgb(60, 60, 80))
+                }
+                None => Style::new()
+                    .fg(Color::White)
+                    .bg(Color::Rgb(70, 70, 110))
+                    .add_modifier(Modifier::BOLD),
+            };
+            let line = Line::from(vec![
+                Span::styled(format!(" {key} "), cap),
+                Span::styled(format!(" {icon} {word} "), body),
+            ]);
+            f.render_widget(Paragraph::new(line), at);
+        }
+    }
+
     pub(super) fn draw_stage(&self, f: &mut Frame) {
         let boxes = self.boxes();
+        self.draw_tools(f, &boxes);
         let lit = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
         let dim = Style::new().fg(Color::DarkGray);
         let red = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
@@ -732,6 +866,17 @@ impl App {
         if let Some(drawn) = self.draw_slide(f, job, inner) {
             self.shown.set(Some(drawn));
         }
+        self.draw_laser(f);
+    }
+
+    /// The laser pointer, where it is, over the current slide as drawn.
+    fn draw_laser(&self, f: &mut Frame) {
+        if let Some(at) = self.laser
+            && let Some((job, area)) = self.drawn.get()
+            && job.key.page == self.cur
+        {
+            laser(f, area, at);
+        }
     }
 
     /// The audience's window: the slide alone, or black.
@@ -742,6 +887,7 @@ impl App {
             let job = self.job(self.presented());
             let shown = self.draw_slide(f, job, self.main);
             self.shown.set(shown.or(self.shown.get()));
+            self.draw_laser(f);
         }
         let Some(seat) = &self.seat else {
             return;
@@ -1082,3 +1228,89 @@ pub(super) fn shown_markdown(text: &str) -> Vec<Line<'static>> {
 #[cfg(test)]
 #[path = "../tests/app/stage.rs"]
 mod tests;
+
+/// A laser pointer's dot at `at`, fractions of `area`, over what is drawn
+/// there: a red blob two cells high and four wide, about round, as cells
+/// are twice as high as wide, kept within `area`.
+pub(super) fn laser(f: &mut Frame, area: Rect, (x, y): (f32, f32)) {
+    if area.width < 4 || area.height < 2 {
+        return;
+    }
+    let red = Color::Rgb(255, 30, 30);
+    let cx = area.x + ((x * f32::from(area.width)) as u16).min(area.width - 1);
+    let cy = area.y + ((y * f32::from(area.height)) as u16).min(area.height - 1);
+    // The middle row, and halves of the rows above and below, rounding it.
+    let rows: [(i32, [&str; 4]); 3] = [
+        (-1, [" ", "▄", "▄", " "]),
+        (0, ["█", "█", "█", "█"]),
+        (1, [" ", "▀", "▀", " "]),
+    ];
+    let buf = f.buffer_mut();
+    for (dy, cells) in rows {
+        for (dx, symbol) in (-2i32..2).zip(cells) {
+            if symbol == " " {
+                continue;
+            }
+            let (px, py) = (i32::from(cx) + dx, i32::from(cy) + dy);
+            let inside = px >= i32::from(area.x)
+                && px < i32::from(area.right())
+                && py >= i32::from(area.y)
+                && py < i32::from(area.bottom());
+            if inside && let Some(cell) = buf.cell_mut((px as u16, py as u16)) {
+                cell.set_symbol(symbol).set_fg(red);
+            }
+        }
+    }
+}
+
+/// A tool along the top of the presenter's view: a key, and a click.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Tool {
+    Prev,
+    Next,
+    Black,
+    Laser,
+    Notes,
+    Pause,
+    Restart,
+    Grid,
+    End,
+    Quit,
+}
+
+impl Tool {
+    const ALL: [Tool; 10] = [
+        Tool::Prev,
+        Tool::Next,
+        Tool::Laser,
+        Tool::Black,
+        Tool::Notes,
+        Tool::Pause,
+        Tool::Restart,
+        Tool::Grid,
+        Tool::End,
+        Tool::Quit,
+    ];
+
+    /// Its key, an icon, and what it does.
+    fn label(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Tool::Prev => ("p", "◀", "back"),
+            Tool::Next => ("n", "▶", "next"),
+            Tool::Laser => ("L", "●", "laser"),
+            Tool::Black => ("b", "■", "black"),
+            Tool::Notes => ("N", "✎", "notes"),
+            Tool::Pause => ("T", "⏸", "pause"),
+            Tool::Restart => ("Z", "↺", "restart"),
+            Tool::Grid => ("g", "▦", "pick"),
+            Tool::End => ("w", "✕", "end"),
+            Tool::Quit => ("C-x C-c", "⏻", "quit"),
+        }
+    }
+
+    fn width(self) -> u16 {
+        let (key, icon, word) = self.label();
+        let text = format!(" {key}  {icon} {word} ");
+        unicode_width::UnicodeWidthStr::width(text.as_str()) as u16
+    }
+}

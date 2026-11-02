@@ -271,7 +271,7 @@ impl App {
             ),
             View::Present if self.stage_view() => (
                 "presenter",
-                "n/p ←/→ space next/prev · click a slide to go · N or click notes to write · b black · T or click time to pause · Z or double-click time to restart · g pick privately · w end · C-x C-c quit",
+                "the tools above are keys and buttons · hold the mouse on the slide to point the laser · click a slide below to go to it · space/page keys turn, as clickers do",
             ),
             View::Present if self.zoomed() => (
                 zoom.as_str(),

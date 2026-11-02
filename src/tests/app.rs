@@ -1018,3 +1018,74 @@ fn a_click_in_the_notes_moves_the_cursor_and_outside_saves_them() {
     let file = dir.path().join("deck.md");
     assert_eq!(std::fs::read_to_string(file).unwrap(), "# 1\naXb\ncd\n");
 }
+
+#[test]
+fn the_tools_are_drawn_along_the_top_and_clicked_as_keys() {
+    let (_dir, mut app) = app(5);
+    staged(&mut app);
+    let top: String = screen(&app).chars().take(140).collect();
+    for word in [
+        "next", "laser", "black", "notes", "pause", "restart", "quit",
+    ] {
+        assert!(top.contains(word), "{word} is not on the top row: {top}");
+    }
+    let tools = app.tools(&app.boxes());
+    let at = |tool| {
+        let (_, r): (stage::Tool, Rect) = *tools.iter().find(|(t, _)| *t == tool).unwrap();
+        Position::new(r.x + 1, r.y)
+    };
+    click(&mut app, at(stage::Tool::Next));
+    assert_eq!(app.cur, 1);
+    click(&mut app, at(stage::Tool::Black));
+    assert!(app.black);
+    click(&mut app, at(stage::Tool::Quit));
+    assert!(!app.quit, "a click never quits");
+    click(&mut app, at(stage::Tool::Grid));
+    assert_eq!(app.view, View::Grid);
+}
+
+#[test]
+fn the_laser_is_where_the_mouse_is_held_on_the_slide() {
+    let (_dir, mut app) = app(3);
+    staged(&mut app);
+    let area = Rect::new(10, 5, 40, 20);
+    app.drawn.set(Some((app.job(Key::new(0, area)), area)));
+    app.mouse(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 20,
+        row: 15,
+        modifiers: KeyModifiers::NONE,
+    });
+    let (x, y) = app.laser.unwrap();
+    assert!((x - 10.5 / 40.).abs() < 1e-3 && (y - 10.5 / 20.).abs() < 1e-3);
+    // Off the slide, it is off; let go, too.
+    app.point(Position::new(2, 2));
+    assert!(app.laser.is_none());
+    app.point(Position::new(20, 15));
+    app.mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 20,
+        row: 15,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(app.laser.is_none());
+}
+
+#[test]
+fn the_laser_is_a_red_dot_kept_on_the_slide() {
+    use ratatui::backend::TestBackend;
+    let mut terminal = ratatui::Terminal::new(TestBackend::new(30, 10)).unwrap();
+    let area = Rect::new(5, 2, 20, 6);
+    terminal
+        .draw(|f| {
+            stage::laser(f, area, (0.5, 0.5));
+            stage::laser(f, area, (0.99, 0.0));
+        })
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    let red = |x, y| buf[(x, y)].fg == Color::Rgb(255, 30, 30);
+    assert!(red(15, 5) && red(13, 5) && red(16, 5) && red(14, 4) && red(15, 6));
+    assert!(!red(12, 5) && !red(17, 5));
+    // At the edge, nothing outside the slide.
+    assert!(red(24, 2) && !red(25, 2) && !red(24, 1));
+}

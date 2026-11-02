@@ -58,6 +58,14 @@ impl App {
             }
             MouseEventKind::ScrollDown => self.key(KeyCode::Down.into()),
             MouseEventKind::ScrollUp => self.key(KeyCode::Up.into()),
+            // The laser, while the mouse is held on the slide, or as it moves
+            // over it, with `L`.
+            MouseEventKind::Drag(MouseButton::Left) if self.stage_view() => self.point(at),
+            MouseEventKind::Moved if self.stage_view() && self.hover => self.point(at),
+            MouseEventKind::Up(MouseButton::Left) if self.stage_view() && !self.hover => {
+                self.laser = None;
+                self.dirty = true;
+            }
             MouseEventKind::Drag(MouseButton::Left) if self.signing() => {
                 self.sign_drag(at);
                 self.dirty = true;
@@ -84,6 +92,8 @@ impl App {
                     if self.stage_click(at) {
                         self.notice = None;
                         self.dirty = true;
+                    } else {
+                        self.point(at);
                     }
                 }
                 View::Present if self.signing() => {

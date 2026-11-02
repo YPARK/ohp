@@ -130,6 +130,7 @@ middle. Drag the audience's window to the projector and make it full
 screen; its slides are drawn anew for that screen's resolution.
 
 ```
+ p ◀ back  n ▶ next  L ● laser  b ■ black  N ✎ notes  T ⏸ pause  …
 ┏ 3 / 13 ━━━━━━━━━━━━━━━━━━━━━━━━┓┌ time ──────────────┐
 ┃                                 ┃│ 4:12  audience ●   │
 ┃         the slide               ┃┌ next · 4 ──────────┐
@@ -139,6 +140,11 @@ screen; its slides are drawn anew for that screen's resolution.
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────┘
      ┌ 1 ─┐┌ 2 ─┐┏ 3 ━┓┌ 4 ─┐┌ 5 ─┐   a click turns to it
 ```
+
+Along the top, every tool is a button with its key on it, lit while it
+is on: click it, or press the key. Hold the mouse down on the slide and
+a red laser dot follows it, on the projector as on your screen; `L` has
+it follow the mouse with no button held.
 
 The window is opened in kitty, Ghostty, WezTerm, iTerm2 and macOS's
 Terminal. In another terminal, over ssh, or in tmux, the status line says
@@ -151,6 +157,8 @@ clipboard. Keys pressed in either window turn the slides in both.
 | click | on the strip, turn to that slide; on the next slide, turn to it; on the time, pause it or go on, and double-clicked, start it again; on the notes, write them |
 | `g` | pick from a grid of all the slides, privately: the audience goes on seeing the slide shown, marked *on screen*, until `enter`, or a double click, shows the one picked; `esc`, `g` or `C-g` go back to it |
 | `N` | write the slide's notes, as you practise, as a click on them does: `enter` begins a line, a click or the arrows and Emacs's `C-a` `C-e` `C-f` `C-b` `C-n` `C-p` `C-d` `C-k` move and delete, `esc` or a click outside saves them into the notes file, and `C-g` drops them |
+| hold the mouse on the slide | point at it with a red laser dot, on the projector too |
+| `L` | the laser follows the mouse with no button held, or no longer |
 | `b`, `.` | black out the audience's screen, or show it again |
 | `T` | pause the time, or go on |
 | `Z` | start the time again from nought (zero), as a double click on it does |

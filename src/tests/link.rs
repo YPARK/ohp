@@ -10,6 +10,8 @@ fn what_is_said_is_heard_as_said() {
         Said::Key(Turn::Next),
         Said::Key(Turn::Prev),
         Said::Key(Turn::Black),
+        Said::Laser(Some((0.25, 0.5))),
+        Said::Laser(None),
         Said::Bye,
     ] {
         assert_eq!(Said::parse(&said.line()), Some(said));

@@ -424,6 +424,13 @@ struct App {
     writing: Option<Writing>,
     /// C-x pressed, waiting for the key after it.
     prefix: bool,
+    /// Where the laser pointer is on the current slide, as fractions of
+    /// it, while it is on.
+    laser: Option<(f32, f32)>,
+    /// The laser as last told the audience.
+    told_laser: Option<(f32, f32)>,
+    /// The laser follows the mouse, no button held, as `L` has it.
+    hover: bool,
     /// Speaker notes, by page.
     notes: crate::notes::Notes,
     /// The deck's pages cut into slides and beamer's notes, the notes
@@ -503,6 +510,9 @@ impl App {
             live: 0,
             writing: None,
             prefix: false,
+            laser: None,
+            told_laser: None,
+            hover: false,
             notes: crate::notes::Notes::new(),
             note_pages: false,
             beside: crate::notes::Beside::default(),
