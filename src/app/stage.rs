@@ -608,7 +608,11 @@ impl App {
             .get(self.cur)
             .copied()
             .unwrap_or(self.deck.sizes[0]);
-        let [bar, area] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+        // The tools on one row, or two where the screen is too narrow.
+        let wide: u16 = Tool::ALL.iter().map(|t| t.width() + 1).sum();
+        let rows = if wide <= area.width + 1 { 1 } else { 2 };
+        let [bar, area] =
+            Layout::vertical([Constraint::Length(rows), Constraint::Min(1)]).areas(area);
         let strip_h = (area.height / 5).clamp(4, 12).min(area.height / 2);
         let [top, strip] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(strip_h)]).areas(area);
@@ -764,23 +768,31 @@ impl App {
         false
     }
 
-    /// The tools along the top, and where each is, as many as fit.
+    /// The tools along the top, and where each is: a row, or two, of as
+    /// many as fit, how to quit kept at the right end of the last.
     pub(super) fn tools(&self, boxes: &Boxes) -> Vec<(Tool, Rect)> {
         let bar = boxes.bar;
-        // How to quit is kept, at the right end, whatever else fits.
+        let last = bar.bottom().saturating_sub(1);
         let quit = Tool::Quit.width().min(bar.width);
-        let end = bar.right() - quit;
-        let mut x = bar.x;
+        let quit_at = bar.right() - quit;
+        let (mut x, mut y) = (bar.x, bar.y);
         let mut out = Vec::new();
         for tool in Tool::ALL.into_iter().filter(|&t| t != Tool::Quit) {
             let width = tool.width();
+            let end = if y == last { quit_at } else { bar.right() };
             if x + width > end {
-                break;
+                if y == last {
+                    break;
+                }
+                (x, y) = (bar.x, y + 1);
+                if x + width > quit_at {
+                    break;
+                }
             }
-            out.push((tool, Rect::new(x, bar.y, width, 1)));
+            out.push((tool, Rect::new(x, y, width, 1)));
             x += width + 1;
         }
-        out.push((Tool::Quit, Rect::new(end, bar.y, quit, 1)));
+        out.push((Tool::Quit, Rect::new(quit_at, last, quit, 1)));
         out
     }
 

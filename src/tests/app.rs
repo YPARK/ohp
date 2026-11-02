@@ -1023,11 +1023,13 @@ fn a_click_in_the_notes_moves_the_cursor_and_outside_saves_them() {
 fn the_tools_are_drawn_along_the_top_and_clicked_as_keys() {
     let (_dir, mut app) = app(5);
     staged(&mut app);
-    let top: String = screen(&app).chars().take(140).collect();
+    // The rows of tools at the top, one or two.
+    let rows = usize::from(app.boxes().bar.height);
+    let top: String = screen(&app).chars().take(140 * rows).collect();
     for word in [
-        "next", "laser", "black", "notes", "pause", "restart", "quit",
+        "next", "laser", "black", "notes", "pause", "restart", "window", "end", "quit",
     ] {
-        assert!(top.contains(word), "{word} is not on the top row: {top}");
+        assert!(top.contains(word), "{word} is not among the tools: {top}");
     }
     let tools = app.tools(&app.boxes());
     let at = |tool| {
@@ -1224,4 +1226,31 @@ fn the_wheel_turns_the_presenters_slides() {
     assert_eq!(app.cur, 2);
     wheel(&mut app, MouseEventKind::ScrollUp);
     assert_eq!(app.cur, 1);
+}
+
+#[test]
+fn a_narrow_screen_has_its_tools_on_two_rows_all_of_them() {
+    let (_dir, mut app) = app(5);
+    staged(&mut app);
+    app.main = Rect::new(0, 0, 90, 40);
+    let boxes = app.boxes();
+    assert_eq!(boxes.bar.height, 2);
+    let tools = app.tools(&boxes);
+    assert_eq!(tools.len(), 11, "every tool is shown");
+    assert!(
+        tools
+            .iter()
+            .all(|(_, r)| boxes.bar.contains(r.as_position()) && r.right() <= 90)
+    );
+    let (_, quit) = tools.iter().find(|(t, _)| *t == stage::Tool::Quit).unwrap();
+    assert_eq!((quit.y, quit.right()), (1, 90));
+    // No two overlap.
+    for (i, (_, a)) in tools.iter().enumerate() {
+        for (_, b) in &tools[i + 1..] {
+            assert!(a.intersection(*b).is_empty(), "{a:?} {b:?}");
+        }
+    }
+    // Wide enough, one row.
+    app.main = Rect::new(0, 0, 200, 40);
+    assert_eq!(app.boxes().bar.height, 1);
 }
