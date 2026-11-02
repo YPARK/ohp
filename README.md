@@ -148,12 +148,12 @@ clipboard. Keys pressed in either window turn the slides in both.
 | Key, presenting | |
 |---|---|
 | `n` / `p`, arrows, `space`, `page down` / `page up` | next / previous slide, in both windows |
-| click | on the strip, turn to that slide; on the next slide, turn to it; on the time, pause it or go on; on the notes, write them |
+| click | on the strip, turn to that slide; on the next slide, turn to it; on the time, pause it or go on, and double-clicked, start it again; on the notes, write them |
 | `g` | pick from a grid of all the slides, privately: the audience goes on seeing the slide shown, marked *on screen*, until `enter`, or a double click, shows the one picked; `esc`, `g` or `C-g` go back to it |
 | `N` | write the slide's notes, as you practise, as a click on them does: `enter` begins a line, a click or the arrows and Emacs's `C-a` `C-e` `C-f` `C-b` `C-n` `C-p` `C-d` `C-k` move and delete, `esc` or a click outside saves them into the notes file, and `C-g` drops them |
 | `b`, `.` | black out the audience's screen, or show it again |
 | `T` | pause the time, or go on |
-| `0` | start the time again from nought |
+| `Z` | start the time again from nought (zero), as a double click on it does |
 | `w` | end: the audience's window closes; with it closed, `w` opens it again |
 
 Notes come from three places, and are shown together, as markdown:

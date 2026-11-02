@@ -20,15 +20,21 @@ const HINT: Duration = Duration::from_secs(12);
 
 /// Time since the talk began, but for while it was paused.
 pub(super) struct Clock {
-    began: Instant,
+    pub(super) began: Instant,
     paused: Option<Instant>,
+    /// When the time was last clicked, to see a double click.
+    clicked: Option<Instant>,
 }
+
+/// Two clicks this close together are a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 impl Clock {
     pub(super) fn new() -> Self {
         Clock {
             began: Instant::now(),
             paused: None,
+            clicked: None,
         }
     }
 
@@ -50,6 +56,22 @@ impl Clock {
     fn reset(&mut self) {
         self.began = Instant::now();
         self.paused = self.paused.map(|_| self.began);
+    }
+
+    /// A click pauses the time, or goes on; a double click starts it
+    /// again from nought, going.
+    fn click(&mut self) {
+        let double = self
+            .clicked
+            .take()
+            .is_some_and(|at| at.elapsed() < DOUBLE_CLICK);
+        if double {
+            self.paused = None;
+            self.reset();
+        } else {
+            self.pause();
+            self.clicked = Some(Instant::now());
+        }
     }
 }
 
@@ -445,7 +467,7 @@ impl App {
             }
             KeyCode::Char('T') => self.clock.pause(),
             KeyCode::Char('N') if self.stage_view() => self.begin_writing(),
-            KeyCode::Char('0') if self.stage_view() => self.clock.reset(),
+            KeyCode::Char('Z') => self.clock.reset(),
             // The presenter's slides are fitted to their boxes.
             KeyCode::Char('+' | '=' | '-' | '_') if self.stage_view() => {}
             _ => return false,
@@ -564,7 +586,7 @@ impl App {
     pub(super) fn stage_click(&mut self, at: Position) -> bool {
         let boxes = self.boxes();
         if boxes.clock.contains(at) {
-            self.clock.pause();
+            self.clock.click();
             return true;
         }
         if boxes.notes.contains(at) {

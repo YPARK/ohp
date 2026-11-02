@@ -847,11 +847,23 @@ fn clicking_the_strip_or_the_next_slide_turns_to_it() {
     assert_eq!(app.cur, i);
     assert!(app.stage_click(Position::new(boxes.next.x + 2, boxes.next.y + 2)));
     assert_eq!(app.cur, i + 1);
-    // The time pauses, and goes on.
-    assert!(app.stage_click(Position::new(boxes.clock.x + 2, boxes.clock.y + 1)));
+    // The time pauses, and goes on; double-clicked, starts again.
+    let time = Position::new(boxes.clock.x + 2, boxes.clock.y + 1);
+    assert!(app.stage_click(time));
     assert!(app.clock.paused());
-    assert!(app.stage_click(Position::new(boxes.clock.x + 2, boxes.clock.y + 1)));
+    std::thread::sleep(Duration::from_millis(450));
+    assert!(app.stage_click(time));
     assert!(!app.clock.paused());
+    app.clock.began -= Duration::from_secs(60);
+    std::thread::sleep(Duration::from_millis(450));
+    app.stage_click(time);
+    app.stage_click(time);
+    assert!(!app.clock.paused());
+    assert!(app.clock.elapsed() < Duration::from_secs(1));
+    press(&mut app, &[KeyCode::Char('T')]);
+    app.clock.began -= Duration::from_secs(60);
+    press(&mut app, &[KeyCode::Char('Z')]);
+    assert!(app.clock.elapsed() < Duration::from_secs(1));
     // The notes are written.
     assert!(app.stage_click(Position::new(boxes.notes.x + 2, boxes.notes.y + 2)));
     assert!(app.writing.is_some());
