@@ -185,6 +185,17 @@ fn eat_cell_size() -> Option<FontSize> {
     (w > 0 && h > 0).then(|| FontSize::new(w, h))
 }
 
+/// The pixels of a cell, from the window's size as the terminal tells the
+/// kernel, if it does.
+fn measure() -> Option<FontSize> {
+    let size = ratatui::crossterm::terminal::window_size().ok()?;
+    if size.columns == 0 || size.rows == 0 || size.width == 0 || size.height == 0 {
+        return None;
+    }
+    let (w, h) = (size.width / size.columns, size.height / size.rows);
+    (w > 0 && h > 0).then(|| FontSize::new(w, h))
+}
+
 fn over_ssh() -> bool {
     ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
         .iter()
@@ -280,8 +291,12 @@ struct App {
     view: View,
     look: Look,
     cur: usize,
-    /// First grid row on screen.
+    /// First slide in the grid on screen: the grid scrolls a slide at a
+    /// time, its slides running on from slot to slot.
     top: usize,
+    /// The pixels of a cell as the terminal's window size last said, to
+    /// see the window moved to a screen of another resolution.
+    measured: Option<FontSize>,
     /// Grid columns chosen with +/-; `None` fits the grid to the screen.
     grid_cols: Option<u16>,
     /// How the presented slide is zoomed, kept from slide to slide.
@@ -386,6 +401,7 @@ impl App {
             look,
             cur: 0,
             top: 0,
+            measured: measure(),
             grid_cols: None,
             zoom: Zoom::FIT,
             shown: Cell::new(None),
@@ -434,6 +450,7 @@ impl App {
         // The screen, and whether a summary is shown beside the slides.
         let mut laid = (Rect::default(), false);
         while !self.quit {
+            self.remeasure();
             let size = terminal.size()?;
             let now = (Rect::new(0, 0, size.width, size.height), self.side_open());
             if now != laid {
@@ -473,6 +490,52 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Moved to a screen of another resolution, the window's cells are
+    /// another number of pixels: slides are rendered anew at the new size,
+    /// or they would come out too small, or too big, for their boxes.
+    fn remeasure(&mut self) {
+        // Half-blocks are cells, whatever their pixels.
+        if self.picker.protocol_type() == ProtocolType::Halfblocks {
+            return;
+        }
+        let Some(now) = measure() else {
+            return;
+        };
+        let Some(was) = self.measured.replace(now) else {
+            return;
+        };
+        // A window resized on the same screen can measure a pixel or so
+        // differently, its padding shared over more or fewer cells.
+        let moved = |a: u16, b: u16| a.abs_diff(b) * 10 > a.max(b);
+        if !(moved(was.width, now.width) || moved(was.height, now.height)) {
+            self.measured = Some(was);
+            return;
+        }
+        // Scaled, rather than taken as measured: the terminal's own answer
+        // at the start is exact, and the window size may count padding.
+        let font = self.picker.font_size();
+        let scale = |cell: u16, a: u16, b: u16| {
+            ((u32::from(cell) * u32::from(b) + u32::from(a) / 2) / u32::from(a)).max(1) as u16
+        };
+        let font = FontSize::new(
+            scale(font.width, was.width, now.width),
+            scale(font.height, was.height, now.height),
+        );
+        #[allow(deprecated)]
+        let mut picker = Picker::from_fontsize(font);
+        picker.set_protocol_type(self.picker.protocol_type());
+        picker.set_background_color(Some([255, 255, 255, 255]));
+        match Renderer::spawn(&self.deck, &picker, self.workers) {
+            Ok(renderer) => {
+                self.picker = picker;
+                self.renderer = renderer;
+                self.shown.set(None);
+                self.forget();
+            }
+            Err(e) => self.notice = Some(format!("cannot render at the new size: {e:#}")),
+        }
     }
 
     /// Drop every slide: they were rendered for boxes the screen no longer has.
@@ -878,29 +941,28 @@ impl App {
 
     /// The on-screen slots: slide index and where it goes.
     fn slots(&self, grid: &Grid) -> impl Iterator<Item = (usize, Rect)> {
-        let first = self.top * grid.cols;
+        let first = self.top;
         let last = (first + grid.rows * grid.cols).min(self.deck.pages);
         let (x0, y0) = grid.origin;
         let slot = grid.slot;
         (first..last).map(move |i| {
-            let (row, col) = ((i - first) / grid.cols, i % grid.cols);
+            let (row, col) = ((i - first) / grid.cols, (i - first) % grid.cols);
             let x = x0 + col as u16 * slot.width;
             let y = y0 + row as u16 * slot.height;
             (i, Rect::new(x, y, slot.width, slot.height))
         })
     }
 
-    /// Keep the current slide's grid row on screen, and no rows past the
-    /// last below it.
+    /// Keep the current slide on screen, moving the grid no more slides
+    /// than that takes, and no empty slots past the last slide.
     fn scroll(&mut self) {
         let grid = self.grid();
-        let row = self.cur / grid.cols;
-        let rows = self.deck.pages.div_ceil(grid.cols);
-        self.top = self.top.min(rows.saturating_sub(grid.rows));
-        if row < self.top {
-            self.top = row;
-        } else if row >= self.top + grid.rows {
-            self.top = row + 1 - grid.rows;
+        let shown = grid.cols * grid.rows;
+        self.top = self.top.min(self.deck.pages.saturating_sub(shown));
+        if self.cur < self.top {
+            self.top = self.cur;
+        } else if self.cur >= self.top + shown {
+            self.top = self.cur + 1 - shown;
         }
     }
 
