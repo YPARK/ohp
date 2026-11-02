@@ -306,6 +306,15 @@ pub fn of_each(data: Arc<Vec<u8>>, pages: &[usize]) -> Vec<Option<Page>> {
     pages.iter().map(one).collect()
 }
 
+/// A line's words, a space apart.
+fn joined(words: &[Word]) -> String {
+    words
+        .iter()
+        .map(|w| w.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl Page {
     /// Set the page on a `cols` × `rows` grid over `image`, a render of it,
     /// painting each glyph set out of the image, and lighting the cells of
@@ -407,6 +416,36 @@ impl Page {
             return Lit::default();
         }
         self.light_all(|k| picked.has(k))
+    }
+
+    /// The page's text, a line of it a line, in the order it is read.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+    pub fn plain(&self) -> String {
+        let lines: Vec<String> = self
+            .reading_lines()
+            .iter()
+            .map(|(_, w)| joined(w))
+            .collect();
+        lines.join("\n")
+    }
+
+    /// What the page is called: the line set largest in its top half, the
+    /// first of those as large; else its first line.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+    pub fn title(&self) -> Option<String> {
+        let lines = self.reading_lines();
+        let size = |words: &[Word]| words.iter().map(|w| w.size).fold(0f32, f32::max);
+        let text = joined;
+        let best = lines
+            .iter()
+            .filter(|(y, words)| *y <= self.height / 2. && !text(words).trim().is_empty())
+            .fold(None::<&(f32, Vec<Word>)>, |best, line| match best {
+                Some(b) if size(&b.1) >= size(&line.1) => Some(b),
+                _ => Some(line),
+            })
+            .or_else(|| lines.first())?;
+        let title = text(&best.1).trim().to_string();
+        (!title.is_empty()).then(|| title.chars().take(120).collect())
     }
 
     /// The sentences read aloud, as `light` counts them.

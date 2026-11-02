@@ -26,8 +26,19 @@ impl App {
     /// again, so a double click presents it. The wheel is the arrow keys,
     /// as the terminal makes it when the mouse is not taken.
     pub(super) fn mouse(&mut self, mouse: MouseEvent) {
-        if self.listing() {
+        if self.listing() || self.seat.is_some() {
             return;
+        }
+        // Writing notes, a click in them moves the cursor; one elsewhere
+        // saves them, and then does what it does, as turning to a slide.
+        if self.writing.is_some() {
+            if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+                return;
+            }
+            self.dirty = true;
+            if !self.writing_click(Position::new(mouse.column, mouse.row)) {
+                return;
+            }
         }
         let at = Position::new(mouse.column, mouse.row);
         // While printing, only the form's rows are clicked: the preview is
@@ -51,6 +62,18 @@ impl App {
             }
             MouseEventKind::ScrollDown => self.key(KeyCode::Down.into()),
             MouseEventKind::ScrollUp => self.key(KeyCode::Up.into()),
+            // The laser, while the mouse is held on the slide, or as it moves
+            // over it, with `L`.
+            MouseEventKind::Drag(MouseButton::Left) if self.stage_view() && !self.signing() => {
+                self.point(at)
+            }
+            MouseEventKind::Moved if self.stage_view() && self.hover => self.point(at),
+            MouseEventKind::Up(MouseButton::Left)
+                if self.stage_view() && !self.hover && !self.signing() =>
+            {
+                self.laser = None;
+                self.dirty = true;
+            }
             MouseEventKind::Drag(MouseButton::Left) if self.signing() => {
                 self.sign_drag(at);
                 self.dirty = true;
@@ -73,6 +96,22 @@ impl App {
                 self.dirty = true;
             }
             MouseEventKind::Down(MouseButton::Left) => match self.view {
+                // The presenter's tools, strip and boxes, reading aloud or
+                // not; on the slide, reading aloud, read from the sentence
+                // clicked, else point the laser.
+                View::Present if self.stage_view() && !self.signing() => {
+                    if self.stage_click(at) {
+                        self.notice = None;
+                        self.dirty = true;
+                    } else if self.speaker.reading() {
+                        if let Some(k) = self.sentence_at(at) {
+                            self.notice = None;
+                            self.speak_from(k);
+                        }
+                    } else {
+                        self.point(at);
+                    }
+                }
                 View::Present if self.signing() => {
                     self.sign_click(at);
                     self.dirty = true;
@@ -186,11 +225,45 @@ impl App {
         (b >= a && d >= c).then(|| Rect::new(a, c, b - a + 1, d - c + 1))
     }
 
-    pub(super) fn key(&mut self, key: KeyEvent) {
+    pub(super) fn key(&mut self, mut key: KeyEvent) {
         self.notice = None;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // C-x C-c quits, as in Emacs: no one key ends a talk by mistake.
+        if std::mem::take(&mut self.prefix) {
+            // Notes being written are saved first; if they cannot be, ohp
+            // stays, and says so.
+            if ctrl && key.code == KeyCode::Char('c') {
+                self.quit = self.finish_writing();
+            } else if !(ctrl && key.code == KeyCode::Char('g')) {
+                self.notice = Some(super::stage::QUIT_HINT.into());
+            }
+            self.dirty = true;
+            return;
+        }
+        if ctrl && key.code == KeyCode::Char('x') {
+            self.prefix = true;
+            self.notice = Some("C-x-".into());
+            self.dirty = true;
+            return;
+        }
         if ctrl && key.code == KeyCode::Char('c') {
-            self.quit = true;
+            self.notice = Some(super::stage::QUIT_HINT.into());
+            self.dirty = true;
+            return;
+        }
+        if self.writing.is_some() {
+            self.write_key(key);
+            self.dirty = true;
+            return;
+        }
+        // C-g gives up what is under way, as in Emacs: a search, back to
+        // where it began; else as esc does, closing a list or a form, or
+        // leaving the grid picked from privately for the slide shown.
+        if ctrl && key.code == KeyCode::Char('g') && self.search.is_none() {
+            key = KeyEvent::from(KeyCode::Esc);
+        }
+        if self.seat.is_some() {
+            self.seat_key(key);
             return;
         }
         if let Some(browser) = &mut self.browser {
@@ -202,6 +275,7 @@ impl App {
                 }
                 browse::Outcome::Open(paths) => {
                     self.browser = None;
+                    self.landing = None;
                     self.open(self.added_first(paths));
                 }
                 browse::Outcome::Quit => {
@@ -239,8 +313,24 @@ impl App {
             self.dirty = true;
             return;
         }
+        if self.stage_key(key) {
+            self.dirty = true;
+            return;
+        }
         match key.code {
-            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('q') => self.notice = Some(super::stage::QUIT_HINT.into()),
+            KeyCode::Char('w') => self.toggle_stage(),
+            KeyCode::Char(' ') | KeyCode::PageDown => self.step(1),
+            KeyCode::PageUp => self.step(-1),
+            // Presenting, a slide picked in the grid is shown only once
+            // enter shows it; esc or g goes back to the one shown.
+            KeyCode::Esc | KeyCode::Char('g') | KeyCode::Tab
+                if self.presenting() && self.view == View::Grid =>
+            {
+                self.back_to_shown();
+            }
+            KeyCode::Home => self.cur = 0,
+            KeyCode::End => self.cur = self.deck.pages - 1,
             KeyCode::Char('o') if ctrl => self.browse(),
             KeyCode::Char('p') if ctrl => self.print(),
             KeyCode::Right if self.zoomed() => self.pan(1, 0),
@@ -336,7 +426,7 @@ impl App {
         self.zoom.y = self.zoom.y.min(most(ph * scale / fh, rows));
     }
 
-    fn step(&mut self, by: isize) {
+    pub(super) fn step(&mut self, by: isize) {
         let last = self.deck.pages - 1;
         self.cur = self.cur.saturating_add_signed(by).min(last);
     }

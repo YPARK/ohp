@@ -66,15 +66,29 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+mod control;
 mod draw;
 mod field;
 mod input;
+mod kitty;
 mod printing;
 mod search;
 #[cfg(feature = "sign")]
 mod signing;
+mod stage;
 
 use draw::{marked, split};
+use stage::{Clock, Seat, Writing};
+
+/// Which window of a talk this is.
+pub enum Role {
+    /// The only one.
+    Alone,
+    /// The presenter's, which opens the audience's at once.
+    Presenter,
+    /// The audience's, showing what the presenter's says.
+    Audience(crate::link::Audience),
+}
 
 /// Slides the grid tries to show at once.
 const GRID_TARGET: usize = 12;
@@ -95,6 +109,9 @@ const WATCH_EVERY: Duration = Duration::from_millis(250);
 /// `local` is how files picked with Ctrl-O, which are here, are read.
 /// `signaled` is set when a signal asks ohp to stop.
 /// `speaker` reads the slides aloud, and `summarizer` sums them up.
+/// `role` says which window of a talk with two this is, if it is one, and
+/// `page` the slide, from 0, to show first.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     deck: Deck,
     text: bool,
@@ -103,15 +120,11 @@ pub fn run(
     speaker: Speaker,
     summarizer: Summarizer,
     signaled: Arc<AtomicUsize>,
+    role: Role,
+    page: usize,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
-    // Taken, the terminal's own selecting needs Shift, or Option on macOS.
-    // Presses, drags and the wheel, as SGR codes: crossterm's capture would
-    // send every move of the mouse too, over ssh as well.
-    let _ = execute!(
-        std::io::stdout(),
-        Print("\x1b[?1000h\x1b[?1002h\x1b[?1006h")
-    );
+    mouse_modes(false);
     let result = (|| {
         let picker = pick();
         quiet_render_panics();
@@ -130,6 +143,23 @@ pub fn run(
         app.summarizer = summarizer;
         app.summarizer
             .set_deck(app.deck.data.clone(), app.deck.pages);
+        app.cur = page.min(app.deck.pages - 1);
+        match role {
+            Role::Alone => {}
+            Role::Presenter => app.toggle_stage(),
+            Role::Audience(link) => {
+                app.cur = link.page.min(app.deck.pages - 1);
+                app.black = link.black;
+                app.seat = Some(Seat {
+                    page: link.page,
+                    link,
+                    hint: Instant::now(),
+                });
+            }
+        }
+        if app.seat.is_none() {
+            app.listen();
+        }
         app.run(&mut terminal)?;
         app.quit_signing();
         // What is being handed to lp, handed over whole before ohp ends.
@@ -139,6 +169,19 @@ pub fn run(
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
+}
+
+/// Take the mouse: presses, drags and the wheel, as SGR codes, and, with
+/// `hover`, every move of it too, as the laser following it wants. The
+/// terminal's own selecting then needs Shift, or Option on macOS.
+/// crossterm's capture would send every move always, over ssh as well;
+/// its `DisableMouseCapture` ends all of these.
+fn mouse_modes(hover: bool) {
+    let moves = if hover { "\x1b[?1003h" } else { "\x1b[?1003l" };
+    let _ = execute!(
+        std::io::stdout(),
+        Print(format!("\x1b[?1000h\x1b[?1002h\x1b[?1006h{moves}"))
+    );
 }
 
 fn pick() -> Picker {
@@ -239,7 +282,7 @@ impl Drop for ReadingKeys {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum View {
     Present,
     Grid,
@@ -377,6 +420,52 @@ struct App {
     /// The model picker, its list open over the slides when picking.
     #[cfg(feature = "summary")]
     models: Models,
+    /// The socket and the deck written for the audience's window, while
+    /// presenting to one.
+    stage: Option<crate::link::Stage>,
+    /// The presenter's window this one shows for, if it is the audience's.
+    seat: Option<Seat>,
+    /// The time the talk has taken.
+    clock: Clock,
+    /// The clock's seconds as last drawn.
+    ticked: u64,
+    /// The slide, and whether it is blacked out, as last told the audience.
+    told: Option<(usize, bool)>,
+    /// The audience's screen blacked out.
+    black: bool,
+    /// The slide the audience sees: the current one, but while another is
+    /// picked in the grid.
+    live: usize,
+    /// The current slide's notes, while they are being written.
+    writing: Option<Writing>,
+    /// C-x pressed, waiting for the key after it.
+    prefix: bool,
+    /// Where the laser pointer is on the current slide, as fractions of
+    /// it, while it is on.
+    laser: Option<(f32, f32)>,
+    /// The laser as last told the audience.
+    told_laser: Option<(f32, f32)>,
+    /// The laser follows the mouse, no button held, as `L` has it.
+    hover: bool,
+    /// The deck as it was before beamer's notes were cut off it, to show
+    /// again as presenting ends.
+    uncut: Option<Deck>,
+    /// The audience's window being opened: the terminal's name, or the
+    /// command to run, once it is known.
+    opening_window: Option<Receiver<Result<&'static str, String>>>,
+    /// Where other programs, as `ohp mcp`, ask things of this ohp.
+    control: Option<crate::control::Listener>,
+    /// The slide to show once the file being opened is read.
+    landing: Option<usize>,
+    /// When the notes files beside the deck's were last looked at.
+    notes_looked: Instant,
+    /// Speaker notes, by page.
+    notes: crate::notes::Notes,
+    /// The deck's pages cut into slides and beamer's notes, the notes
+    /// rendered as the pages past its last.
+    note_pages: bool,
+    /// The notes files beside the deck's.
+    beside: crate::notes::Beside,
     dirty: bool,
     quit: bool,
 }
@@ -440,6 +529,26 @@ impl App {
             panel: None,
             #[cfg(feature = "summary")]
             models: Models::default(),
+            stage: None,
+            seat: None,
+            clock: Clock::new(),
+            ticked: 0,
+            told: None,
+            black: false,
+            live: 0,
+            writing: None,
+            prefix: false,
+            laser: None,
+            told_laser: None,
+            hover: false,
+            uncut: None,
+            opening_window: None,
+            control: None,
+            landing: None,
+            notes_looked: Instant::now(),
+            notes: crate::notes::Notes::new(),
+            note_pages: false,
+            beside: crate::notes::Beside::default(),
             dirty: true,
             quit: false,
         }
@@ -455,9 +564,16 @@ impl App {
             let now = (Rect::new(0, 0, size.width, size.height), self.side_open());
             if now != laid {
                 laid = now;
-                self.main = split(now.0, now.1).0;
+                // The audience's window is the slide alone.
+                self.main = if self.seat.is_some() {
+                    now.0
+                } else {
+                    split(now.0, now.1).0
+                };
                 self.forget();
             }
+            self.tend();
+            self.answer();
             if self.dirty {
                 self.dirty = false;
                 self.scroll();
@@ -706,6 +822,10 @@ impl App {
                     self.slides.clear();
                     self.shown.set(None);
                     (self.cur, self.top) = (0, 0);
+                    // Asked for, by another program.
+                    if let Some(n) = self.landing.take() {
+                        self.cur = n.min(deck.pages - 1);
+                    }
                     self.zoom = Zoom::FIT;
                     self.view = View::Present;
                     self.links.clear();
@@ -722,10 +842,16 @@ impl App {
                         },
                     );
                 }
+                // The audience's window turns to the slide it was told,
+                // which may be past the end of the deck it had.
+                if let Some(seat) = &self.seat {
+                    self.cur = seat.page;
+                }
                 self.cur = self.cur.min(deck.pages - 1);
                 self.summarizer.set_deck(deck.data.clone(), deck.pages);
                 self.deck = deck;
                 self.renderer = renderer;
+                self.restage();
                 self.searched_anew();
                 // Its files as they were read: what changed since is read again.
                 if let Some(asked) = asked {
@@ -740,6 +866,8 @@ impl App {
                 }
             }
             Err(e) => {
+                // A slide asked for, of the file that could not be read.
+                self.landing = None;
                 self.notice = Some(match opening {
                     Some(paths) => format!("cannot open {}: {e:#}", render::shown(&paths)),
                     None => format!("reload failed: {e:#}"),
@@ -972,6 +1100,7 @@ impl App {
             return vec![preview.key];
         }
         match self.view {
+            View::Present if self.stage_view() => self.stage_keys(&self.boxes()),
             View::Present => vec![self.presented()],
             View::Grid => {
                 let grid = self.grid();
@@ -1017,11 +1146,23 @@ impl App {
         let area = self.main;
         let mut wanted = self.visible();
         let fitted = [self.cur + 1, self.cur.wrapping_sub(1), self.cur + 2];
-        wanted.extend(fitted.map(|page| Key::new(page, area)));
+        // Presenting, the slides either side are fitted to the presenter's
+        // boxes for the current and the next slide.
+        let stage_sizes = self.presenting().then(|| self.stage_sizes(&self.boxes()));
+        match stage_sizes {
+            Some([current, next, ..]) => {
+                let at = |size: Size| Rect::new(0, 0, size.width, size.height);
+                wanted.extend(fitted.map(|page| Key::new(page, at(current))));
+                wanted.push(Key::new(self.cur + 2, at(next)));
+            }
+            None => wanted.extend(fitted.map(|page| Key::new(page, area))),
+        }
         if self.view == View::Grid {
             wanted.push(self.presented());
         }
-        wanted.retain(|k| k.page < self.deck.pages);
+        let pages = self.deck.pages;
+        let last = if self.note_pages { 2 * pages } else { pages };
+        wanted.retain(|k| k.page < last);
 
         for job in self.renderer.clear() {
             self.requested.remove(&job);
@@ -1063,6 +1204,13 @@ impl App {
                 let marking = marking(job) || Some(*job) == shown;
                 let finding = finding(job) || Some(*job) == shown;
                 key.page.abs_diff(cur) <= KEEP && kept && lighting && marking && finding
+            } else if let Some([current, next, slot, note]) = stage_sizes
+                && [current, next, slot, note].contains(&key.size())
+            {
+                // A note is past the slides, the slide it is for less them.
+                let page = key.page.checked_sub(pages).unwrap_or(key.page);
+                let near = key.size() == slot || page.abs_diff(cur) <= KEEP;
+                near && marking(job) && finding(job)
             } else {
                 key.size() == thumb && marking(job) && finding(job)
             }

@@ -286,3 +286,54 @@ fn a_stopped_typeset_ends_without_a_pdf() {
     let why = typeset(&path, &stopped).err().unwrap();
     assert!(why.is::<Stopped>(), "{why}");
 }
+
+#[test]
+fn speaker_notes_are_kept_for_the_page_their_slide_is_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(
+        dir.path(),
+        "talk.md",
+        "---\ntitle: A talk\noutput: beamer_presentation\n---\n## One\nx\n\n::: notes\nsay *one*\n:::\n\n## Two\ny\n\n## Three\n\n::: notes\nfirst\n:::\n\nz\n\n::: {.notes}\nsecond\n:::\n",
+    );
+    let deck = Deck::open(&path).unwrap();
+    // The title, then the three slides.
+    assert_eq!(deck.pages, 4);
+    let notes: Vec<(usize, &str)> = deck.speaker.iter().map(|(p, n)| (*p, n.as_str())).collect();
+    assert_eq!(notes, [(1, "say *one*"), (3, "first\n\nsecond")]);
+    let text = crate::text::of(deck.data.clone(), 1).unwrap();
+    assert!(
+        !format!("{text:?}").contains("say"),
+        "a note is not on its slide"
+    );
+}
+
+#[test]
+fn a_speaker_note_changes_neither_the_slides_nor_a_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let deck = |name: &str, notes: [&str; 2]| {
+        let text = format!(
+            "---\noutput: beamer_presentation\n---\n# Part one\n{}\n## Slide A\n\n- one\n{}- two\n- three\n\n## Slide B\nb\n",
+            notes[0], notes[1]
+        );
+        Deck::open(&write(dir.path(), name, &text)).unwrap()
+    };
+    let plain = deck("plain.md", ["", ""]);
+    let noted = deck(
+        "noted.md",
+        [
+            "\n::: notes\nabout the part\n:::\n",
+            "\n  ::: notes\n  about one\n  :::\n",
+        ],
+    );
+    assert_eq!(
+        noted.pages, plain.pages,
+        "a note makes no slide, nor takes one"
+    );
+    assert_eq!(plain.pages, 3);
+    let words = |d: &Deck, p| crate::text::of(d.data.clone(), p).unwrap().plain();
+    for page in 0..plain.pages {
+        assert_eq!(words(&noted, page), words(&plain, page), "page {page}");
+    }
+    let notes: Vec<&str> = noted.speaker.values().map(String::as_str).collect();
+    assert_eq!(notes, ["about the part", "about one"]);
+}

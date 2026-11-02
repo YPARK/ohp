@@ -717,9 +717,12 @@ fn a_reload_asked_for_while_opening_is_dropped() {
 }
 
 #[test]
-fn ctrl_c_quits_with_the_list_open() {
+fn c_x_c_c_quits_with_the_list_open() {
     let (_dir, mut app) = app(3);
     app.key(ctrl('o'));
+    app.key(ctrl('c'));
+    assert!(!app.quit);
+    app.key(ctrl('x'));
     app.key(ctrl('c'));
     assert!(app.quit);
 }
@@ -811,3 +814,443 @@ mod printing;
 
 #[path = "app/search.rs"]
 mod search;
+
+/// `app` presenting to a second window, none of which is opened.
+fn staged(app: &mut App) {
+    app.stage = Some(crate::link::Stage::new().unwrap());
+    app.view = View::Present;
+}
+
+#[test]
+fn the_presenters_strip_keeps_the_current_slide_in_its_middle() {
+    let (_dir, mut app) = app(40);
+    staged(&mut app);
+    let boxes = app.boxes();
+    let strip = app.strip(&boxes);
+    assert!(strip.len() > 2 && strip.len() < 40);
+    assert_eq!(strip[0].0, 0);
+    app.cur = 20;
+    let strip = app.strip(&boxes);
+    let at = strip.iter().position(|&(i, _)| i == 20).unwrap();
+    assert!(at.abs_diff(strip.len() / 2) <= 1, "{at} of {}", strip.len());
+    app.cur = 39;
+    assert_eq!(app.strip(&boxes).last().unwrap().0, 39);
+}
+
+#[test]
+fn clicking_the_strip_or_the_next_slide_turns_to_it() {
+    let (_dir, mut app) = app(10);
+    staged(&mut app);
+    let boxes = app.boxes();
+    let (i, slot) = app.strip(&boxes)[3];
+    assert!(app.stage_click(Position::new(slot.x + 1, slot.y + 1)));
+    assert_eq!(app.cur, i);
+    assert!(app.stage_click(Position::new(boxes.next.x + 2, boxes.next.y + 2)));
+    assert_eq!(app.cur, i + 1);
+    // The time pauses, and goes on; double-clicked, starts again.
+    let time = Position::new(boxes.clock.x + 2, boxes.clock.y + 1);
+    assert!(app.stage_click(time));
+    assert!(app.clock.paused());
+    std::thread::sleep(Duration::from_millis(450));
+    assert!(app.stage_click(time));
+    assert!(!app.clock.paused());
+    app.clock.began -= Duration::from_secs(60);
+    std::thread::sleep(Duration::from_millis(450));
+    app.stage_click(time);
+    app.stage_click(time);
+    assert!(!app.clock.paused());
+    assert!(app.clock.elapsed() < Duration::from_secs(1));
+    press(&mut app, &[KeyCode::Char('T')]);
+    app.clock.began -= Duration::from_secs(60);
+    press(&mut app, &[KeyCode::Char('Z')]);
+    assert!(app.clock.elapsed() < Duration::from_secs(1));
+    // The notes are written.
+    assert!(app.stage_click(Position::new(boxes.notes.x + 2, boxes.notes.y + 2)));
+    assert!(app.writing.is_some());
+}
+
+#[test]
+fn presenting_shows_the_slide_the_next_and_the_strip() {
+    let (_dir, mut app) = app(10);
+    staged(&mut app);
+    app.cur = 4;
+    let keys = app.visible();
+    assert_eq!(keys[0].page, 4);
+    assert_eq!(keys[1].page, 5);
+    assert!(keys[2..].iter().any(|k| k.page == 4));
+    let sizes = app.stage_sizes(&app.boxes());
+    assert_eq!(keys[0].size(), sizes[0]);
+    assert_eq!(keys[1].size(), sizes[1]);
+}
+
+#[test]
+fn b_blacks_out_the_audience_and_the_timer_pauses() {
+    let (_dir, mut app) = app(3);
+    staged(&mut app);
+    press(&mut app, &[KeyCode::Char('b')]);
+    assert!(app.black);
+    press(&mut app, &[KeyCode::Char('T')]);
+    let paused = app.clock.elapsed();
+    std::thread::sleep(Duration::from_millis(30));
+    assert_eq!(app.clock.elapsed(), paused);
+    press(&mut app, &[KeyCode::Char('T'), KeyCode::Char('b')]);
+    assert!(!app.black);
+    // Alone, b is not taken.
+    app.stage = None;
+    press(&mut app, &[KeyCode::Char('b')]);
+    assert!(!app.black);
+}
+
+#[test]
+fn space_and_page_keys_turn_the_slides_as_clickers_send_them() {
+    let (_dir, mut app) = app(5);
+    press(&mut app, &[KeyCode::Char(' '), KeyCode::PageDown]);
+    assert_eq!(app.cur, 2);
+    press(&mut app, &[KeyCode::PageUp]);
+    assert_eq!(app.cur, 1);
+    press(&mut app, &[KeyCode::End]);
+    assert_eq!(app.cur, 4);
+    press(&mut app, &[KeyCode::Home]);
+    assert_eq!(app.cur, 0);
+}
+
+fn press_ctrl(app: &mut App, c: char) {
+    app.key(ctrl(c));
+}
+
+#[test]
+fn only_c_x_c_c_quits() {
+    let (_dir, mut app) = app(3);
+    press(&mut app, &[KeyCode::Char('q')]);
+    press_ctrl(&mut app, 'c');
+    assert!(!app.quit);
+    press_ctrl(&mut app, 'x');
+    press_ctrl(&mut app, 'g');
+    press_ctrl(&mut app, 'c');
+    assert!(!app.quit, "C-g gives up the C-x");
+    press_ctrl(&mut app, 'x');
+    press_ctrl(&mut app, 'c');
+    assert!(app.quit);
+}
+
+#[test]
+fn picking_in_the_grid_shows_the_audience_nothing_until_enter() {
+    let (_dir, mut app) = app(10);
+    staged(&mut app);
+    app.cur = 2;
+    app.tend();
+    assert_eq!(app.live, 2);
+    press(
+        &mut app,
+        &[KeyCode::Char('g'), KeyCode::Right, KeyCode::Right],
+    );
+    app.tend();
+    assert_eq!((app.cur, app.live), (4, 2));
+    // Esc, g or C-g go back to the slide shown.
+    press(&mut app, &[KeyCode::Esc]);
+    assert_eq!((app.view, app.cur), (View::Present, 2));
+    press(&mut app, &[KeyCode::Char('g'), KeyCode::Right]);
+    press_ctrl(&mut app, 'g');
+    assert_eq!((app.view, app.cur), (View::Present, 2));
+    press(
+        &mut app,
+        &[KeyCode::Char('g'), KeyCode::Right, KeyCode::Char('g')],
+    );
+    assert_eq!(app.cur, 2);
+    // Enter shows the one picked.
+    press(
+        &mut app,
+        &[KeyCode::Char('g'), KeyCode::Right, KeyCode::Enter],
+    );
+    app.tend();
+    assert_eq!((app.view, app.cur, app.live), (View::Present, 3, 3));
+}
+
+#[test]
+fn notes_written_while_practising_are_saved_beside_the_deck() {
+    let (dir, mut app) = app(4);
+    staged(&mut app);
+    app.cur = 1;
+    press(&mut app, &[KeyCode::Char('N')]);
+    assert!(app.writing.is_some());
+    for c in "hello".chars() {
+        press(&mut app, &[KeyCode::Char(c)]);
+    }
+    // Keys are typed, not acted on: q neither quits nor turns.
+    press(
+        &mut app,
+        &[KeyCode::Enter, KeyCode::Char('q'), KeyCode::Char('n')],
+    );
+    press(&mut app, &[KeyCode::Up, KeyCode::End, KeyCode::Backspace]);
+    assert_eq!(app.cur, 1);
+    press(&mut app, &[KeyCode::Esc]);
+    assert!(app.writing.is_none());
+    let file = dir.path().join("deck.md");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "# 2\nhell\nqn\n");
+    assert_eq!(app.notes[&1], "hell\nqn");
+    // Written again, it starts from what was saved; C-g drops a change.
+    press(&mut app, &[KeyCode::Char('N'), KeyCode::Char('!')]);
+    press_ctrl(&mut app, 'g');
+    assert!(app.writing.is_none());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "# 2\nhell\nqn\n");
+}
+
+#[test]
+fn a_click_in_the_notes_moves_the_cursor_and_outside_saves_them() {
+    let (dir, mut app) = app(4);
+    staged(&mut app);
+    let notes = app.boxes().notes;
+    click(&mut app, Position::new(notes.x + 3, notes.y + 3));
+    assert!(app.writing.is_some());
+    for c in "ab\ncd".chars() {
+        app.key(KeyEvent::from(if c == '\n' {
+            KeyCode::Enter
+        } else {
+            KeyCode::Char(c)
+        }));
+    }
+    // Before the b, on the first row of the box's inside.
+    click(&mut app, Position::new(notes.x + 2, notes.y + 1));
+    press(&mut app, &[KeyCode::Char('X')]);
+    let current = app.boxes().current;
+    click(&mut app, Position::new(current.x + 5, current.y + 5));
+    assert!(app.writing.is_none());
+    let file = dir.path().join("deck.md");
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "# 1\naXb\ncd\n");
+}
+
+#[test]
+fn the_tools_are_drawn_along_the_top_and_clicked_as_keys() {
+    let (_dir, mut app) = app(5);
+    staged(&mut app);
+    // The rows of tools at the top, one or two.
+    let rows = usize::from(app.boxes().bar.height);
+    let top: String = screen(&app).chars().take(140 * rows).collect();
+    for word in [
+        "next", "laser", "black", "notes", "pause", "restart", "window", "end", "quit",
+    ] {
+        assert!(top.contains(word), "{word} is not among the tools: {top}");
+    }
+    let tools = app.tools(&app.boxes());
+    let at = |tool| {
+        let (_, r): (stage::Tool, Rect) = *tools.iter().find(|(t, _)| *t == tool).unwrap();
+        Position::new(r.x + 1, r.y)
+    };
+    click(&mut app, at(stage::Tool::Next));
+    assert_eq!(app.cur, 1);
+    click(&mut app, at(stage::Tool::Black));
+    assert!(app.black);
+    click(&mut app, at(stage::Tool::Quit));
+    assert!(!app.quit, "a click never quits");
+    click(&mut app, at(stage::Tool::Grid));
+    assert_eq!(app.view, View::Grid);
+}
+
+#[test]
+fn the_laser_is_where_the_mouse_is_held_on_the_slide() {
+    let (_dir, mut app) = app(3);
+    staged(&mut app);
+    let area = Rect::new(10, 5, 40, 20);
+    app.drawn.set(Some((app.job(Key::new(0, area)), area)));
+    app.mouse(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 20,
+        row: 15,
+        modifiers: KeyModifiers::NONE,
+    });
+    let (x, y) = app.laser.unwrap();
+    assert!((x - 10.5 / 40.).abs() < 1e-3 && (y - 10.5 / 20.).abs() < 1e-3);
+    // Off the slide, it is off; let go, too.
+    app.point(Position::new(2, 2));
+    assert!(app.laser.is_none());
+    app.point(Position::new(20, 15));
+    app.mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 20,
+        row: 15,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(app.laser.is_none());
+}
+
+#[test]
+fn the_laser_is_a_red_dot_kept_on_the_slide() {
+    use ratatui::backend::TestBackend;
+    let mut terminal = ratatui::Terminal::new(TestBackend::new(30, 10)).unwrap();
+    let area = Rect::new(5, 2, 20, 6);
+    terminal
+        .draw(|f| {
+            stage::laser(f, area, (0.5, 0.5));
+            stage::laser(f, area, (0.99, 0.0));
+        })
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    let red = |x, y| buf[(x, y)].fg == Color::Rgb(255, 30, 30);
+    assert!(red(15, 5) && red(13, 5) && red(16, 5) && red(14, 4) && red(15, 6));
+    assert!(!red(12, 5) && !red(17, 5));
+    // At the edge, nothing outside the slide.
+    assert!(red(24, 2) && !red(25, 2) && !red(24, 1));
+}
+
+#[test]
+fn another_program_is_told_what_is_shown_and_turns_the_slides() {
+    use crate::control::Request;
+    let (dir, mut app) = app(5);
+    let status = app.answer_one(Request::Status);
+    assert!(status.contains(&format!("file {}", dir.path().join("deck.pdf").display())));
+    assert!(status.contains(&"page 1".to_string()) && status.contains(&"pages 5".to_string()));
+    app.view = View::Grid;
+    assert_eq!(
+        app.answer_one(Request::Goto(3)),
+        ["ok showing slide 4 of 5"]
+    );
+    assert_eq!((app.cur, app.view), (3, View::Present));
+    assert!(app.answer_one(Request::Goto(9))[0].starts_with("err"));
+    // The file shown, opened again, is turned to.
+    let same = app.answer_one(Request::Open(dir.path().join("deck.pdf"), 1));
+    assert_eq!(same, ["ok showing slide 2 of 5"]);
+    assert!(app.answer_one(Request::Open(dir.path().join("nope.pdf"), 0))[0].starts_with("err"));
+}
+
+#[test]
+fn w_ends_presenting_though_no_audience_window_came() {
+    let (_dir, mut app) = app(3);
+    staged(&mut app);
+    press(&mut app, &[KeyCode::Char('w')]);
+    assert!(!app.presenting());
+}
+
+#[test]
+fn presenting_neither_prints_nor_annotates() {
+    let (_dir, mut app) = app(3);
+    staged(&mut app);
+    press(&mut app, &[KeyCode::Char('P'), KeyCode::Char('A')]);
+    app.key(ctrl('p'));
+    assert!(app.printing.is_none());
+    assert!(!app.signing());
+    assert!(app.notice.as_deref().unwrap().contains("w ends presenting"));
+}
+
+#[test]
+fn quitting_saves_the_notes_being_written_and_stays_if_it_cannot() {
+    let (dir, mut app) = app(3);
+    staged(&mut app);
+    press(
+        &mut app,
+        &[KeyCode::Char('N'), KeyCode::Char('h'), KeyCode::Char('i')],
+    );
+    app.key(ctrl('x'));
+    app.key(ctrl('c'));
+    assert!(app.quit);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("deck.md")).unwrap(),
+        "# 1\nhi\n"
+    );
+}
+
+#[test]
+fn notes_that_cannot_be_saved_are_kept_and_ohp_stays() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, mut app) = app(3);
+    staged(&mut app);
+    let mode = |m| std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(m));
+    mode(0o555).unwrap();
+    press(
+        &mut app,
+        &[KeyCode::Char('N'), KeyCode::Char('x'), KeyCode::Esc],
+    );
+    let kept = app.writing.is_some();
+    app.key(ctrl('x'));
+    app.key(ctrl('c'));
+    let stayed = !app.quit;
+    mode(0o755).unwrap();
+    assert!(kept, "the notes are kept to save again");
+    assert!(stayed);
+    app.key(ctrl('g'));
+    assert!(app.writing.is_none());
+}
+
+#[test]
+fn notes_written_elsewhere_are_shown_while_the_time_is_paused() {
+    let (dir, mut app) = app(3);
+    staged(&mut app);
+    app.read_notes();
+    press(&mut app, &[KeyCode::Char('T')]);
+    std::fs::write(dir.path().join("deck.md"), "# 1\nfrom an editor\n").unwrap();
+    app.notes_looked -= Duration::from_secs(2);
+    app.tend();
+    assert_eq!(app.notes[&0], "from an editor");
+}
+
+#[test]
+fn a_slide_asked_of_a_file_that_cannot_be_read_is_forgotten() {
+    let (dir, mut app) = app(3);
+    let bad = dir.path().join("bad.pdf");
+    std::fs::write(&bad, b"not a pdf").unwrap();
+    app.answer_one(crate::control::Request::Open(bad, 2));
+    assert_eq!(app.landing, Some(2));
+    finish(&mut app);
+    assert_eq!(app.landing, None);
+}
+
+#[test]
+fn a_click_on_the_strip_while_writing_saves_the_notes_and_turns() {
+    let (dir, mut app) = app(6);
+    staged(&mut app);
+    press(&mut app, &[KeyCode::Char('N'), KeyCode::Char('x')]);
+    let boxes = app.boxes();
+    let (i, slot) = *app.strip(&boxes).iter().find(|(i, _)| *i == 3).unwrap();
+    click(&mut app, Position::new(slot.x + 1, slot.y + 1));
+    assert!(app.writing.is_none());
+    assert_eq!(app.cur, i);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("deck.md")).unwrap(),
+        "# 1\nx\n"
+    );
+}
+
+#[test]
+fn the_wheel_turns_the_presenters_slides() {
+    let (_dir, mut app) = app(5);
+    staged(&mut app);
+    let wheel = |app: &mut App, kind| {
+        app.mouse(MouseEvent {
+            kind,
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    wheel(&mut app, MouseEventKind::ScrollDown);
+    wheel(&mut app, MouseEventKind::ScrollDown);
+    assert_eq!(app.cur, 2);
+    wheel(&mut app, MouseEventKind::ScrollUp);
+    assert_eq!(app.cur, 1);
+}
+
+#[test]
+fn a_narrow_screen_has_its_tools_on_two_rows_all_of_them() {
+    let (_dir, mut app) = app(5);
+    staged(&mut app);
+    app.main = Rect::new(0, 0, 90, 40);
+    let boxes = app.boxes();
+    assert_eq!(boxes.bar.height, 2);
+    let tools = app.tools(&boxes);
+    assert_eq!(tools.len(), 11, "every tool is shown");
+    assert!(
+        tools
+            .iter()
+            .all(|(_, r)| boxes.bar.contains(r.as_position()) && r.right() <= 90)
+    );
+    let (_, quit) = tools.iter().find(|(t, _)| *t == stage::Tool::Quit).unwrap();
+    assert_eq!((quit.y, quit.right()), (1, 90));
+    // No two overlap.
+    for (i, (_, a)) in tools.iter().enumerate() {
+        for (_, b) in &tools[i + 1..] {
+            assert!(a.intersection(*b).is_empty(), "{a:?} {b:?}");
+        }
+    }
+    // Wide enough, one row.
+    app.main = Rect::new(0, 0, 200, 40);
+    assert_eq!(app.boxes().bar.height, 1);
+}

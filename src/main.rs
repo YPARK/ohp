@@ -36,11 +36,16 @@ use std::time::Duration;
 /// presents the slide picked in the grid, t switches between images and
 /// text, s reads the slides aloud from this one on, k sums up the slide on
 /// screen and marks its key sentences, K sums up the whole file, m picks
-/// the model that sums up, A annotates and signs the PDF, P prints, q
-/// quits.
+/// the model that sums up, A annotates and signs the PDF, P prints, w
+/// presents to a second window, for the projector, C-x C-c quits, and C-g
+/// gives up what is under way.
 ///
 /// +/- zoom the slide, or the grid. Zoomed in, arrows pan the slide and 0
 /// fits it back to the screen.
+///
+/// `ohp mcp` serves the Model Context Protocol on stdio, so an assistant
+/// shows files in the ohp running here, turns its slides, and reads,
+/// renders and writes the notes of any deck's pages.
 ///
 /// The file is reloaded whenever it changes on disk, so recompiling or
 /// saving it updates the slides in place; r reloads it at once. Ctrl-O
@@ -68,6 +73,18 @@ struct Args {
     /// Start with slides as text, even where the terminal shows images.
     #[arg(long)]
     text: bool,
+    /// Present to a second window, as w does: this one shows the slide,
+    /// the next, the notes and the time, and a window opened for the
+    /// projector shows the slide alone.
+    #[arg(long, conflicts_with = "print")]
+    presenter: bool,
+    /// Slide, or page, to show first, from 1.
+    #[arg(long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+    page: u32,
+    /// Be the audience's window of a presenter's ohp, at this socket, as
+    /// the presenter's opens it.
+    #[arg(long, value_name = "SOCKET", hide = true, conflicts_with_all = ["print", "presenter"])]
+    audience: Option<PathBuf>,
     /// Print the file, as P does, with CUPS's lp, and quit, showing
     /// nothing.
     #[arg(long)]
@@ -157,7 +174,30 @@ fn main() -> anyhow::Result<ExitCode> {
 }
 
 fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
+    // `ohp mcp`: a Model Context Protocol server on stdio, not slides.
+    #[cfg(feature = "mcp")]
+    if std::env::args_os().nth(1).is_some_and(|a| a == "mcp") && std::env::args_os().len() == 2 {
+        return ohp::mcp::serve();
+    }
     let args = Args::parse();
+    if let Some(socket) = &args.audience {
+        let audience = ohp::link::join(socket)?;
+        let deck = render::Deck::open_with(
+            std::slice::from_ref(&audience.pdf),
+            render::Options::default(),
+        )?;
+        return app::run(
+            deck,
+            args.text,
+            Vec::new(),
+            options(&args),
+            speak::Speaker::new(None, None),
+            summary::Summarizer::new(None),
+            signaled.clone(),
+            app::Role::Audience(audience),
+            0,
+        );
+    }
     let files = match args.files.as_slice() {
         [] => browse::choose(".".as_ref())?,
         [dir] if dir.is_dir() => browse::choose(dir)?,
@@ -196,6 +236,12 @@ fn run(signaled: &Arc<AtomicUsize>) -> anyhow::Result<()> {
         speaker(&args),
         summarizer(&args),
         signaled.clone(),
+        if args.presenter {
+            app::Role::Presenter
+        } else {
+            app::Role::Alone
+        },
+        args.page as usize - 1,
     )
 }
 

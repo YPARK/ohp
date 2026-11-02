@@ -1,6 +1,6 @@
 [package]
 name = "ohp"
-version = "0.1.15"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
@@ -11,7 +11,11 @@ keywords = ["pdf", "beamer", "slides", "tui", "markdown"]
 categories = ["command-line-utilities", "visualization"]
 
 [features]
-default = ["markdown", "sign", "speech", "summary"]
+default = ["markdown", "mcp", "sign", "speech", "summary"]
+# `ohp mcp`: a Model Context Protocol server, over stdio, through which an
+# assistant opens files in the ohp running here, turns its slides, and
+# reads, renders and writes notes for any deck's pages.
+mcp = ["dep:base64", "dep:serde_json", "image/png"]
 # Pages summed up, and their key sentences lit, by a language model run in
 # ohp with candle, on Metal on macOS; the sentences a file is summed up
 # from picked with a small embedding model. Both are downloaded once from

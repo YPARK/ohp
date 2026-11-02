@@ -52,6 +52,7 @@ ohp                                  # pick the file from a list
 ohp ~/talks                          # pick it from a list there
 ohp talk.pdf
 ohp --text talk.pdf                  # slides as text, even where images can be shown
+ohp --presenter talk.pdf             # present to a second window, as w does
 ohp user@host:~/talks/talk.pdf       # slides on another machine
 ohp talk.Rmd                         # R Markdown slides, chunks run by knitr
 ohp --paper a4 notes.md              # a markdown document, on A4 pages
@@ -84,6 +85,8 @@ set by typst, so need the `markdown` feature, as in the default build.
 | Key | |
 |---|---|
 | `n` / `p`, arrows | next / previous slide; up and down move a row in the grid |
+| `space`, `page down` / `page up` | next / previous slide, as presentation clickers send them |
+| `home` / `end` | first / last slide |
 | `g`, `tab` | switch between the slide and a grid of all slides |
 | `enter` | present the slide picked in the grid |
 | `+` / `-` | zoom the slide, or the grid |
@@ -101,7 +104,9 @@ set by typst, so need the `markdown` feature, as in the default build.
 | `ctrl-s`, `ctrl-r` | search forward, or back, as [Searching](#searching) shows |
 | `A` | annotate and sign the PDF: a signature, your name, the date, ✓ ✕ ●, put where you click, in a copy, as [Annotating and signing](#annotating-and-signing) shows |
 | `P`, `ctrl-p` | print what is shown, as [Printing](#printing) shows |
-| `q` | quit |
+| `w` | present to a second window, for the projector, as [Presenter view](#presenter-view) shows |
+| `C-x C-c` | quit, as in Emacs, so no one key ends a talk by mistake |
+| `C-g` | give up what is under way, as in Emacs: a `C-x`, a search, a list or a form |
 
 ohp takes the mouse, so selecting text in the terminal needs Shift held,
 or Option in macOS terminals; the wheel turns slides as the arrows do.
@@ -114,6 +119,114 @@ shown as its text over a coarse image of it.
 
 Over ssh, images are sent compressed: slides are flat colour, and the link,
 not the CPU, limits how fast a slide appears.
+
+## Presenter view
+
+`w`, or `ohp --presenter talk.pdf`, opens a second terminal window for
+the audience, which shows the slide alone, and turns this one into the
+presenter's view: the slide, the next one, your notes, the time since you
+began, and a strip of the slides along the bottom, the current one in its
+middle. Drag the audience's window to the projector and make it full
+screen; its slides are drawn anew for that screen's resolution.
+
+```
+ p ◀ back  n ▶ next  L ● laser  b ■ black  N ✎ notes  T ⏸ pause  …
+┏ 3 / 13 ━━━━━━━━━━━━━━━━━━━━━━━━┓┌ time ──────────────┐
+┃                                 ┃│ 4:12  audience ●   │
+┃         the slide               ┃┌ next · 4 ──────────┐
+┃                                 ┃│   the next slide   │
+┃                                 ┃┌ notes ─────────────┐
+┃                                 ┃│ what to say        │
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└────────────────────┘
+     ┌ 1 ─┐┌ 2 ─┐┏ 3 ━┓┌ 4 ─┐┌ 5 ─┐   a click turns to it
+```
+
+Along the top, every tool is a button with its key on it, lit while it
+is on: click it, or press the key. Hold the mouse down on the slide and
+a red laser dot follows it, on the projector as on your screen; `L` has
+it follow the mouse with no button held.
+
+The window is opened in kitty, Ghostty, WezTerm, iTerm2 and macOS's
+Terminal. In another terminal, over ssh, or in tmux, the status line says
+the command to run in a window on the projector, and puts it on the
+clipboard. Keys pressed in either window turn the slides in both.
+
+| Key, presenting | |
+|---|---|
+| `n` / `p`, arrows, `space`, `page down` / `page up` | next / previous slide, in both windows |
+| click | on the strip, turn to that slide; on the next slide, turn to it; on the time, pause it or go on, and double-clicked, start it again; on the notes, write them |
+| `g` | pick from a grid of all the slides, privately: the audience goes on seeing the slide shown, marked *on screen*, until `enter`, or a double click, shows the one picked; `esc`, `g` or `C-g` go back to it |
+| `N` | write the slide's notes, as you practise, as a click on them does: `enter` begins a line, a click or the arrows and Emacs's `C-a` `C-e` `C-f` `C-b` `C-n` `C-p` `C-d` `C-k` move and delete, `esc` or a click outside saves them into the notes file, and `C-g` drops them |
+| hold the mouse on the slide | point at it with a red laser dot, on the projector too |
+| `L` | the laser follows the mouse with no button held, or no longer |
+| `b`, `.` | black out the audience's screen, or show it again |
+| `T` | pause the time, or go on |
+| `Z` | start the time again from nought (zero), as a double click on it does |
+| `w` | end presenting: the audience's window closes |
+| `W` | open the audience's window again, as after it was closed, lit red on the tools while there is none |
+
+Notes come from three places, and are shown together, as markdown:
+bold, italics, code, lists and quotes as such.
+
+- **A markdown file named as the slides**: `talk.md` for `talk.pdf`, in
+  which a heading that is a page's number, as `# 3` or `## Slide 3`,
+  begins that page's notes. It is read again whenever it is saved, and
+  `N` writes into it, making it if need be, the rest of it left as it was.
+  A `talk.md` that is what the slides were made from, or the slides
+  themselves, is never taken for notes: one is taken only while empty or
+  begun by a page's heading, and otherwise the notes are in
+  `talk.notes.md`.
+- **Markdown's speaker notes**, written as pandoc has them, which are
+  never shown on the slides:
+
+  ```markdown
+  ## Results
+
+  The effect held in every cohort.
+
+  ::: notes
+  Mention the 2024 replication.
+  :::
+  ```
+
+- **Beamer's `\note{}`**, set beside each slide with
+  `\setbeameroption{show notes on second screen=right}`: each page, twice
+  a slide wide, is cut in two, the slide going to the audience and the
+  note to the notes box.
+
+## For assistants: MCP
+
+`ohp mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
+server, on stdio, so an assistant can show you a file, turn to the slide
+it is talking about, and read, see and annotate the pages of any deck
+itself, PDF, markdown or the rest:
+
+| Tool | |
+|---|---|
+| `status` | what the ohp running here shows: the file, the slide on screen, whether it is presenting |
+| `open` | show a file in the running ohp, from a slide; with none running, open ohp on it in a new terminal window |
+| `goto` | turn to a slide, by number or by words of its title; presenting, the audience sees it too |
+| `slides` | the page count, and each page's title and size, and whether it has notes |
+| `text` | a page's text, or every page's |
+| `render` | a page as a PNG, to see its layout, figures and tables |
+| `notes` | read a slide's speaker notes, or write them into the notes file presenter view shows |
+
+`slides`, `text`, `render` and `notes` take a `path`, and read the file
+themselves, so they work with no ohp running, running no code in it: R
+Markdown's chunks are shown, not knitted. Without a `path`, they read the
+deck on screen, as the ohp showing it reads it. Each running ohp listens on a socket of its own, in a
+directory only you can enter, and `ohp mcp` speaks to the one started
+last. Add it to a client as any stdio server:
+
+```sh
+claude mcp add ohp -- ohp mcp
+```
+
+```json
+{ "mcpServers": { "ohp": { "command": "ohp", "args": ["mcp"] } } }
+```
+
+`--page N` starts ohp on slide `N`, as `open` does.
 
 ## Markdown and R Markdown
 

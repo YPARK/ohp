@@ -33,6 +33,7 @@ use std::time::SystemTime;
 /// Name of the worker threads, so their panics can be told apart.
 pub const THREAD: &str = "render";
 
+#[derive(Clone)]
 pub struct Deck {
     /// The files the deck is made of, most often one.
     pub paths: Vec<PathBuf>,
@@ -45,6 +46,8 @@ pub struct Deck {
     pub options: Options,
     /// What the status line should say about how the deck was made.
     pub note: Option<String>,
+    /// Speaker notes set in the deck's markdown, by page.
+    pub speaker: crate::notes::Notes,
 }
 
 /// Making a deck stopped, as ohp quits: not worth saying as an error.
@@ -182,9 +185,10 @@ pub fn sizes(pdf: &Pdf) -> Vec<(f32, f32)> {
     pdf.pages().iter().map(Page::render_dimensions).collect()
 }
 
-/// A PDF made of files, what the status line should say about how, and
-/// which file each page is from, if they are several; else empty.
-type Made = (Vec<u8>, Option<String>, Vec<usize>);
+/// A PDF made of files, what the status line should say about how, which
+/// file each page is from, if they are several, else empty, and the speaker
+/// notes set in them.
+type Made = (Vec<u8>, Option<String>, Vec<usize>, crate::notes::Notes);
 
 #[cfg(feature = "markdown")]
 fn typeset(paths: &[PathBuf], options: &Options) -> anyhow::Result<Made> {
@@ -192,7 +196,11 @@ fn typeset(paths: &[PathBuf], options: &Options) -> anyhow::Result<Made> {
         [path] if document(path) => (crate::typeset::typeset(path, options)?, Vec::new()),
         _ => crate::album::gather(paths, options)?,
     };
-    Ok((done.pdf, done.note, from))
+    let mut speaker = crate::notes::Notes::new();
+    for (page, note) in done.speaker {
+        crate::notes::add(&mut speaker, page, note);
+    }
+    Ok((done.pdf, done.note, from, speaker))
 }
 
 #[cfg(not(feature = "markdown"))]
@@ -219,10 +227,10 @@ impl Deck {
         let [first, ..] = paths else {
             anyhow::bail!("no file to present");
         };
-        let (data, note, from) = if pdf(paths) {
+        let (data, note, from, speaker) = if pdf(paths) {
             let data =
                 std::fs::read(first).with_context(|| format!("reading {}", first.display()))?;
-            (data, None, Vec::new())
+            (data, None, Vec::new(), Default::default())
         } else {
             typeset(paths, &options)?
         };
@@ -246,7 +254,20 @@ impl Deck {
             data,
             options,
             note,
+            speaker,
         })
+    }
+
+    /// The page each of the deck's files begins on.
+    pub fn starts(&self) -> Vec<usize> {
+        (0..self.paths.len())
+            .map(|file| {
+                self.from
+                    .iter()
+                    .position(|&f| f == file)
+                    .unwrap_or(self.pages)
+            })
+            .collect()
     }
 
     /// Which of `paths` page `page` is from.
@@ -750,6 +771,49 @@ pub fn raster<'a>(
         pixmap.height().into(),
         pixmap.data_as_u8_slice().to_vec(),
     )
+}
+
+/// Page `page` of the PDF `data`, `width` pixels across, as a PNG.
+#[cfg(feature = "mcp")]
+pub fn png(data: Arc<Vec<u8>>, page: usize, width: u32) -> anyhow::Result<Vec<u8>> {
+    let pdf = Pdf::new(data).map_err(|e| anyhow!("cannot read the PDF: {e:?}"))?;
+    let pages = pdf.pages();
+    let Some(one) = pages.get(page) else {
+        anyhow::bail!("there is no page {} of {}", page + 1, pages.len());
+    };
+    let (cache, settings) = (RenderCache::new(), InterpreterSettings::default());
+    let image = caught(|| at_width(one, &cache, &settings, width))
+        .ok_or_else(|| anyhow!("cannot render page {}", page + 1))?;
+    let mut out = Vec::new();
+    DynamicImage::ImageRgba8(image)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
+    Ok(out)
+}
+
+/// `page` drawn `width` pixels across, on white.
+pub fn at_width<'a>(
+    page: &'a Page<'a>,
+    cache: &RenderCache<'a>,
+    settings: &InterpreterSettings,
+    width: u32,
+) -> Option<RgbaImage> {
+    let width = width.max(1);
+    let (w, _) = page.render_dimensions();
+    let scale = width as f32 / w;
+    let drawn = raster(page, cache, settings, scale, scale)?;
+    if drawn.width() == width {
+        return Some(drawn);
+    }
+    // Rounded a pixel off: made the width asked.
+    let height = (drawn.height() as f32 * width as f32 / drawn.width() as f32)
+        .round()
+        .max(1.0) as u32;
+    Some(imageops::resize(
+        &drawn,
+        width,
+        height,
+        FilterType::Triangle,
+    ))
 }
 
 /// Light the boxes in `lit`, and mark those in `marked`, in page points, on

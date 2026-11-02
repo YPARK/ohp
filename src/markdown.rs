@@ -8,7 +8,9 @@
 //! a page fills and at `\newpage`.
 //!
 //! Code chunks not run by knitr are shown as their code. Pandoc's speaker notes
-//! are left out, and its other fenced divs show their content.
+//! are not shown on the slides: each is marked where it was, so the page it
+//! falls on is known, and kept for the presenter. Its other fenced divs show
+//! their content.
 //!
 //! A formula typst cannot set is shown as LaTeX rendered it, where it was,
 //! and otherwise as its source. LaTeX macros, from `header-includes` or on
@@ -36,6 +38,13 @@ use front::{Front, Split, front_matter, open_fence};
 /// Where a `::: {#refs}` div was, for the works cited.
 const REFS: &str = "<!-- ohp: refs -->";
 
+/// Where speaker note `n` was: `NOTE` then `n` then ` -->`.
+const NOTE: &str = "<!-- ohp: note ";
+
+/// The label typst gives each speaker note's mark, whose value is its
+/// number among `Converted::speaker`.
+pub const NOTE_LABEL: &str = "ohp-note";
+
 /// The typst document a markdown file is set as.
 pub struct Converted {
     pub source: String,
@@ -55,6 +64,8 @@ pub struct Converted {
     pub preamble: String,
     /// Whether it lists works cited, from a bibliography typst reads.
     pub listed: bool,
+    /// Speaker notes, as written, each marked in `source` with its number.
+    pub speaker: Vec<String>,
     /// What is not shown as the file asks: a bibliography not read, a work
     /// cited that is not in it.
     pub warnings: Vec<String>,
@@ -106,7 +117,7 @@ const STYLE: &str = r##"#show raw.where(block: true): block.with(fill: luma(244)
 
 pub fn convert(text: &str, setting: &Setting) -> Converted {
     let (front, body) = front_matter(text);
-    let (body, macros) = strip_divs(body);
+    let (body, macros, speaker) = strip_divs(body);
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_STRIKETHROUGH
@@ -174,6 +185,7 @@ pub fn convert(text: &str, setting: &Setting) -> Converted {
         preamble: preamble.join("\n"),
         listed: w.listed,
         warnings,
+        speaker,
     }
 }
 
@@ -184,10 +196,10 @@ enum Layout {
     Slides(Option<u8>),
 }
 
-/// Drop pandoc's fenced div markers, speaker notes with what they hold, and
-/// `. . .` pauses, and take out LaTeX macro definitions, leaving code blocks
-/// as they are. Returns the body and the macros.
-fn strip_divs(body: &str) -> (String, Vec<String>) {
+/// Drop pandoc's fenced div markers and `. . .` pauses, take out speaker
+/// notes, each marked where it was, and LaTeX macro definitions, leaving
+/// code blocks as they are. Returns the body, the macros and the notes.
+fn strip_divs(body: &str) -> (String, Vec<String>, Vec<String>) {
     const MACROS: [&str; 6] = [
         "\\newcommand",
         "\\renewcommand",
@@ -202,8 +214,9 @@ fn strip_divs(body: &str) -> (String, Vec<String>) {
     let mut open: Option<(String, i32)> = None;
     // The open code fence: its character and length.
     let mut fence: Option<(char, usize)> = None;
-    // Depth of the notes div being skipped, counting divs within it.
+    // Depth of the notes div being taken out, counting divs within it.
     let mut notes = 0usize;
+    let mut speaker: Vec<String> = Vec::new();
     for line in body.split_inclusive('\n') {
         let t = line.trim();
         let depth = |s: &str| s.matches('{').count() as i32 - s.matches('}').count() as i32;
@@ -231,6 +244,8 @@ fn strip_divs(body: &str) -> (String, Vec<String>) {
             }
             if notes == 0 {
                 out.push_str(line);
+            } else if let Some(note) = speaker.last_mut() {
+                note.push_str(line);
             }
             continue;
         }
@@ -244,8 +259,16 @@ fn strip_divs(body: &str) -> (String, Vec<String>) {
                 } else {
                     notes + 1
                 };
+                if notes == 0 {
+                    // Where the div was, as indented: in a list item, it
+                    // stays in the item, and no blank line loosens the list.
+                    let n = speaker.len() - 1;
+                    let indent = &line[..line.len() - line.trim_start().len()];
+                    out.push_str(&format!("{indent}{NOTE}{n} -->\n"));
+                }
             } else if attrs == "notes" || attrs.contains(".notes") {
                 notes = 1;
+                speaker.push(String::new());
             } else if attrs.contains("#refs") {
                 out.push_str(&format!("\n{REFS}\n\n"));
             }
@@ -255,10 +278,23 @@ fn strip_divs(body: &str) -> (String, Vec<String>) {
         }
         if notes == 0 {
             out.push_str(line);
+        } else if let Some(note) = speaker.last_mut() {
+            note.push_str(line);
         }
     }
     macros.extend(open.map(|(def, _)| def.trim().to_string()));
-    (out, macros)
+    let speaker = speaker.iter().map(|n| n.trim().to_string()).collect();
+    (out, macros, speaker)
+}
+
+/// The speaker note an HTML block marks, by its number.
+fn note_mark(html: &str) -> Option<usize> {
+    html.trim()
+        .strip_prefix(NOTE)?
+        .strip_suffix("-->")?
+        .trim()
+        .parse()
+        .ok()
 }
 
 type Events<'a> = Vec<Event<'a>>;
@@ -294,6 +330,11 @@ fn slide_level(events: &[Event]) -> Option<u8> {
         let next = events.get(i + 1);
         let content = match next {
             None | Some(Event::Start(Tag::Heading { .. }) | Event::Rule) => false,
+            // A speaker note's mark, in the HTML block pulldown-cmark makes
+            // of it, is not on the slide.
+            Some(Event::Start(Tag::HtmlBlock)) if matches!(events.get(i + 2), Some(Event::Html(html)) if note_mark(html).is_some()) => {
+                false
+            }
             Some(_) => true,
         };
         if content {
@@ -602,6 +643,11 @@ impl Writer<'_, '_> {
                 None => self.text(&format!("[^{label}]")),
             },
             Event::Html(html) if html.trim() == REFS => self.bibliography(),
+            Event::Html(html) if note_mark(html).is_some() => {
+                // Inline, so it neither breaks a list nor begins a line.
+                let n = note_mark(html).unwrap_or_default();
+                self.raw(&format!("#metadata({n})<{NOTE_LABEL}>"));
+            }
             Event::InlineHtml(html) | Event::Html(html) => {
                 let tag = html.trim().to_ascii_lowercase();
                 if matches!(tag.as_str(), "<br>" | "<br/>" | "<br />") {

@@ -24,11 +24,13 @@ use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
 use typst::diag::{FileError, FileResult, SourceDiagnostic};
-use typst::foundations::{Bytes, Datetime, Duration};
+use typst::foundations::{Bytes, Datetime, Duration, Label, Selector, Value};
+use typst::introspection::{Introspector, MetadataElem};
 use typst::layout::Paper;
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
+use typst::utils::PicoStr;
 use typst::{Library, LibraryExt, World, WorldExt};
 use typst_kit::fonts::FontStore;
 use typst_layout::PagedDocument;
@@ -42,6 +44,8 @@ const RETRIES: usize = 5;
 pub struct Typeset {
     pub pdf: Vec<u8>,
     pub note: Option<String>,
+    /// Speaker notes, by the page, from 0, each falls on.
+    pub speaker: Vec<(usize, String)>,
 }
 
 /// `name` if typst knows it as a paper size.
@@ -121,15 +125,19 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
         }
         stopped()?;
         let world = Doc::new(doc.source, &doc.images, &doc.files, &mut loaded);
-        match compile(&world) {
-            Ok(pdf) => {
+        match compile_marked(&world) {
+            Ok((pdf, marks)) => {
+                let speaker = marks
+                    .into_iter()
+                    .filter_map(|(page, n)| Some((page, doc.speaker.get(n)?.clone())))
+                    .collect();
                 let notes: Vec<String> = knitting
                     .into_iter()
                     .chain(dropped)
                     .chain(doc.warnings)
                     .collect();
                 let note = (!notes.is_empty()).then(|| notes.join("; "));
-                return Ok(Typeset { pdf, note });
+                return Ok(Typeset { pdf, note, speaker });
             }
             Err(errors) => {
                 failure = errors[0].message.to_string();
@@ -205,11 +213,22 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
     Ok(Typeset {
         pdf,
         note: Some(notes.join("; ")),
+        speaker: Vec::new(),
     })
 }
 
 pub fn compile(world: &Doc) -> Result<Vec<u8>, Vec<SourceDiagnostic>> {
+    compile_marked(world).map(|(pdf, _)| pdf)
+}
+
+/// A PDF, and for each speaker note marked in it, the page, from 0, its
+/// mark is on and its number.
+pub type Marked = (Vec<u8>, Vec<(usize, usize)>);
+
+/// The PDF, and where its speaker notes' marks are.
+pub fn compile_marked(world: &Doc) -> Result<Marked, Vec<SourceDiagnostic>> {
     let compiled = typst::compile::<PagedDocument>(world).output;
+    let marks = compiled.as_ref().map(marks).unwrap_or_default();
     // typst memoises across compiles in a global cache; what reloads stop
     // using would otherwise be kept for as long as ohp runs.
     typst::comemo::evict(10);
@@ -217,7 +236,27 @@ pub fn compile(world: &Doc) -> Result<Vec<u8>, Vec<SourceDiagnostic>> {
         tagged: false,
         ..PdfOptions::default()
     };
-    typst_pdf::pdf(&compiled.map_err(|e| e.to_vec())?, &options).map_err(|e| e.to_vec())
+    let pdf =
+        typst_pdf::pdf(&compiled.map_err(|e| e.to_vec())?, &options).map_err(|e| e.to_vec())?;
+    Ok((pdf, marks))
+}
+
+/// Where the speaker notes' marks are: page, from 0, and number.
+fn marks(doc: &PagedDocument) -> Vec<(usize, usize)> {
+    let Some(label) = Label::new(PicoStr::intern(markdown::NOTE_LABEL)) else {
+        return Vec::new();
+    };
+    let found = doc.introspector().query(&Selector::Label(label));
+    found
+        .iter()
+        .filter_map(|elem| {
+            let page = doc.introspector().page(elem.location()?)?.get() - 1;
+            let Value::Int(n) = elem.to_packed::<MetadataElem>()?.value else {
+                return None;
+            };
+            Some((page, usize::try_from(n).ok()?))
+        })
+        .collect()
 }
 
 static LIBRARY: LazyLock<LazyHash<Library>> = LazyLock::new(|| LazyHash::new(Library::default()));
