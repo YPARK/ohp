@@ -1109,3 +1109,84 @@ fn another_program_is_told_what_is_shown_and_turns_the_slides() {
     assert_eq!(same, ["ok showing slide 2 of 5"]);
     assert!(app.answer_one(Request::Open(dir.path().join("nope.pdf"), 0))[0].starts_with("err"));
 }
+
+#[test]
+fn w_ends_presenting_though_no_audience_window_came() {
+    let (_dir, mut app) = app(3);
+    staged(&mut app);
+    press(&mut app, &[KeyCode::Char('w')]);
+    assert!(!app.presenting());
+}
+
+#[test]
+fn presenting_neither_prints_nor_annotates() {
+    let (_dir, mut app) = app(3);
+    staged(&mut app);
+    press(&mut app, &[KeyCode::Char('P'), KeyCode::Char('A')]);
+    app.key(ctrl('p'));
+    assert!(app.printing.is_none());
+    assert!(!app.signing());
+    assert!(app.notice.as_deref().unwrap().contains("w ends presenting"));
+}
+
+#[test]
+fn quitting_saves_the_notes_being_written_and_stays_if_it_cannot() {
+    let (dir, mut app) = app(3);
+    staged(&mut app);
+    press(
+        &mut app,
+        &[KeyCode::Char('N'), KeyCode::Char('h'), KeyCode::Char('i')],
+    );
+    app.key(ctrl('x'));
+    app.key(ctrl('c'));
+    assert!(app.quit);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("deck.md")).unwrap(),
+        "# 1\nhi\n"
+    );
+}
+
+#[test]
+fn notes_that_cannot_be_saved_are_kept_and_ohp_stays() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, mut app) = app(3);
+    staged(&mut app);
+    let mode = |m| std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(m));
+    mode(0o555).unwrap();
+    press(
+        &mut app,
+        &[KeyCode::Char('N'), KeyCode::Char('x'), KeyCode::Esc],
+    );
+    let kept = app.writing.is_some();
+    app.key(ctrl('x'));
+    app.key(ctrl('c'));
+    let stayed = !app.quit;
+    mode(0o755).unwrap();
+    assert!(kept, "the notes are kept to save again");
+    assert!(stayed);
+    app.key(ctrl('g'));
+    assert!(app.writing.is_none());
+}
+
+#[test]
+fn notes_written_elsewhere_are_shown_while_the_time_is_paused() {
+    let (dir, mut app) = app(3);
+    staged(&mut app);
+    app.read_notes();
+    press(&mut app, &[KeyCode::Char('T')]);
+    std::fs::write(dir.path().join("deck.md"), "# 1\nfrom an editor\n").unwrap();
+    app.notes_looked -= Duration::from_secs(2);
+    app.tend();
+    assert_eq!(app.notes[&0], "from an editor");
+}
+
+#[test]
+fn a_slide_asked_of_a_file_that_cannot_be_read_is_forgotten() {
+    let (dir, mut app) = app(3);
+    let bad = dir.path().join("bad.pdf");
+    std::fs::write(&bad, b"not a pdf").unwrap();
+    app.answer_one(crate::control::Request::Open(bad, 2));
+    assert_eq!(app.landing, Some(2));
+    finish(&mut app);
+    assert_eq!(app.landing, None);
+}

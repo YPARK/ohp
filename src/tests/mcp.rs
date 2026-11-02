@@ -146,6 +146,48 @@ fn the_running_ohps_status_is_read_from_its_lines() {
             pages: 9,
             view: "grid".into(),
             presenting: true,
+            ..Status::default()
         }
     );
+}
+
+#[test]
+fn a_page_that_is_not_a_whole_number_is_refused_not_guessed() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = fixture::write(dir.path(), 3);
+    let path = pdf.to_str().unwrap();
+    let mut server = Server::default();
+    for page in [json!("3"), json!(3.5), json!(-1)] {
+        let wrote = call(
+            &mut server,
+            "notes",
+            json!({"path": path, "page": page, "text": "x"}),
+        );
+        assert_eq!(wrote["isError"], true, "{page}");
+        assert!(said(&wrote).contains("whole number"), "{}", said(&wrote));
+        let seen = call(&mut server, "render", json!({"path": path, "page": page}));
+        assert_eq!(seen["isError"], true, "{page}");
+    }
+    assert!(
+        !dir.path().join("deck.md").exists(),
+        "no notes were written"
+    );
+}
+
+#[test]
+fn r_chunks_are_not_run_reading_a_file_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let ran = dir.path().join("ran");
+    let rmd = fixture::write_text(
+        dir.path(),
+        "talk.Rmd",
+        &format!(
+            "# Hi\n\n```{{r}}\nfile.create({:?})\n```\n",
+            ran.to_str().unwrap()
+        ),
+    );
+    let mut server = Server::default();
+    let text = call(&mut server, "text", json!({"path": rmd.to_str().unwrap()}));
+    assert_eq!(text["isError"], false, "{text}");
+    assert!(!ran.exists(), "the chunk ran");
 }

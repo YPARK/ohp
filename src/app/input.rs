@@ -60,9 +60,13 @@ impl App {
             MouseEventKind::ScrollUp => self.key(KeyCode::Up.into()),
             // The laser, while the mouse is held on the slide, or as it moves
             // over it, with `L`.
-            MouseEventKind::Drag(MouseButton::Left) if self.stage_view() => self.point(at),
+            MouseEventKind::Drag(MouseButton::Left) if self.stage_view() && !self.signing() => {
+                self.point(at)
+            }
             MouseEventKind::Moved if self.stage_view() && self.hover => self.point(at),
-            MouseEventKind::Up(MouseButton::Left) if self.stage_view() && !self.hover => {
+            MouseEventKind::Up(MouseButton::Left)
+                if self.stage_view() && !self.hover && !self.signing() =>
+            {
                 self.laser = None;
                 self.dirty = true;
             }
@@ -88,7 +92,9 @@ impl App {
                 self.dirty = true;
             }
             MouseEventKind::Down(MouseButton::Left) => match self.view {
-                View::Present if self.stage_view() && !self.speaker.reading() => {
+                View::Present
+                    if self.stage_view() && !self.speaker.reading() && !self.signing() =>
+                {
                     if self.stage_click(at) {
                         self.notice = None;
                         self.dirty = true;
@@ -214,8 +220,10 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         // C-x C-c quits, as in Emacs: no one key ends a talk by mistake.
         if std::mem::take(&mut self.prefix) {
+            // Notes being written are saved first; if they cannot be, ohp
+            // stays, and says so.
             if ctrl && key.code == KeyCode::Char('c') {
-                self.quit = true;
+                self.quit = self.finish_writing();
             } else if !(ctrl && key.code == KeyCode::Char('g')) {
                 self.notice = Some("C-x C-c quits".into());
             }
@@ -242,7 +250,8 @@ impl App {
         // the grid goes back to the slide shown; a search, back to where it
         // began; else as esc does, closing a list or a form.
         if ctrl && key.code == KeyCode::Char('g') && self.search.is_none() {
-            if self.presenting() && self.view == View::Grid {
+            // A list open over the grid is closed first.
+            if self.presenting() && self.view == View::Grid && !self.listing() {
                 self.cur = self.live;
                 self.view = View::Present;
                 self.dirty = true;
@@ -263,6 +272,7 @@ impl App {
                 }
                 browse::Outcome::Open(paths) => {
                     self.browser = None;
+                    self.landing = None;
                     self.open(self.added_first(paths));
                 }
                 browse::Outcome::Quit => {

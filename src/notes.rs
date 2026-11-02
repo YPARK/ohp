@@ -136,9 +136,21 @@ pub fn rewrite(text: &str, page: usize, note: &str) -> String {
 /// Notes files beside a deck's files, read again whenever one changes.
 #[derive(Default)]
 pub struct Beside {
-    /// For each of the deck's files: its notes file, if any, when it last
-    /// changed, and the deck's page the file begins on.
-    files: Vec<(Option<PathBuf>, Stamp, usize)>,
+    /// For each of the deck's files: its notes file, if any, when each
+    /// file it may be last changed, and the deck's page the file begins on.
+    files: Vec<(Option<PathBuf>, Vec<Stamp>, usize)>,
+}
+
+/// When each file that may be `path`'s notes last changed: only when one
+/// has is any read, to see which is its notes.
+fn stamps(path: &Path) -> Vec<Stamp> {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let dir = path.parent().unwrap_or(Path::new(""));
+    same_name(path)
+        .into_iter()
+        .chain(ENDINGS.iter().map(|end| dir.join(format!("{stem}.{end}"))))
+        .map(|p| render::stamp(&p))
+        .collect()
 }
 
 impl Beside {
@@ -147,11 +159,7 @@ impl Beside {
         let files = paths
             .iter()
             .zip(starts)
-            .map(|(path, &start)| {
-                let notes = beside(path);
-                let stamp = notes.as_deref().and_then(render::stamp);
-                (notes, stamp, start)
-            })
+            .map(|(path, &start)| (beside(path), stamps(path), start))
             .collect();
         Beside { files }
     }
@@ -159,11 +167,10 @@ impl Beside {
     /// Whether a notes file has been written, made or removed since read.
     pub fn changed(&mut self, paths: &[PathBuf]) -> bool {
         let mut changed = false;
-        for ((notes, stamp, _), path) in self.files.iter_mut().zip(paths) {
-            let now = beside(path);
-            let now_stamp = now.as_deref().and_then(render::stamp);
-            if now != *notes || now_stamp != *stamp {
-                (*notes, *stamp) = (now, now_stamp);
+        for ((notes, at, _), path) in self.files.iter_mut().zip(paths) {
+            let now = stamps(path);
+            if now != *at {
+                (*notes, *at) = (beside(path), now);
                 changed = true;
             }
         }

@@ -87,3 +87,13 @@ fn a_note_is_shown_as_markdown() {
     let bold = lines[2].spans.iter().find(|s| s.content == "bold").unwrap();
     assert!(bold.style.add_modifier.contains(Modifier::BOLD));
 }
+
+#[test]
+fn the_cursors_row_is_found_to_scroll_to() {
+    let w = writing("one two three\nfour", 18);
+    assert_eq!(w.cursor_row(8), 2);
+    let w = writing("one two three\nfour", 2);
+    assert_eq!(w.cursor_row(8), 0);
+    let w = writing("one two three\nfour", 8);
+    assert_eq!(w.cursor_row(8), 1);
+}

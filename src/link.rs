@@ -282,72 +282,115 @@ pub fn open_terminal(args: &[OsString], title: &str) -> Result<&'static str, Str
     if var("SSH_CONNECTION").is_some() || var("SSH_TTY").is_some() || var("TMUX").is_some() {
         return Err(shell);
     }
-    let (name, mut command) = if var("KITTY_WINDOW_ID").is_some() || var("KITTY_PID").is_some() {
-        ("kitty", kitty(&args, title))
-    } else if var("GHOSTTY_RESOURCES_DIR").is_some() {
-        ("Ghostty", ghostty(&args))
-    } else if let Some(wezterm) = var("WEZTERM_EXECUTABLE") {
-        let mut c = Command::new(wezterm);
-        c.args(["cli", "spawn", "--new-window", "--"]).args(&args);
-        ("WezTerm", c)
-    } else if var("ITERM_SESSION_ID").is_some() {
-        let script = format!(
-            "tell application \"iTerm2\" to create window with default profile command \"{}\"",
-            applescript(&shell)
-        );
-        ("iTerm2", osascript(&script))
-    } else if std::env::var("TERM_PROGRAM").is_ok_and(|t| t == "Apple_Terminal") {
-        let script = format!(
-            "tell application \"Terminal\"\nactivate\ndo script \"exec {}\"\nend tell",
-            applescript(&shell)
-        );
-        ("Terminal", osascript(&script))
-    } else {
-        return Err(shell);
-    };
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    match command.spawn() {
-        Ok(mut child) => {
-            // Reaped, as it ends, by a thread of its own.
-            std::thread::spawn(move || child.wait());
-            Ok(name)
+    // Each way to open a window, tried in turn: whether it is a program
+    // that asks the terminal and ends, whose end says if it did, or the
+    // terminal itself, which goes on as the window.
+    let (name, ways): (&str, Vec<(Command, Ends)>) =
+        if var("KITTY_WINDOW_ID").is_some() || var("KITTY_PID").is_some() {
+            ("kitty", kitty(&args, title))
+        } else if var("GHOSTTY_RESOURCES_DIR").is_some() {
+            ("Ghostty", vec![ghostty(&args)])
+        } else if let Some(gui) = var("WEZTERM_EXECUTABLE") {
+            // That is the window's program; `wezterm`, beside it, asks it.
+            let cli = Path::new(&gui).with_file_name("wezterm");
+            let cli = if cli.is_file() {
+                cli.into_os_string()
+            } else {
+                "wezterm".into()
+            };
+            let mut c = Command::new(cli);
+            c.args(["cli", "spawn", "--new-window", "--"]).args(&args);
+            ("WezTerm", vec![(c, Ends::Says)])
+        } else if var("ITERM_SESSION_ID").is_some() {
+            let script = format!(
+                "tell application \"iTerm2\" to create window with default profile command \"{}\"",
+                applescript(&shell)
+            );
+            ("iTerm2", vec![(osascript(&script), Ends::Says)])
+        } else if std::env::var("TERM_PROGRAM").is_ok_and(|t| t == "Apple_Terminal") {
+            let script = format!(
+                "tell application \"Terminal\"\nactivate\ndo script \"exec {}\"\nend tell",
+                applescript(&shell)
+            );
+            ("Terminal", vec![(osascript(&script), Ends::Says)])
+        } else {
+            return Err(shell);
+        };
+    for (mut command, ends) in ways {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let Ok(mut child) = command.spawn() else {
+            continue;
+        };
+        if ends == Ends::Says {
+            // Asked, the terminal answers at once; one waiting longer, as
+            // on macOS's asking leave to be controlled, is taken at its word.
+            let until = Instant::now() + Duration::from_secs(5);
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Some(status),
+                    Ok(None) if Instant::now() < until => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    _ => break None,
+                }
+            };
+            if status.is_some_and(|s| !s.success()) {
+                continue;
+            }
         }
-        Err(_) => Err(shell),
+        // Reaped, as it ends, by a thread of its own.
+        std::thread::spawn(move || child.wait());
+        return Ok(name);
     }
+    Err(shell)
+}
+
+/// How a way to open a window ends.
+#[derive(Clone, Copy, PartialEq)]
+enum Ends {
+    /// It asks the terminal, and ends, failing if no window was opened.
+    Says,
+    /// It is the terminal, and goes on as the window.
+    Stays,
 }
 
 /// kitty: a window of this kitty's, where it lets itself be controlled,
 /// else a kitty of its own.
-fn kitty(args: &[OsString], title: &str) -> Command {
+fn kitty(args: &[OsString], title: &str) -> Vec<(Command, Ends)> {
+    let bundled = std::env::var_os("KITTY_INSTALLATION_DIR")
+        .map(|dir| Path::new(&dir).join("../../MacOS/kitty"))
+        .filter(|p| p.is_file());
+    let program = bundled.map_or_else(|| "kitty".into(), PathBuf::into_os_string);
+    let mut ways = Vec::new();
+    // Asked, where it lets itself be: a window of this kitty's. Remote
+    // control may be off, though it listens; then a kitty of its own.
     if let Some(to) = std::env::var_os("KITTY_LISTEN_ON").filter(|v| !v.is_empty()) {
-        let mut c = Command::new("kitty");
+        let mut c = Command::new(&program);
         c.arg("@")
             .arg("--to")
             .arg(to)
             .args(["launch", "--type=os-window", "--title", title])
             .args(args);
-        return c;
+        ways.push((c, Ends::Says));
     }
-    let bundled = std::env::var_os("KITTY_INSTALLATION_DIR")
-        .map(|dir| Path::new(&dir).join("../../MacOS/kitty"))
-        .filter(|p| p.is_file());
-    let mut c = Command::new(bundled.map_or_else(|| "kitty".into(), PathBuf::into_os_string));
+    let mut c = Command::new(&program);
     c.args(["--title", title]).args(args);
-    c
+    ways.push((c, Ends::Stays));
+    ways
 }
 
-fn ghostty(args: &[OsString]) -> Command {
+fn ghostty(args: &[OsString]) -> (Command, Ends) {
     if cfg!(target_os = "macos") {
         let mut c = Command::new("open");
         c.args(["-na", "Ghostty", "--args", "-e"]).args(args);
-        c
+        (c, Ends::Says)
     } else {
         let mut c = Command::new("ghostty");
         c.arg("-e").args(args);
-        c
+        (c, Ends::Stays)
     }
 }
 

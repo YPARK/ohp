@@ -26,9 +26,14 @@ pub struct Split {
     pub both: Vec<u8>,
 }
 
-/// Cut each page of `data` into its slide, on the left, and its note.
-pub fn split(data: &[u8]) -> anyhow::Result<Split> {
+/// Cut each page of `data` into its slide, on the left, and its note;
+/// none if it was not made by TeX, as beamer's are: a deck of slides
+/// 32:9 is as wide, and has no notes.
+pub fn split(data: &[u8]) -> anyhow::Result<Option<Split>> {
     let mut doc = Document::load_mem(data).context("cannot read the PDF")?;
+    if !by_tex(&doc) {
+        return Ok(None);
+    }
     let pages: Vec<ObjectId> = doc.get_pages().into_values().collect();
     let root = doc
         .catalog()?
@@ -81,7 +86,31 @@ pub fn split(data: &[u8]) -> anyhow::Result<Split> {
     kids.extend(ids.into_iter().map(Object::Reference));
     tree.set("Kids", kids);
     let both = save(&mut doc)?;
-    Ok(Split { slides, both })
+    Ok(Some(Split { slides, both }))
+}
+
+/// Whether the PDF says TeX made it, as pdfTeX, LuaTeX and XeTeX do.
+fn by_tex(doc: &Document) -> bool {
+    let Ok(info) = doc.trailer.get(b"Info") else {
+        return false;
+    };
+    let info = match info {
+        Object::Reference(id) => doc.get_dictionary(*id).ok(),
+        Object::Dictionary(d) => Some(d),
+        _ => None,
+    };
+    let Some(info) = info else {
+        return false;
+    };
+    [b"Producer".as_slice(), b"Creator"].iter().any(|key| {
+        info.get(key)
+            .ok()
+            .and_then(|v| v.as_str().ok())
+            .is_some_and(|v| {
+                let v = String::from_utf8_lossy(v).to_lowercase();
+                v.contains("tex") || v.contains("beamer")
+            })
+    })
 }
 
 fn save(doc: &mut Document) -> anyhow::Result<Vec<u8>> {

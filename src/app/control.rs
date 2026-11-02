@@ -39,6 +39,12 @@ impl App {
                 };
                 out.push(format!("view {view}"));
                 out.push(format!("presenting {}", u8::from(self.presenting())));
+                let options = &self.deck.options;
+                if let Some(paper) = &options.paper {
+                    out.push(format!("paper {paper}"));
+                }
+                out.push(format!("knit {}", u8::from(options.knit)));
+                out.push(format!("screen {}", u8::from(options.screen)));
                 out
             }
             Request::Goto(n) if n < self.deck.pages => {

@@ -442,6 +442,8 @@ struct App {
     control: Option<crate::control::Listener>,
     /// The slide to show once the file being opened is read.
     landing: Option<usize>,
+    /// When the notes files beside the deck's were last looked at.
+    notes_looked: Instant,
     /// Speaker notes, by page.
     notes: crate::notes::Notes,
     /// The deck's pages cut into slides and beamer's notes, the notes
@@ -526,6 +528,7 @@ impl App {
             hover: false,
             control: None,
             landing: None,
+            notes_looked: Instant::now(),
             notes: crate::notes::Notes::new(),
             note_pages: false,
             beside: crate::notes::Beside::default(),
@@ -822,6 +825,11 @@ impl App {
                         },
                     );
                 }
+                // The audience's window turns to the slide it was told,
+                // which may be past the end of the deck it had.
+                if self.seat.is_some() {
+                    self.cur = self.live;
+                }
                 self.cur = self.cur.min(deck.pages - 1);
                 self.summarizer.set_deck(deck.data.clone(), deck.pages);
                 self.deck = deck;
@@ -841,6 +849,8 @@ impl App {
                 }
             }
             Err(e) => {
+                // A slide asked for, of the file that could not be read.
+                self.landing = None;
                 self.notice = Some(match opening {
                     Some(paths) => format!("cannot open {}: {e:#}", render::shown(&paths)),
                     None => format!("reload failed: {e:#}"),

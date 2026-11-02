@@ -55,12 +55,32 @@ impl Request {
 /// A request, and where its answer goes, a line at a time.
 pub type Asked = (Request, Sender<Vec<String>>);
 
-/// The directory every ohp of this user listens in.
+/// The directory every ohp of this user listens in: in the user's own
+/// runtime directory where there is one, as on Linux, else in the
+/// temporary directory, the user's own on macOS.
 pub fn dir() -> PathBuf {
+    if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| Path::new(d).is_dir()) {
+        return Path::new(&run).join("ohp");
+    }
     let user = std::env::var("USER")
         .or_else(|_| std::env::var("LOGNAME"))
         .unwrap_or_else(|_| "me".into());
     std::env::temp_dir().join(format!("ohp-{user}"))
+}
+
+/// Whether `dir` is a directory of this user's that no one else may
+/// enter: one made by another, in a temporary directory all share, could
+/// listen as this user's ohp.
+fn private(dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = std::fs::symlink_metadata(dir) else {
+        return false;
+    };
+    // This user is who owns a file made now.
+    let me = tempfile::tempfile()
+        .and_then(|f| f.metadata())
+        .map(|m| m.uid());
+    meta.is_dir() && me.is_ok_and(|me| meta.uid() == me) && meta.mode() & 0o077 == 0
 }
 
 /// The running ohp's end: requests, as they come.
@@ -82,7 +102,15 @@ impl Listener {
             .mode(0o700)
             .create(dir)?;
         // Only its user may reach an ohp, which opens what it is told to.
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        if !private(dir) {
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
+        if !private(dir) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("{} is not this user's alone", dir.display()),
+            ));
+        }
         let path = dir.join(format!("{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path)?;
@@ -141,6 +169,10 @@ pub fn ask(request: &Request) -> Option<Vec<String>> {
 }
 
 pub fn ask_in(dir: &Path, request: &Request) -> Option<Vec<String>> {
+    // An ohp listening where others may is not trusted to be this user's.
+    if !private(dir) {
+        return None;
+    }
     let mut sockets: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
         .ok()?
         .flatten()

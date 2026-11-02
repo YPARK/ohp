@@ -260,8 +260,11 @@ fn strip_divs(body: &str) -> (String, Vec<String>, Vec<String>) {
                     notes + 1
                 };
                 if notes == 0 {
+                    // Where the div was, as indented: in a list item, it
+                    // stays in the item, and no blank line loosens the list.
                     let n = speaker.len() - 1;
-                    out.push_str(&format!("\n{NOTE}{n} -->\n\n"));
+                    let indent = &line[..line.len() - line.trim_start().len()];
+                    out.push_str(&format!("{indent}{NOTE}{n} -->\n"));
                 }
             } else if attrs == "notes" || attrs.contains(".notes") {
                 notes = 1;
@@ -327,7 +330,11 @@ fn slide_level(events: &[Event]) -> Option<u8> {
         let next = events.get(i + 1);
         let content = match next {
             None | Some(Event::Start(Tag::Heading { .. }) | Event::Rule) => false,
-            Some(Event::Html(html)) if note_mark(html).is_some() => false,
+            // A speaker note's mark, in the HTML block pulldown-cmark makes
+            // of it, is not on the slide.
+            Some(Event::Start(Tag::HtmlBlock)) if matches!(events.get(i + 2), Some(Event::Html(html)) if note_mark(html).is_some()) => {
+                false
+            }
             Some(_) => true,
         };
         if content {
@@ -637,9 +644,9 @@ impl Writer<'_, '_> {
             },
             Event::Html(html) if html.trim() == REFS => self.bibliography(),
             Event::Html(html) if note_mark(html).is_some() => {
+                // Inline, so it neither breaks a list nor begins a line.
                 let n = note_mark(html).unwrap_or_default();
-                self.block();
-                self.raw(&format!("#metadata({n}) <{NOTE_LABEL}>\n"));
+                self.raw(&format!("#metadata({n})<{NOTE_LABEL}>"));
             }
             Event::InlineHtml(html) | Event::Html(html) => {
                 let tag = html.trim().to_ascii_lowercase();

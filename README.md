@@ -162,7 +162,8 @@ clipboard. Keys pressed in either window turn the slides in both.
 | `b`, `.` | black out the audience's screen, or show it again |
 | `T` | pause the time, or go on |
 | `Z` | start the time again from nought (zero), as a double click on it does |
-| `w` | end: the audience's window closes; with it closed, `w` opens it again |
+| `w` | end presenting: the audience's window closes |
+| `W` | open the audience's window again, as after it was closed, lit red on the tools while there is none |
 
 Notes come from three places, and are shown together, as markdown:
 bold, italics, code, lists and quotes as such.
@@ -211,8 +212,9 @@ itself, PDF, markdown or the rest:
 | `notes` | read a slide's speaker notes, or write them into the notes file presenter view shows |
 
 `slides`, `text`, `render` and `notes` take a `path`, and read the file
-themselves, so they work with no ohp running; without one, they read the
-deck on screen. Each running ohp listens on a socket of its own, in a
+themselves, so they work with no ohp running, running no code in it: R
+Markdown's chunks are shown, not knitted. Without a `path`, they read the
+deck on screen, as the ohp showing it reads it. Each running ohp listens on a socket of its own, in a
 directory only you can enter, and `ohp mcp` speaks to the one started
 last. Add it to a client as any stdio server:
 

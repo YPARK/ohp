@@ -121,9 +121,13 @@ impl App {
     /// if it was closed; or, with it open, stop.
     pub(super) fn toggle_stage(&mut self) {
         match &self.stage {
-            Some(stage) if stage.peer.is_some() => {
+            Some(_) => {
                 self.stage = None;
                 self.black = false;
+                self.laser = None;
+                if self.hover {
+                    self.toggle_hover();
+                }
                 // Its pages whole again, notes and all.
                 if self.note_pages {
                     self.note_pages = false;
@@ -131,7 +135,6 @@ impl App {
                 }
                 self.notice = Some("presenting to one window again".into());
             }
-            Some(_) => self.open_audience(),
             None => match Stage::new() {
                 Ok(stage) => {
                     self.stage = Some(stage);
@@ -150,7 +153,8 @@ impl App {
         self.forget();
     }
 
-    fn open_audience(&mut self) {
+    /// `W`: open the audience's window, again.
+    pub(super) fn open_audience(&mut self) {
         let Some(stage) = &self.stage else {
             return;
         };
@@ -174,6 +178,8 @@ impl App {
         self.note_pages = false;
         if self.stage.is_some() {
             let audience = self.cut_notes();
+            // The slide told again, after the deck it is of.
+            self.told = None;
             if let Some(stage) = &self.stage
                 && let Err(e) = stage.write(&audience)
             {
@@ -192,10 +198,11 @@ impl App {
             return self.deck.data.clone();
         }
         match crate::split::split(&self.deck.data) {
-            Ok(cut) => {
+            Ok(Some(cut)) => {
                 self.show_notes(cut.both);
                 Arc::new(cut.slides)
             }
+            Ok(None) => self.deck.data.clone(),
             Err(e) => {
                 self.notice = Some(format!("cannot cut the notes off the slides: {e:#}"));
                 self.deck.data.clone()
@@ -254,7 +261,12 @@ impl App {
             let mut quit = false;
             for said in seat.link.peer.heard() {
                 match said {
-                    Said::Page(n) => self.cur = n.min(self.deck.pages - 1),
+                    // Kept as told, as it may be past the end of the deck
+                    // until the deck it is of is read.
+                    Said::Page(n) => {
+                        self.live = n;
+                        self.cur = n.min(self.deck.pages - 1);
+                    }
                     Said::Black(on) => self.black = on,
                     Said::Laser(at) => self.laser = at,
                     Said::Bye => quit = true,
@@ -331,11 +343,15 @@ impl App {
                 self.dirty = true;
             }
         }
-        // Each second, the clock is drawn again, and the notes files looked at.
+        // Each second, the clock is drawn again, and the notes files
+        // looked at, paused or not.
         let second = self.clock.elapsed().as_secs();
         if self.ticked != second {
             self.ticked = second;
             self.dirty |= self.stage_view();
+        }
+        if self.notes_looked.elapsed() >= Duration::from_secs(1) {
+            self.notes_looked = Instant::now();
             if self.beside.changed(&self.deck.paths) {
                 self.read_notes();
             }
@@ -400,17 +416,28 @@ impl App {
     }
 
     /// Save the notes being written, and stop writing.
-    fn finish_writing(&mut self) {
+    /// Save the notes being written, and stop writing; if they cannot be
+    /// saved, go on writing them, and say so. True if saved, or none were
+    /// being written.
+    pub(super) fn finish_writing(&mut self) -> bool {
         let Some(writing) = self.writing.take() else {
-            return;
+            return true;
         };
-        let saved = notes::save(&writing.file, writing.page, &writing.text);
         let name = writing.file.display().to_string();
-        self.notice = Some(match saved {
-            Ok(()) => format!("notes saved to {name}"),
-            Err(e) => format!("cannot save the notes to {name}: {e}"),
-        });
-        self.read_notes();
+        match notes::save(&writing.file, writing.page, &writing.text) {
+            Ok(()) => {
+                self.notice = Some(format!("notes saved to {name}"));
+                self.read_notes();
+                true
+            }
+            Err(e) => {
+                self.notice = Some(format!(
+                    "cannot save the notes to {name}: {e} · C-g drops them"
+                ));
+                self.writing = Some(writing);
+                false
+            }
+        }
     }
 
     /// A click while writing notes: in them, the cursor goes there;
@@ -421,7 +448,9 @@ impl App {
             Some(writing) if inner.contains(at) => {
                 writing.click(at.x - inner.x, at.y - inner.y, inner.width);
             }
-            Some(_) => self.finish_writing(),
+            Some(_) => {
+                self.finish_writing();
+            }
             None => {}
         }
     }
@@ -438,7 +467,9 @@ impl App {
                 self.writing = None;
                 self.notice = Some("notes left as they were".into());
             }
-            KeyCode::Esc => self.finish_writing(),
+            KeyCode::Esc => {
+                self.finish_writing();
+            }
             KeyCode::Char('a') if ctrl => writing.home(),
             KeyCode::Char('e') if ctrl => writing.end(),
             KeyCode::Char('b') if ctrl => writing.left(),
@@ -468,18 +499,21 @@ impl App {
 
     /// Timer and screen keys while presenting; true if the key was one.
     pub(super) fn stage_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
-        use ratatui::crossterm::event::KeyCode;
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
         if !self.presenting() {
             return false;
         }
         match key.code {
             KeyCode::Char('b' | '.') => self.black = !self.black,
-            KeyCode::Char('A' | 'P') if self.note_pages => {
-                self.notice = Some(
-                    "the notes are cut off the slides: w ends presenting, to print or annotate"
-                        .into(),
-                );
+            // Annotating and printing want the slide alone on the screen,
+            // and the deck as it is, not cut from its notes.
+            KeyCode::Char('A' | 'P') => {
+                self.notice = Some("w ends presenting, to print or annotate".into());
             }
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.notice = Some("w ends presenting, to print or annotate".into());
+            }
+            KeyCode::Char('W') => self.open_audience(),
             KeyCode::Char('T') => self.clock.pause(),
             KeyCode::Char('N') if self.stage_view() => self.begin_writing(),
             KeyCode::Char('Z') => self.clock.reset(),
@@ -666,16 +700,20 @@ impl App {
     /// The tools along the top, and where each is, as many as fit.
     pub(super) fn tools(&self, boxes: &Boxes) -> Vec<(Tool, Rect)> {
         let bar = boxes.bar;
+        // How to quit is kept, at the right end, whatever else fits.
+        let quit = Tool::Quit.width().min(bar.width);
+        let end = bar.right() - quit;
         let mut x = bar.x;
         let mut out = Vec::new();
-        for tool in Tool::ALL {
+        for tool in Tool::ALL.into_iter().filter(|&t| t != Tool::Quit) {
             let width = tool.width();
-            if x + width > bar.right() {
+            if x + width > end {
                 break;
             }
             out.push((tool, Rect::new(x, bar.y, width, 1)));
             x += width + 1;
         }
+        out.push((Tool::Quit, Rect::new(end, bar.y, quit, 1)));
         out
     }
 
@@ -690,6 +728,7 @@ impl App {
             Tool::Pause => self.clock.pause(),
             Tool::Restart => self.clock.reset(),
             Tool::Grid => self.view = View::Grid,
+            Tool::Window => self.open_audience(),
             Tool::End => self.toggle_stage(),
             Tool::Quit => self.notice = Some("C-x C-c quits: press C-x, then C-c".into()),
         }
@@ -702,6 +741,10 @@ impl App {
             Tool::Black if self.black => Some(Color::Red),
             Tool::Laser if self.hover || self.laser.is_some() => Some(Color::Red),
             Tool::Pause if self.clock.paused() => Some(Color::Yellow),
+            // No window for the audience: the way to open it, lit.
+            Tool::Window if self.stage.as_ref().is_some_and(|s| s.peer.is_none()) => {
+                Some(Color::Red)
+            }
             Tool::Notes if self.writing.is_some() => Some(Color::Yellow),
             _ => None,
         }
@@ -753,7 +796,7 @@ impl App {
         };
         let audience = match self.stage.as_ref().map(|s| s.peer.is_some()) {
             Some(true) => Span::styled("  audience ●", Style::new().fg(Color::Green)),
-            _ => Span::styled("  no audience window (w)", red),
+            _ => Span::styled("  no audience window: W opens it", red),
         };
         let line = Line::from(vec![
             Span::styled(format!(" {face}"), face_style),
@@ -795,7 +838,14 @@ impl App {
                 .title_bottom(Span::styled(" esc saves · C-g drops ", dim));
             let inner = block.inner(boxes.notes);
             f.render_widget(block, boxes.notes);
-            f.render_widget(Paragraph::new(writing.lines(inner.width)), inner);
+            // Scrolled, so the cursor's row is in the box.
+            let row = writing.cursor_row(inner.width);
+            let scroll = row.saturating_sub(usize::from(inner.height.saturating_sub(1)));
+            let scroll = u16::try_from(scroll).unwrap_or(u16::MAX);
+            f.render_widget(
+                Paragraph::new(writing.lines(inner.width)).scroll((scroll, 0)),
+                inner,
+            );
             return self.draw_strip_and_current(f, &boxes);
         }
         let block = Block::bordered()
@@ -892,6 +942,15 @@ impl App {
         let Some(seat) = &self.seat else {
             return;
         };
+        if let Some(notice) = &self.notice {
+            let width = (notice.chars().count() as u16 + 2).min(area.width);
+            let at = Rect::new(area.x, area.bottom().saturating_sub(1), width, 1);
+            f.render_widget(Clear, at);
+            f.render_widget(
+                Paragraph::new(format!(" {notice} ")).style(Style::new().fg(Color::Yellow)),
+                at,
+            );
+        }
         if seat.hint.elapsed() < HINT {
             let text = "ohp, the audience's window · drag it to the projector and make it full screen · keys here turn the slides too · C-x C-c closes it";
             let width = (text.chars().count() as u16 + 4).min(area.width);
@@ -1080,6 +1139,19 @@ impl Writing {
 
     /// The text as rows `width` wide, the cursor shown on the char it is
     /// before.
+    /// The row, of those `width` wide, the cursor is on.
+    pub(super) fn cursor_row(&self, width: u16) -> usize {
+        let chars = self.chars();
+        let rows = self.rows(width);
+        let last = rows.len() - 1;
+        rows.iter()
+            .position(|row| {
+                let ends_line = row.end == chars.len() || chars[row.end] == '\n';
+                row.contains(&self.at) || (self.at == row.end && ends_line)
+            })
+            .unwrap_or(last)
+    }
+
     pub(super) fn lines(&self, width: u16) -> Vec<Line<'static>> {
         let cursor = Style::new().add_modifier(Modifier::REVERSED);
         let chars = self.chars();
@@ -1274,12 +1346,13 @@ pub(super) enum Tool {
     Pause,
     Restart,
     Grid,
+    Window,
     End,
     Quit,
 }
 
 impl Tool {
-    const ALL: [Tool; 10] = [
+    const ALL: [Tool; 11] = [
         Tool::Prev,
         Tool::Next,
         Tool::Laser,
@@ -1288,6 +1361,7 @@ impl Tool {
         Tool::Pause,
         Tool::Restart,
         Tool::Grid,
+        Tool::Window,
         Tool::End,
         Tool::Quit,
     ];
@@ -1303,6 +1377,7 @@ impl Tool {
             Tool::Pause => ("T", "⏸", "pause"),
             Tool::Restart => ("Z", "↺", "restart"),
             Tool::Grid => ("g", "▦", "pick"),
+            Tool::Window => ("W", "⧉", "window"),
             Tool::End => ("w", "✕", "end"),
             Tool::Quit => ("C-x C-c", "⏻", "quit"),
         }

@@ -39,3 +39,20 @@ fn the_running_ohp_answers_what_it_is_asked() {
         "its socket is gone with it"
     );
 }
+
+#[test]
+fn a_directory_others_may_enter_is_neither_listened_in_nor_asked() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let shared = dir.path().join("ohp");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    // This user's own, it is made private before it is listened in.
+    let listener = Listener::in_dir(&shared).unwrap();
+    assert!(private(&shared));
+    drop(listener);
+    // Opened up again, as another could, nothing in it is asked.
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    std::os::unix::net::UnixListener::bind(shared.join("1.sock")).unwrap();
+    assert_eq!(ask_in(&shared, &Request::Status), None);
+}

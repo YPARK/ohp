@@ -58,6 +58,10 @@ pub struct Status {
     pub pages: usize,
     pub view: String,
     pub presenting: bool,
+    /// How the running ohp reads the deck, so it is read here alike.
+    pub paper: Option<String>,
+    pub knit: bool,
+    pub screen: bool,
 }
 
 impl Status {
@@ -71,6 +75,9 @@ impl Status {
                 "pages" => status.pages = rest.parse().unwrap_or(0),
                 "view" => status.view = rest.into(),
                 "presenting" => status.presenting = rest == "1",
+                "paper" => status.paper = Some(rest.into()),
+                "knit" => status.knit = rest == "1",
+                "screen" => status.screen = rest == "1",
                 _ => {}
             }
         }
@@ -78,9 +85,22 @@ impl Status {
     }
 }
 
-/// What the ohp running here shows, if one is.
+/// What the ohp running here shows, if one is, and answers.
 fn running() -> Option<Status> {
-    control::ask(&Request::Status).map(|lines| Status::parse(&lines))
+    control::ask(&Request::Status)
+        .map(|lines| Status::parse(&lines))
+        .filter(|s| !s.files.is_empty())
+}
+
+/// `args`' whole number `key`, if given; an error if it is anything else.
+fn number(args: &Value, key: &str) -> Result<Option<u64>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("`{key}` must be a whole number, not {v}")),
+    }
 }
 
 #[derive(Default)]
@@ -143,12 +163,28 @@ impl Server {
 
     /// The deck in `path`, else the one the running ohp shows.
     fn deck(&mut self, args: &Value) -> Result<Arc<Deck>, String> {
-        let paths = match args.get("path").and_then(Value::as_str) {
-            Some(path) => vec![resolve(path)?],
+        // A file named is read with no code run: its R chunks are shown,
+        // not knitted. The deck on screen is read as the ohp showing it
+        // reads it, so its pages are the ones on screen.
+        let (paths, options) = match args.get("path").and_then(Value::as_str) {
+            Some(path) => (
+                vec![resolve(path)?],
+                Options {
+                    knit: false,
+                    ..Options::default()
+                },
+            ),
             None => {
-                let shown = running()
-                    .ok_or("no ohp is running here: name the file with `path`, or `open` one")?;
-                shown.files
+                let shown = running().ok_or(
+                    "no ohp is running here, or it does not answer: name the file with `path`, or `open` one",
+                )?;
+                let options = Options {
+                    paper: shown.paper.clone(),
+                    knit: shown.knit,
+                    screen: shown.screen,
+                    ..Options::default()
+                };
+                (shown.files, options)
             }
         };
         let stamps: Vec<Stamp> = paths.iter().map(|p| render::stamp(p)).collect();
@@ -159,7 +195,7 @@ impl Server {
             return Ok(deck.clone());
         }
         let deck = Arc::new(
-            Deck::open_with(&paths, Options::default())
+            Deck::open_with(&paths, options)
                 .map_err(|e| format!("cannot read {}: {e:#}", render::shown(&paths)))?,
         );
         self.kept = Some((paths, stamps, deck.clone()));
@@ -169,7 +205,7 @@ impl Server {
     /// The page, from 0, `args` name from 1; else the running ohp's, where
     /// it shows the deck asked about; else the first.
     fn page(&mut self, args: &Value, deck: &Deck) -> Result<usize, String> {
-        let page = match args.get("page").and_then(Value::as_u64) {
+        let page = match number(args, "page")? {
             Some(n) => (n as usize)
                 .checked_sub(1)
                 .ok_or("pages are counted from 1")?,
@@ -189,7 +225,7 @@ impl Server {
 
     fn goto(&mut self, args: &Value) -> Result<String, String> {
         let shown = running().ok_or("no ohp is running here: `open` a file first")?;
-        let page = match (args.get("page").and_then(Value::as_u64), args.get("title")) {
+        let page = match (number(args, "page")?, args.get("title")) {
             (Some(n), _) => (n as usize)
                 .checked_sub(1)
                 .ok_or("slides are counted from 1")?,
@@ -247,7 +283,7 @@ impl Server {
 
     fn text(&mut self, args: &Value) -> Result<String, String> {
         let deck = self.deck(args)?;
-        let pages: Vec<usize> = match args.get("page").and_then(Value::as_u64) {
+        let pages: Vec<usize> = match number(args, "page")? {
             Some(_) => vec![self.page(args, &deck)?],
             None => (0..deck.pages).collect(),
         };
@@ -273,11 +309,7 @@ impl Server {
     fn render(&mut self, args: &Value) -> Result<Vec<Value>, String> {
         let deck = self.deck(args)?;
         let page = self.page(args, &deck)?;
-        let width = args
-            .get("width")
-            .and_then(Value::as_u64)
-            .unwrap_or(1200)
-            .clamp(100, 4000) as u32;
+        let width = number(args, "width")?.unwrap_or(1200).clamp(100, 4000) as u32;
         let png = render::png(deck.data.clone(), page, width).map_err(|e| format!("{e:#}"))?;
         let data = base64::engine::general_purpose::STANDARD.encode(png);
         Ok(vec![
@@ -294,7 +326,7 @@ impl Server {
     fn notes(&mut self, args: &Value) -> Result<String, String> {
         let deck = self.deck(args)?;
         if let Some(text) = args.get("text").and_then(Value::as_str) {
-            if args.get("page").is_none() {
+            if number(args, "page")?.is_none() {
                 return Err("say which slide's notes to write: `page`, from 1".into());
             }
             let page = self.page(args, &deck)?;
@@ -310,7 +342,7 @@ impl Server {
             ));
         }
         let all = all_notes(&deck);
-        if args.get("page").is_some() {
+        if number(args, "page")?.is_some() {
             let page = self.page(args, &deck)?;
             return Ok(all
                 .get(&page)
@@ -352,7 +384,7 @@ fn open(args: &Value) -> Result<String, String> {
         .and_then(Value::as_str)
         .ok_or("say which file to `open`: `path`")?;
     let path = resolve(path)?;
-    let page = match args.get("page").and_then(Value::as_u64) {
+    let page = match number(args, "page")? {
         Some(n) => (n as usize)
             .checked_sub(1)
             .ok_or("slides are counted from 1")?,
@@ -420,7 +452,7 @@ fn all_notes(deck: &Deck) -> notes::Notes {
 fn tools() -> Value {
     let page =
         json!({"type": "integer", "minimum": 1, "description": "Slide or page number, from 1."});
-    let path = json!({"type": "string", "description": "A PDF, markdown, R Markdown, HTML or image file. Without it, the deck the running ohp shows."});
+    let path = json!({"type": "string", "description": "A PDF, markdown, R Markdown, HTML or image file, read with no code in it run: R Markdown's chunks are shown, not knitted. Without it, the deck the running ohp shows, as it shows it."});
     let read_only = json!({"readOnlyHint": true, "openWorldHint": false});
     json!([
         {

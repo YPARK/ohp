@@ -3,8 +3,20 @@ use crate::fixture::{FRAME, pdf};
 use hayro::hayro_syntax::Pdf;
 use std::sync::Arc;
 
-/// A PDF of `pages` pages each a 16:9 slide with its note beside it.
+/// A PDF of `pages` pages each a 16:9 slide with its note beside it, as
+/// pdfTeX makes them.
 fn noted_pdf(pages: usize) -> Vec<u8> {
+    let text = String::from_utf8(wide_pdf(pages)).unwrap();
+    // After the offsets, so they hold.
+    text.replace(
+        "/Root 1 0 R >>",
+        "/Root 1 0 R /Info << /Producer (pdfTeX-1.40.26) >> >>",
+    )
+    .into_bytes()
+}
+
+/// A PDF of `pages` pages each as wide, made by something else.
+fn wide_pdf(pages: usize) -> Vec<u8> {
     let (w, h) = FRAME;
     let text = String::from_utf8(pdf(pages)).unwrap();
     let wide = text.replace(
@@ -35,7 +47,7 @@ fn each_page_is_cut_into_its_slide_and_its_note() {
     let (w, h) = FRAME;
     let data = noted_pdf(3);
     assert!(noted(&sizes(data.clone())));
-    let cut = split(&data).unwrap();
+    let cut = split(&data).unwrap().unwrap();
     let close = |(a, b): (f32, f32)| (a - w).abs() < 0.1 && (b - h).abs() < 0.1;
     let slides = sizes(cut.slides);
     assert_eq!(slides.len(), 3);
@@ -43,4 +55,11 @@ fn each_page_is_cut_into_its_slide_and_its_note() {
     let both = sizes(cut.both);
     assert_eq!(both.len(), 6);
     assert!(both.iter().copied().all(close), "{both:?}");
+}
+
+#[test]
+fn a_wide_deck_not_made_by_tex_is_not_cut() {
+    let data = wide_pdf(2);
+    assert!(noted(&sizes(data.clone())), "as wide as a noted deck");
+    assert!(split(&data).unwrap().is_none());
 }
