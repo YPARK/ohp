@@ -15,9 +15,10 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// Which sides of the paper are printed on.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Sides {
     /// As the printer is set to.
+    #[default]
     Printer,
     One,
     Two,
@@ -25,12 +26,22 @@ pub enum Sides {
 
 impl Sides {
     pub const ALL: [Sides; 3] = [Sides::Printer, Sides::One, Sides::Two];
+
+    /// As it is kept: `printer`, `one`, `two`.
+    fn word(self) -> &'static str {
+        match self {
+            Sides::Printer => "printer",
+            Sides::One => "one",
+            Sides::Two => "two",
+        }
+    }
 }
 
 /// How a page is made the paper's size.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Scale {
     /// As it is if it fits the paper, else shrunk to fit: CUPS's own.
+    #[default]
     Auto,
     /// Made as large as the paper takes.
     Fit,
@@ -40,6 +51,80 @@ pub enum Scale {
 
 impl Scale {
     pub const ALL: [Scale; 3] = [Scale::Auto, Scale::Fit, Scale::Actual];
+
+    /// As it is kept: `auto`, `fit`, `actual`.
+    fn word(self) -> &'static str {
+        match self {
+            Scale::Auto => "auto",
+            Scale::Fit => "fit",
+            Scale::Actual => "actual",
+        }
+    }
+}
+
+/// What printing keeps from one print to the next: the printer, the
+/// sides and the scale, not the pages or copies, which are the
+/// document's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Kept {
+    /// The printer, by its CUPS name; the default if `None`.
+    pub printer: Option<String>,
+    pub sides: Sides,
+    pub scale: Scale,
+}
+
+/// The file in ohp's config folder `Kept` is kept in.
+const KEPT: &str = "print";
+
+impl Kept {
+    /// As `text` writes it, a setting a line, `sides two`; what is not
+    /// known passed over.
+    pub fn read(text: &str) -> Kept {
+        let mut kept = Kept::default();
+        for (key, value) in text.lines().filter_map(|l| l.trim().split_once(' ')) {
+            let value = value.trim();
+            match key {
+                "printer" if !value.is_empty() => kept.printer = Some(value.to_string()),
+                "sides" => {
+                    let sides = Sides::ALL.into_iter().find(|s| s.word() == value);
+                    kept.sides = sides.unwrap_or(kept.sides);
+                }
+                "scale" => {
+                    let scale = Scale::ALL.into_iter().find(|s| s.word() == value);
+                    kept.scale = scale.unwrap_or(kept.scale);
+                }
+                _ => {}
+            }
+        }
+        kept
+    }
+
+    /// As it is kept, a setting a line.
+    pub fn text(&self) -> String {
+        let mut text = String::new();
+        if let Some(printer) = &self.printer {
+            text.push_str(&format!("printer {printer}\n"));
+        }
+        text.push_str(&format!("sides {}\n", self.sides.word()));
+        text.push_str(&format!("scale {}\n", self.scale.word()));
+        text
+    }
+}
+
+/// What printing kept in `config`, ohp's config folder: as it is first
+/// if nothing is, or there is no folder.
+pub fn kept(config: Option<&Path>) -> Kept {
+    let text = config.and_then(|dir| std::fs::read_to_string(dir.join(KEPT)).ok());
+    text.map_or_else(Kept::default, |text| Kept::read(&text))
+}
+
+/// Keep `kept` in `config`, ohp's config folder, made if it is not there;
+/// nowhere if there is no folder.
+pub fn keep(config: Option<&Path>, kept: &Kept) -> std::io::Result<()> {
+    let Some(dir) = config else {
+        return Ok(());
+    };
+    crate::write(&dir.join(KEPT), kept.text().as_bytes())
 }
 
 /// What to print, and how.
@@ -52,6 +137,10 @@ pub struct Job {
     pub pages: Option<String>,
     pub sides: Sides,
     pub scale: Scale,
+    /// The paper, as CUPS names it, `Letter`: what the printer is set to,
+    /// so it is not left to take the PDF's own page size, which, odd, it
+    /// may not print two-sided; the printer's own if `None`.
+    pub media: Option<String>,
     /// Its pages are wider than tall, as slides: printed across the sheet,
     /// so turned on its short edge, two-sided.
     pub wide: bool,
@@ -66,8 +155,9 @@ impl Job {
             printer: None,
             copies: 1,
             pages: None,
-            sides: Sides::Printer,
-            scale: Scale::Auto,
+            sides: Sides::default(),
+            scale: Scale::default(),
+            media: None,
             wide: false,
             title: title.to_string(),
         }
@@ -160,6 +250,14 @@ pub struct Printers {
     pub default: bool,
 }
 
+impl Printers {
+    /// Which is `wanted`, if it is listed; else the first.
+    pub fn pick(&self, wanted: Option<&str>) -> usize {
+        let at = wanted.and_then(|w| self.names.iter().position(|n| n == w));
+        at.unwrap_or(0)
+    }
+}
+
 /// The printers: the queues `lpstat -p -d` lists, `queues`, the default
 /// it names first; then those `lpstat -e` lists, `found`, with no queue,
 /// as a printer found on the network.
@@ -192,19 +290,21 @@ pub fn destinations(queues: &str, found: &str) -> Printers {
 
 /// The printers here, the default first; none where CUPS is not.
 pub fn printers() -> Printers {
-    let lpstat = |flags: &[&str]| {
-        // In English, whatever the language here: macOS's heeds the
-        // locale only with SOFTWARE set.
-        Command::new("lpstat")
-            .args(flags)
-            .env("LC_ALL", "C")
-            .env("LANG", "C")
-            .env("SOFTWARE", "ohp")
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default()
-    };
-    destinations(&lpstat(&["-p", "-d"]), &lpstat(&["-e"]))
+    destinations(&cups("lpstat", &["-p", "-d"]), &cups("lpstat", &["-e"]))
+}
+
+/// What CUPS's `program`, asked `args`, says, in English whatever the
+/// language here: macOS's heed the locale only with SOFTWARE set. Nothing
+/// where it is not.
+fn cups(program: &str, args: &[&str]) -> String {
+    Command::new(program)
+        .args(args)
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .env("SOFTWARE", "ohp")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
 }
 
 /// The flags a printing program names the printer, the copies and the
@@ -251,6 +351,9 @@ pub fn args(job: &Job, flags: &Flags) -> Vec<OsString> {
         Sides::One => push("-o", "sides=one-sided"),
         Sides::Two if job.wide => push("-o", "sides=two-sided-short-edge"),
         Sides::Two => push("-o", "sides=two-sided-long-edge"),
+    }
+    if let Some(media) = &job.media {
+        push("-o", &format!("media={media}"));
     }
     match job.scale {
         Scale::Auto => {}
@@ -313,28 +416,37 @@ pub fn paper(name: &str) -> Option<(f32, f32)> {
     Some(size)
 }
 
+/// A paper, as a printer is set to it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Paper {
+    /// As CUPS names it, `Letter`.
+    pub name: String,
+    /// Wide by tall, in points, where ohp knows it.
+    pub size: Option<(f32, f32)>,
+}
+
 /// The paper `lpoptions -l` says a printer is set to: its page size marked
 /// `*`, the default.
-pub fn default_paper(options: &str) -> Option<String> {
+pub fn default_paper(options: &str) -> Option<Paper> {
     let line = options.lines().find(|l| l.starts_with("PageSize"))?;
     let (_, choices) = line.split_once(':')?;
     let marked = choices
         .split_whitespace()
         .find_map(|c| c.strip_prefix('*'))?;
-    Some(marked.to_string())
+    Some(Paper {
+        name: marked.to_string(),
+        size: paper(marked),
+    })
 }
 
-/// The name and size of the paper `printer` is set to, the default
-/// printer's if `None`; none where CUPS does not say.
-pub fn paper_of(printer: Option<&str>) -> Option<(String, (f32, f32))> {
-    let mut lpoptions = Command::new("lpoptions");
+/// The paper `printer` is set to, the default printer's if `None`; none
+/// where CUPS does not say.
+pub fn paper_of(printer: Option<&str>) -> Option<Paper> {
+    let mut args = vec!["-l"];
     if let Some(printer) = printer {
-        lpoptions.args(["-p", printer]);
+        args.extend(["-p", printer]);
     }
-    let out = lpoptions.arg("-l").env("LC_ALL", "C").output().ok()?;
-    let name = default_paper(&String::from_utf8_lossy(&out.stdout))?;
-    let size = paper(&name)?;
-    Some((name, size))
+    default_paper(&cups("lpoptions", &args))
 }
 
 /// Where a page `page` big, wide by tall in points, is printed on paper

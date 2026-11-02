@@ -10,6 +10,7 @@
 //! incremental update, its own bytes kept as they were, so a digital
 //! signature it carries stays valid.
 
+use crate::write;
 use anyhow::{Context, bail};
 use image::ImageDecoder;
 use image::imageops::FilterType;
@@ -247,8 +248,7 @@ pub fn keep_sizes(dir: Option<&Path>, sizes: &Sizes) {
         .into_iter()
         .map(|k| format!("{} {}", k.name(), sizes.of(k)))
         .collect();
-    let _ = std::fs::create_dir_all(dir)
-        .and_then(|_| write(&dir.join(SIZES), lines.join("\n").as_bytes()));
+    let _ = write(&dir.join(SIZES), lines.join("\n").as_bytes());
 }
 
 /// A signature as a picture, the paper it was on made clear and cut away,
@@ -407,18 +407,6 @@ pub fn copy_of(path: &Path, added: &str) -> PathBuf {
     path.with_file_name(format!("{stem}-{added}.pdf"))
 }
 
-/// Where ohp keeps what it is given to sign with: `$XDG_CONFIG_HOME/ohp`,
-/// else `~/.config/ohp`.
-pub fn config() -> Option<PathBuf> {
-    let var = |name| {
-        std::env::var_os(name)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    };
-    let dir = var("XDG_CONFIG_HOME").or_else(|| var("HOME").map(|home| home.join(".config")))?;
-    Some(dir.join("ohp"))
-}
-
 /// The signature kept in `dir`, as `keep` keeps it.
 const SIGNATURE: &str = "signature.png";
 /// The texts typed, kept in `dir`, one a line, the latest first.
@@ -439,7 +427,6 @@ pub fn kept(dir: Option<&Path>) -> Option<PathBuf> {
 /// where.
 pub fn keep(dir: Option<&Path>, signature: &Signature) -> anyhow::Result<PathBuf> {
     let dir = dir.context("no home to keep the signature in")?;
-    std::fs::create_dir_all(dir)?;
     let path = dir.join(SIGNATURE);
     write(&path, &signature.png()?)?;
     Ok(path)
@@ -473,8 +460,7 @@ pub fn remember(dir: Option<&Path>, text: &str) {
     all.retain(|t| t != text);
     all.insert(0, text.to_string());
     all.truncate(10);
-    let _ = std::fs::create_dir_all(dir)
-        .and_then(|_| write(&dir.join(TYPED), all.join("\n").as_bytes()));
+    let _ = write(&dir.join(TYPED), all.join("\n").as_bytes());
 }
 
 /// The initials of `name`: the first letter of each of its words.
@@ -483,15 +469,6 @@ pub fn initials(name: &str) -> String {
         .filter_map(|w| w.chars().next())
         .flat_map(char::to_uppercase)
         .collect()
-}
-
-/// Write `bytes` to `path` whole: a reader never finds it half written.
-pub fn write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
-    let mut file = tempfile::NamedTempFile::new_in(dir.unwrap_or(Path::new(".")))?;
-    std::io::Write::write_all(&mut file, bytes)?;
-    file.persist(path).map_err(|e| e.error)?;
-    Ok(())
 }
 
 /// Today, as `2026-10-31`, in the time zone here, as jiff reads it.

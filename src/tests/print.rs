@@ -61,6 +61,7 @@ fn lp_is_asked_for_what_is_picked() {
         pages: Some("3-7".into()),
         sides: Sides::Two,
         scale: Scale::Auto,
+        media: None,
         wide: false,
         title: "talk.pdf".into(),
     };
@@ -151,8 +152,22 @@ fn paper_is_read_as_cups_names_it() {
 fn the_printer_s_paper_is_its_page_size_marked_default() {
     let options = "Duplex/2-Sided Printing: None *DuplexNoTumble DuplexTumble\n\
                    PageSize/Media Size: A4 *Letter Legal\n";
-    assert_eq!(default_paper(options), Some("Letter".into()));
+    assert_eq!(
+        default_paper(options),
+        Some(Paper {
+            name: "Letter".into(),
+            size: Some((612., 792.))
+        })
+    );
     assert_eq!(default_paper("Duplex: *None\n"), None);
+    // Its size not known, its name still asked for.
+    assert_eq!(
+        default_paper("PageSize/Media Size: Letter *EnvMonarch\n"),
+        Some(Paper {
+            name: "EnvMonarch".into(),
+            size: None
+        })
+    );
 }
 
 #[test]
@@ -201,6 +216,75 @@ fn the_scale_is_sent_unless_left_to_the_printer() {
         args(&actual, &LP),
         ["-o", "print-scaling=none", "-t", "a.pdf"]
     );
+}
+
+#[test]
+fn the_paper_the_printer_is_set_to_is_asked_for() {
+    // Else the printer takes the PDF's own page size, which, odd, it may
+    // not print two-sided, or at all.
+    let job = Job {
+        sides: Sides::Two,
+        media: Some("Letter".into()),
+        ..Job::new("a.pdf")
+    };
+    assert_eq!(
+        args(&job, &LP),
+        [
+            "-o",
+            "sides=two-sided-long-edge",
+            "-o",
+            "media=Letter",
+            "-t",
+            "a.pdf"
+        ]
+    );
+}
+
+#[test]
+fn what_the_form_keeps_is_read_back_as_written() {
+    let kept = Kept {
+        printer: Some("PRINTER1".into()),
+        sides: Sides::Two,
+        scale: Scale::Fit,
+    };
+    assert_eq!(Kept::read(&kept.text()), kept);
+    assert_eq!(Kept::read(""), Kept::default());
+    // What is not known is passed over, the rest still read.
+    assert_eq!(
+        Kept::read("sides sideways\ncolour red\nscale actual\n"),
+        Kept {
+            scale: Scale::Actual,
+            ..Kept::default()
+        }
+    );
+}
+
+#[test]
+fn what_the_form_keeps_is_kept_in_the_folder_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ohp");
+    assert_eq!(kept(Some(&config)), Kept::default());
+    let picked = Kept {
+        printer: Some("PRINTER1".into()),
+        sides: Sides::One,
+        scale: Scale::Auto,
+    };
+    keep(Some(&config), &picked).unwrap();
+    assert_eq!(kept(Some(&config)), picked);
+    // With nowhere to keep it, nothing is, and nothing read.
+    keep(None, &picked).unwrap();
+    assert_eq!(kept(None), Kept::default());
+}
+
+#[test]
+fn the_printer_wanted_is_picked_if_listed_else_the_first() {
+    let printers = Printers {
+        names: vec!["PRINTER1".into(), "PRINTER2".into()],
+        default: true,
+    };
+    assert_eq!(printers.pick(Some("PRINTER2")), 1);
+    assert_eq!(printers.pick(Some("PRINTER3")), 0);
+    assert_eq!(printers.pick(None), 0);
 }
 
 #[test]

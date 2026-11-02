@@ -334,6 +334,9 @@ struct App {
     sending: Vec<Receiver<String>>,
     /// What is picked to print, while `P` is picking it.
     printing: Option<printing::Printing>,
+    /// ohp's config folder, where what is picked to sign and print with is
+    /// kept; none where there is no home.
+    config: Option<std::path::PathBuf>,
     /// How files picked with Ctrl-O are read.
     local: Options,
     /// The list another file is picked from, open over the slides.
@@ -402,6 +405,7 @@ impl App {
             #[cfg(feature = "sign")]
             signing: None,
             printing: None,
+            config: crate::config(),
             sending: Vec::new(),
             search: None,
             last_query: String::new(),

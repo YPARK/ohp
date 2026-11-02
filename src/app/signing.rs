@@ -168,7 +168,7 @@ impl App {
                 return;
             }
         };
-        let kept_in = sign::config();
+        let kept_in = self.config.clone();
         self.view = View::Present;
         self.notice = Some(match sign::kept(kept_in.as_deref()) {
             Some(_) => "click the page where your signature goes".into(),
@@ -611,7 +611,7 @@ impl App {
         };
         sign::keep_sizes(s.kept_in.as_deref(), &s.sizes);
         let pdf = sign::stamp(&s.original, &s.marks, s.signature.as_ref())?;
-        sign::write(&s.copy, &pdf)?;
+        crate::write(&s.copy, &pdf)?;
         s.wheeled = None;
         Ok(())
     }

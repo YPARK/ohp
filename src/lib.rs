@@ -57,6 +57,31 @@ pub mod voices;
 #[path = "tests/fixture.rs"]
 mod fixture;
 
+/// Where ohp keeps what it is given and what is picked, to sign and print
+/// with: `$XDG_CONFIG_HOME/ohp`, else `~/.config/ohp`.
+pub fn config() -> Option<std::path::PathBuf> {
+    let var = |name| {
+        std::env::var_os(name)
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+    };
+    let dir = var("XDG_CONFIG_HOME").or_else(|| var("HOME").map(|home| home.join(".config")))?;
+    Some(dir.join("ohp"))
+}
+
+/// Write `bytes` to `path` whole, its folder made if it is not there: a
+/// reader never finds it half written.
+pub fn write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+    if let Some(dir) = dir {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut file = tempfile::NamedTempFile::new_in(dir.unwrap_or(std::path::Path::new(".")))?;
+    std::io::Write::write_all(&mut file, bytes)?;
+    file.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
 pub mod page;
 
 /// The status a shell gives a process a signal ended.

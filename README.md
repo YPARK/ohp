@@ -452,7 +452,14 @@ beside the page asks:
 `↑` `↓` pick a row, `←` `→` change it, a click on a row picks it and
 again changes it, `enter` prints and `esc` does not. Markdown and HTML
 print as they are typeset, on their paper; a PDF being annotated prints
-as the copy with all that is put.
+as the copy with all that is put. Each job asks for the paper the
+printer is set to, so a PDF of an odd page size is laid on it, and
+printed two-sided where the printer can.
+
+The printer, sides and scale printed with are picked again next time,
+kept in `~/.config/ohp/print` (`$XDG_CONFIG_HOME/ohp` where that is
+set); a printer no longer listed gives way to
+the default. Pages and copies start afresh, as `all` and 1.
 
 While the form is open, the page is previewed as it prints: on a sheet
 of the paper the printer is set to, turned to lie as the page does, at
