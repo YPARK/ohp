@@ -287,6 +287,149 @@ fn printers_and_paper_found_off_the_screen_s_thread_are_taken_in() {
     assert_eq!(p.paper.as_ref().unwrap().name, "A4");
 }
 
+/// The printers CUPS lists, said to the form open, as if CUPS had.
+fn listed(app: &mut App, names: &[&str]) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.printing.as_mut().unwrap().lookup = Some(rx);
+    tx.send(crate::app::printing::Lookup {
+        printers: Some(crate::print::Printers {
+            names: names.iter().map(|n| n.to_string()).collect(),
+            default: true,
+        }),
+        paper: None,
+    })
+    .unwrap();
+    app.poll_printing();
+}
+
+#[test]
+fn the_printer_sides_and_scale_printed_with_are_picked_again() {
+    let (_dir, mut app) = printing();
+    // Two-sided, fit, on the second printer; three copies, of this page.
+    let keys: Vec<KeyCode> = "this"
+        .chars()
+        .map(KeyCode::Char)
+        .chain([
+            KeyCode::Down,
+            KeyCode::Right,
+            KeyCode::Right,
+            KeyCode::Down,
+            KeyCode::Right,
+            KeyCode::Right,
+            KeyCode::Down,
+            KeyCode::Right,
+            KeyCode::Down,
+            KeyCode::Right,
+            KeyCode::Enter,
+        ])
+        .collect();
+    press(&mut app, &keys);
+    sent(&mut app);
+    press(&mut app, &[KeyCode::Char('P')]);
+    listed(&mut app, &["Office", "Label"]);
+    use crate::app::printing::Row;
+    let p = app.printing.as_ref().unwrap();
+    assert_eq!(p.value(Row::Sides), "two-sided");
+    assert_eq!(p.value(Row::Scale), "fit to paper");
+    assert_eq!(p.value(Row::Printer), "Label");
+    // What is picked for one document only, not.
+    assert_eq!(p.value(Row::Pages), "[all]");
+    assert_eq!(p.value(Row::Copies), "1");
+}
+
+#[test]
+fn a_printer_kept_and_gone_gives_way_to_the_default() {
+    let (_dir, mut app) = printing();
+    press(&mut app, &[KeyCode::Up, KeyCode::Right, KeyCode::Enter]);
+    sent(&mut app);
+    press(&mut app, &[KeyCode::Char('P')]);
+    listed(&mut app, &["Office"]);
+    let p = app.printing.as_ref().unwrap();
+    assert_eq!(
+        p.value(crate::app::printing::Row::Printer),
+        "Office (default)"
+    );
+}
+
+#[test]
+fn what_is_picked_and_not_printed_is_not_kept() {
+    let (_dir, mut app) = printing();
+    press(
+        &mut app,
+        &[KeyCode::Down, KeyCode::Down, KeyCode::Right, KeyCode::Esc],
+    );
+    press(&mut app, &[KeyCode::Char('P')]);
+    let p = app.printing.as_ref().unwrap();
+    assert_eq!(
+        p.value(crate::app::printing::Row::Sides),
+        "as the printer is set"
+    );
+}
+
+#[test]
+fn the_printer_row_changed_before_cups_lists_them_still_lists_them() {
+    let (_dir, mut app) = printing();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let p = app.printing.as_mut().unwrap();
+    p.printers = crate::print::Printers::default();
+    p.lookup = Some(rx);
+    press(&mut app, &[KeyCode::Up, KeyCode::Right]);
+    let listed = tx.send(crate::app::printing::Lookup {
+        printers: Some(crate::print::Printers {
+            names: vec!["Office".into(), "Label".into()],
+            default: true,
+        }),
+        paper: None,
+    });
+    assert!(listed.is_ok(), "what CUPS is asked, still waited for");
+    app.poll_printing();
+    let p = app.printing.as_ref().unwrap();
+    assert_eq!(
+        p.value(crate::app::printing::Row::Printer),
+        "Office (default)"
+    );
+}
+
+#[test]
+fn printed_before_cups_lists_them_it_goes_to_the_printer_kept() {
+    let (dir, mut app) = printing();
+    press(&mut app, &[KeyCode::Up, KeyCode::Right, KeyCode::Enter]);
+    sent(&mut app);
+    std::fs::remove_file(dir.path().join("args")).unwrap();
+    press(&mut app, &[KeyCode::Char('P')]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let p = app.printing.as_mut().unwrap();
+    p.lookup = Some(rx);
+    p.programs = vec![dir.path().join("lp").into()];
+    press(&mut app, &[KeyCode::Enter]);
+    tx.send(crate::app::printing::Lookup {
+        printers: None,
+        paper: Some(crate::print::Paper {
+            name: "PAPER1".into(),
+            size: None,
+        }),
+    })
+    .unwrap();
+    sent(&mut app);
+    let args = args(&dir);
+    assert!(args.starts_with("-d\nLabel\n"), "{args}");
+    assert!(args.contains("media=PAPER1\n"), "{args}");
+}
+
+#[test]
+fn what_was_picked_and_could_not_be_kept_is_said() {
+    let (dir, mut app) = printing();
+    // A file where the folder would be: nothing can be kept in it.
+    let file = dir.path().join("file");
+    std::fs::write(&file, "").unwrap();
+    app.config = Some(file.join("config"));
+    press(&mut app, &[KeyCode::Enter]);
+    sent(&mut app);
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(notice.starts_with("sent to the printer"), "{notice}");
+    assert!(notice.contains("not kept"), "{notice}");
+}
+
 #[test]
 fn the_first_printer_is_the_default_only_when_cups_says() {
     let (_dir, mut app) = printing();

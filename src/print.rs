@@ -15,9 +15,10 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// Which sides of the paper are printed on.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Sides {
     /// As the printer is set to.
+    #[default]
     Printer,
     One,
     Two,
@@ -25,12 +26,22 @@ pub enum Sides {
 
 impl Sides {
     pub const ALL: [Sides; 3] = [Sides::Printer, Sides::One, Sides::Two];
+
+    /// As it is kept: `printer`, `one`, `two`.
+    fn word(self) -> &'static str {
+        match self {
+            Sides::Printer => "printer",
+            Sides::One => "one",
+            Sides::Two => "two",
+        }
+    }
 }
 
 /// How a page is made the paper's size.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Scale {
     /// As it is if it fits the paper, else shrunk to fit: CUPS's own.
+    #[default]
     Auto,
     /// Made as large as the paper takes.
     Fit,
@@ -40,6 +51,80 @@ pub enum Scale {
 
 impl Scale {
     pub const ALL: [Scale; 3] = [Scale::Auto, Scale::Fit, Scale::Actual];
+
+    /// As it is kept: `auto`, `fit`, `actual`.
+    fn word(self) -> &'static str {
+        match self {
+            Scale::Auto => "auto",
+            Scale::Fit => "fit",
+            Scale::Actual => "actual",
+        }
+    }
+}
+
+/// What printing keeps from one print to the next: the printer, the
+/// sides and the scale, not the pages or copies, which are the
+/// document's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Kept {
+    /// The printer, by its CUPS name; the default if `None`.
+    pub printer: Option<String>,
+    pub sides: Sides,
+    pub scale: Scale,
+}
+
+/// The file in ohp's config folder `Kept` is kept in.
+const KEPT: &str = "print";
+
+impl Kept {
+    /// As `text` writes it, a setting a line, `sides two`; what is not
+    /// known passed over.
+    pub fn read(text: &str) -> Kept {
+        let mut kept = Kept::default();
+        for (key, value) in text.lines().filter_map(|l| l.trim().split_once(' ')) {
+            let value = value.trim();
+            match key {
+                "printer" if !value.is_empty() => kept.printer = Some(value.to_string()),
+                "sides" => {
+                    let sides = Sides::ALL.into_iter().find(|s| s.word() == value);
+                    kept.sides = sides.unwrap_or(kept.sides);
+                }
+                "scale" => {
+                    let scale = Scale::ALL.into_iter().find(|s| s.word() == value);
+                    kept.scale = scale.unwrap_or(kept.scale);
+                }
+                _ => {}
+            }
+        }
+        kept
+    }
+
+    /// As it is kept, a setting a line.
+    pub fn text(&self) -> String {
+        let mut text = String::new();
+        if let Some(printer) = &self.printer {
+            text.push_str(&format!("printer {printer}\n"));
+        }
+        text.push_str(&format!("sides {}\n", self.sides.word()));
+        text.push_str(&format!("scale {}\n", self.scale.word()));
+        text
+    }
+}
+
+/// What printing kept in `config`, ohp's config folder: as it is first
+/// if nothing is, or there is no folder.
+pub fn kept(config: Option<&Path>) -> Kept {
+    let text = config.and_then(|dir| std::fs::read_to_string(dir.join(KEPT)).ok());
+    text.map_or_else(Kept::default, |text| Kept::read(&text))
+}
+
+/// Keep `kept` in `config`, ohp's config folder, made if it is not there;
+/// nowhere if there is no folder.
+pub fn keep(config: Option<&Path>, kept: &Kept) -> std::io::Result<()> {
+    let Some(dir) = config else {
+        return Ok(());
+    };
+    crate::write(&dir.join(KEPT), kept.text().as_bytes())
 }
 
 /// What to print, and how.
@@ -70,8 +155,8 @@ impl Job {
             printer: None,
             copies: 1,
             pages: None,
-            sides: Sides::Printer,
-            scale: Scale::Auto,
+            sides: Sides::default(),
+            scale: Scale::default(),
             media: None,
             wide: false,
             title: title.to_string(),
@@ -163,6 +248,14 @@ impl std::fmt::Display for Ranges {
 pub struct Printers {
     pub names: Vec<String>,
     pub default: bool,
+}
+
+impl Printers {
+    /// Which is `wanted`, if it is listed; else the first.
+    pub fn pick(&self, wanted: Option<&str>) -> usize {
+        let at = wanted.and_then(|w| self.names.iter().position(|n| n == w));
+        at.unwrap_or(0)
+    }
 }
 
 /// The printers: the queues `lpstat -p -d` lists, `queues`, the default

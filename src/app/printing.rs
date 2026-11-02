@@ -65,6 +65,8 @@ pub(super) struct Printing {
     copies: u32,
     sides: Sides,
     scale: Scale,
+    /// The printer printed with last, picked once CUPS lists it.
+    wanted: Option<String>,
     /// The paper the printer picked is set to, if CUPS says.
     pub(super) paper: Option<print::Paper>,
     /// Which of the pages picked the preview shows, from 0.
@@ -86,12 +88,16 @@ pub(super) struct Lookup {
     pub(super) paper: Option<print::Paper>,
 }
 
-/// Ask CUPS, off the screen's thread, for the paper of `printer`; with
-/// none, for the printers and the paper of the first.
-fn look_up(printer: Option<String>) -> Receiver<Lookup> {
+/// Ask CUPS, off the screen's thread, for the paper of `printer`; `list`,
+/// for the printers too, and the paper of `printer` if it is listed, else
+/// of the first.
+fn look_up(printer: Option<String>, list: bool) -> Receiver<Lookup> {
     background(move || {
-        let printers = printer.is_none().then(print::printers);
-        let asked = printer.or_else(|| printers.as_ref()?.names.first().cloned());
+        let printers = list.then(print::printers);
+        let asked = match &printers {
+            Some(listed) => listed.names.get(listed.pick(printer.as_deref())).cloned(),
+            None => printer,
+        };
         let paper = print::paper_of(asked.as_deref());
         Lookup { printers, paper }
     })
@@ -102,15 +108,17 @@ impl App {
     pub(super) fn print(&mut self) {
         // The copy as it is sized, though the wheel has not rested.
         self.settle_wheel(true);
+        let kept = print::kept(self.config.as_deref());
         self.printing = Some(Printing {
-            lookup: Some(look_up(None)),
+            lookup: Some(look_up(kept.printer.clone(), true)),
+            wanted: kept.printer,
             paper: None,
             printers: print::Printers::default(),
             printer: 0,
             pages: Field::offered("all"),
             copies: 1,
-            sides: Sides::Printer,
-            scale: Scale::Auto,
+            sides: kept.sides,
+            scale: kept.scale,
             sheet: 0,
             row: Row::Pages,
             programs: vec!["lp".into(), "lpr".into()],
@@ -189,6 +197,7 @@ impl App {
         };
         p.lookup = None;
         if let Some(printers) = found.printers {
+            p.printer = printers.pick(p.wanted.as_deref());
             p.printers = printers;
         }
         p.paper = found.paper;
@@ -217,7 +226,9 @@ impl App {
             }
         };
         let job = Job {
-            printer: p.printers.names.get(p.printer).cloned(),
+            // Not yet listed, the printer printed with last, whose paper is
+            // being asked for.
+            printer: (p.printers.names.get(p.printer).cloned()).or_else(|| p.wanted.clone()),
             copies: p.copies,
             pages: pages.as_ref().map(ToString::to_string),
             sides: p.sides,
@@ -231,6 +242,13 @@ impl App {
         // the PDF's own page size.
         let known = p.paper.as_ref().map(|paper| paper.name.clone());
         let lookup = p.lookup.take();
+        // Picked again next time.
+        let kept = print::Kept {
+            printer: job.printer.clone(),
+            sides: p.sides,
+            scale: p.scale,
+        };
+        let config = self.config.clone();
         let programs = p.programs.clone();
         // As annotated, though the copy last written is still being read.
         let pdf = self.annotated().unwrap_or_else(|| self.deck.data.to_vec());
@@ -240,7 +258,12 @@ impl App {
             let media = known.or_else(|| Some(lookup?.recv().ok()?.paper?.name));
             let job = Job { media, ..job };
             let programs: Vec<&OsStr> = programs.iter().map(OsString::as_os_str).collect();
-            print::print_with(&programs, &pdf, &job).unwrap_or_else(|e| format!("{e:#}"))
+            let said = print::print_with(&programs, &pdf, &job);
+            let said = said.unwrap_or_else(|e| format!("{e:#}"));
+            match print::keep(config.as_deref(), &kept) {
+                Ok(()) => said,
+                Err(e) => format!("{said} · what was picked not kept: {e}"),
+            }
         }));
         self.notice = Some("sending to the printer…".into());
         self.printing = None;
@@ -386,11 +409,13 @@ impl Printing {
             Row::Copies => self.copies = (self.copies - 1).max(1),
             Row::Sides => self.sides = cycle(&Sides::ALL, self.sides, up),
             Row::Scale => self.scale = cycle(&Scale::ALL, self.scale, up),
+            // Not yet listed: none to pick, CUPS still being asked.
+            Row::Printer if self.printers.names.is_empty() => {}
             Row::Printer => {
                 self.printer = step(self.printer, self.printers.names.len(), up);
                 let printer = self.printers.names.get(self.printer).cloned();
                 self.paper = None;
-                self.lookup = Some(look_up(printer));
+                self.lookup = Some(look_up(printer, false));
             }
         }
     }

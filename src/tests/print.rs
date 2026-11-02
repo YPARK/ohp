@@ -241,6 +241,53 @@ fn the_paper_the_printer_is_set_to_is_asked_for() {
 }
 
 #[test]
+fn what_the_form_keeps_is_read_back_as_written() {
+    let kept = Kept {
+        printer: Some("PRINTER1".into()),
+        sides: Sides::Two,
+        scale: Scale::Fit,
+    };
+    assert_eq!(Kept::read(&kept.text()), kept);
+    assert_eq!(Kept::read(""), Kept::default());
+    // What is not known is passed over, the rest still read.
+    assert_eq!(
+        Kept::read("sides sideways\ncolour red\nscale actual\n"),
+        Kept {
+            scale: Scale::Actual,
+            ..Kept::default()
+        }
+    );
+}
+
+#[test]
+fn what_the_form_keeps_is_kept_in_the_folder_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ohp");
+    assert_eq!(kept(Some(&config)), Kept::default());
+    let picked = Kept {
+        printer: Some("PRINTER1".into()),
+        sides: Sides::One,
+        scale: Scale::Auto,
+    };
+    keep(Some(&config), &picked).unwrap();
+    assert_eq!(kept(Some(&config)), picked);
+    // With nowhere to keep it, nothing is, and nothing read.
+    keep(None, &picked).unwrap();
+    assert_eq!(kept(None), Kept::default());
+}
+
+#[test]
+fn the_printer_wanted_is_picked_if_listed_else_the_first() {
+    let printers = Printers {
+        names: vec!["PRINTER1".into(), "PRINTER2".into()],
+        default: true,
+    };
+    assert_eq!(printers.pick(Some("PRINTER2")), 1);
+    assert_eq!(printers.pick(Some("PRINTER3")), 0);
+    assert_eq!(printers.pick(None), 0);
+}
+
+#[test]
 fn lpr_is_asked_by_its_own_flags_whatever_the_title() {
     let job = Job {
         printer: Some("Office".into()),
