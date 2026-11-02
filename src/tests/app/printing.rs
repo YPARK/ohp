@@ -11,6 +11,10 @@ fn printing() -> (tempfile::TempDir, App) {
     let p = app.printing.as_mut().expect("the print line open");
     // Not what CUPS here says, as it says it.
     p.lookup = None;
+    p.ask = |_, _| crate::app::printing::Lookup {
+        printers: None,
+        paper: None,
+    };
     p.printers = crate::print::Printers {
         names: vec!["Office".into(), "Label".into()],
         default: true,

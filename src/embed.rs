@@ -1,8 +1,9 @@
 //! Sentences as vectors of what they mean, by a small sentence embedding
 //! model, sentence-transformers' all-MiniLM-L6-v2, run in ohp with candle:
 //! its BERT encoder's last states, averaged over each sentence's tokens and
-//! scaled to length one, so the dot product of two is their cosine. It runs
-//! where the language model does, on the GPU on macOS, before it.
+//! scaled to length one, so the dot product of two is their cosine. It is
+//! loaded before the language model, on the GPU where there is one and it
+//! fits, else on the CPU.
 
 use crate::llm::{self, text};
 use candle_core::{DType, Device, Tensor};
@@ -33,8 +34,13 @@ fn why(e: impl Display) -> String {
 }
 
 impl Embedder {
-    /// The model in `dir`, which has its `FILES`.
+    /// The model in `dir`, which has its `FILES`, on the GPU if it can be
+    /// had and the model fits there, else on the CPU.
     pub fn load(dir: &Path) -> Result<Embedder, String> {
+        llm::on_gpu_or_cpu(|device| Embedder::load_on(dir, device))
+    }
+
+    fn load_on(dir: &Path, device: Device) -> Result<Embedder, String> {
         let config = std::fs::read_to_string(dir.join(FILES[0])).map_err(why)?;
         let config: Config = serde_json::from_str(&config).map_err(why)?;
         let mut tokenizer = Tokenizer::from_file(dir.join(FILES[1])).map_err(why)?;
@@ -44,7 +50,6 @@ impl Embedder {
             ..TruncationParams::default()
         };
         tokenizer.with_truncation(Some(truncation)).map_err(why)?;
-        let device = llm::device();
         let weights = [dir.join(FILES[2])];
         // SAFETY: the weights are a file of the cache's, not written while
         // ohp runs.

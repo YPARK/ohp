@@ -1,6 +1,6 @@
 [package]
 name = "ohp"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
@@ -31,6 +31,11 @@ summary = [
     "dep:signal-hook",
     "dep:tokenizers",
 ]
+# The language model, and the embedding model, run on an NVIDIA GPU
+# through CUDA, or on the CPU where the GPU's memory runs out. Building it
+# needs CUDA's toolkit, its nvcc, and running it NVIDIA's driver and CUDA's
+# libraries, so it is not in the default build.
+cuda = ["summary", "candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 # A PDF signed: a saved picture of a signature, text such as a name or the
 # date, and ✓ ✕ ● marks, drawn onto its pages by lopdf, in pure Rust, and
 # appended to a copy of it as an incremental update.
