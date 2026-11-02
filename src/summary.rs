@@ -3,13 +3,13 @@
 //! up, its key sentences marked wherever they are.
 //!
 //! The model is one of the GGUF files on Hugging Face's Hub that `llm`
-//! runs, Qwen2.5-3B-Instruct's on macOS and Qwen2.5-1.5B-Instruct's
-//! elsewhere, unless another is given or picked with `m`. It is downloaded
-//! with curl into Hugging Face's cache, as `hub` does, the first time it is
-//! wanted, and loaded once, on a thread of its own that does all the
-//! summing up, one thing at a time. The page on screen comes first, then
-//! the document, then the pages after the one on screen, so they are
-//! summed up before they are turned to. What is no longer wanted, as the
+//! runs, Qwen2.5-3B-Instruct's on a GPU, on macOS or built with `cuda`,
+//! and Qwen2.5-1.5B-Instruct's elsewhere, unless another is given or
+//! picked with `m`. It is downloaded with curl into Hugging Face's cache,
+//! as `hub` does, the first time it is wanted, and loaded once, on a
+//! thread of its own that does all the summing up, one thing at a time.
+//! The page on screen comes first, then the document, then the pages after
+//! the one on screen, so they are summed up before they are turned to. What is no longer wanted, as the
 //! page turned from or a model picked over, is given up, its download too,
 //! and taken up again if it is wanted again. How far each step has come,
 //! downloading, loading, reading the prompt and writing the answer, is

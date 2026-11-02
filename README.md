@@ -36,7 +36,13 @@ the default build, in pure Rust.
 Summing slides up, the `summary` feature, is in the default build too: a
 language model runs in ohp itself, with
 [candle](https://github.com/huggingface/candle), on the GPU through Metal
-on macOS, as [Summaries](#summaries) shows.
+on macOS, as [Summaries](#summaries) shows. On an NVIDIA GPU it runs
+through CUDA with the `cuda` feature, which needs CUDA's toolkit, `nvcc`,
+to build, and NVIDIA's driver and CUDA's libraries to run:
+
+```sh
+cargo install --git https://github.com/YPARK/ohp --features cuda
+```
 
 Reading slides aloud, the `speech` feature, is in the default build, and
 reads with speech programs it runs, none built in: on macOS, its own `say`
@@ -420,8 +426,9 @@ and marks its three to five key sentences on whatever pages they are.
 Either key again, or the other, closes the column or switches it.
 
 The summary is written by a language model run in ohp, offline, which
-[candle](https://github.com/huggingface/candle) runs on the GPU through
-Metal on macOS and on the CPU elsewhere: a GGUF file of its weights,
+[candle](https://github.com/huggingface/candle) runs on the GPU, through
+Metal on macOS or CUDA with the `cuda` feature, and on the CPU elsewhere,
+or where the GPU's memory runs out: a GGUF file of its weights,
 quantised to 4 bits, from [Hugging Face](https://huggingface.co)'s Hub.
 The first `k` downloads it, once, with `curl`, into Hugging Face's own
 cache, `~/.cache/huggingface/hub` (or `$HF_HUB_CACHE`, or `hub` in
@@ -443,7 +450,7 @@ or `hf auth login` keeps it.
 
 | `m`, `--model` | | |
 |---|---|---|
-| `qwen2.5-3b` | 2.1 GB | default on macOS: a slide in a few seconds on an M4, a dense page of a paper in under ten |
+| `qwen2.5-3b` | 2.1 GB | default on macOS and with `cuda`: a slide in a few seconds on an M4, a dense page of a paper in under ten |
 | `qwen2.5-1.5b` | 1.1 GB | default elsewhere: twice as quick, its picks less apt |
 | `qwen3-4b` | 2.5 GB | Qwen3-4B-Instruct-2507: newer, and a little slower |
 | `llama3.2-3b` | 2.0 GB | Meta's Llama 3.2 3B Instruct |

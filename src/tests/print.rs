@@ -324,3 +324,15 @@ fn the_pages_picked_say_whether_it_is_wide() {
     assert!(wide(&sizes, None));
     assert!(!wide(&sizes, Some(&ranges("3", 3))));
 }
+
+#[test]
+fn cups_that_does_not_answer_is_taken_to_say_nothing() {
+    let start = std::time::Instant::now();
+    assert_eq!(cups("sleep", &["60"]), "");
+    assert!(start.elapsed() < CUPS_WAIT * 2, "{:?}", start.elapsed());
+}
+
+#[test]
+fn what_cups_says_is_read() {
+    assert_eq!(cups("printf", &["printer Office"]), "printer Office");
+}

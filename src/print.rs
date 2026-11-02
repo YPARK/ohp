@@ -10,9 +10,10 @@
 
 use anyhow::Context;
 use std::ffi::{OsStr, OsString};
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Which sides of the paper are printed on.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -293,18 +294,48 @@ pub fn printers() -> Printers {
     destinations(&cups("lpstat", &["-p", "-d"]), &cups("lpstat", &["-e"]))
 }
 
+/// How long CUPS is waited for. Past it, as where it hangs looking for
+/// printers on a network it cannot reach, it is taken to say nothing.
+const CUPS_WAIT: Duration = Duration::from_secs(5);
+
 /// What CUPS's `program`, asked `args`, says, in English whatever the
 /// language here: macOS's heed the locale only with SOFTWARE set. Nothing
-/// where it is not.
+/// where it is not, or does not answer in `CUPS_WAIT`.
 fn cups(program: &str, args: &[&str]) -> String {
-    Command::new(program)
+    let started = Command::new(program)
         .args(args)
         .env("LC_ALL", "C")
         .env("LANG", "C")
         .env("SOFTWARE", "ohp")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = started else {
+        return String::new();
+    };
+    // Read as it is written, so a full pipe does not keep it from ending.
+    let mut stdout = child.stdout.take();
+    let said = std::thread::spawn(move || {
+        let mut said = Vec::new();
+        stdout.as_mut().map(|out| out.read_to_end(&mut said));
+        said
+    });
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if start.elapsed() < CUPS_WAIT => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return String::new();
+            }
+        }
+    }
+    String::from_utf8_lossy(&said.join().unwrap_or_default()).into_owned()
 }
 
 /// The flags a printing program names the printer, the copies and the

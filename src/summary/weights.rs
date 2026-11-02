@@ -56,7 +56,7 @@ pub const SUGGESTED: [Suggested; 5] = [
 /// The model pages are summed up with unless one is given: the larger
 /// where a GPU runs it, the quicker on a CPU.
 fn default_model() -> &'static Suggested {
-    if cfg!(target_os = "macos") {
+    if cfg!(any(target_os = "macos", feature = "cuda")) {
         &SUGGESTED[0]
     } else {
         &SUGGESTED[1]

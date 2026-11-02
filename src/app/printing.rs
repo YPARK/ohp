@@ -79,6 +79,8 @@ pub(super) struct Printing {
     /// off the screen's thread: browsing the network for printers can
     /// take seconds.
     pub(super) lookup: Option<Receiver<Lookup>>,
+    /// How CUPS is asked, as `ask_cups` does: another in tests.
+    pub(super) ask: fn(Option<String>, bool) -> Lookup,
 }
 
 /// What CUPS says: the printers, when they were asked for, and the paper
@@ -88,19 +90,16 @@ pub(super) struct Lookup {
     pub(super) paper: Option<print::Paper>,
 }
 
-/// Ask CUPS, off the screen's thread, for the paper of `printer`; `list`,
-/// for the printers too, and the paper of `printer` if it is listed, else
-/// of the first.
-fn look_up(printer: Option<String>, list: bool) -> Receiver<Lookup> {
-    background(move || {
-        let printers = list.then(print::printers);
-        let asked = match &printers {
-            Some(listed) => listed.names.get(listed.pick(printer.as_deref())).cloned(),
-            None => printer,
-        };
-        let paper = print::paper_of(asked.as_deref());
-        Lookup { printers, paper }
-    })
+/// Ask CUPS for the paper of `printer`; `list`, for the printers too, and
+/// the paper of `printer` if it is listed, else of the first.
+fn ask_cups(printer: Option<String>, list: bool) -> Lookup {
+    let printers = list.then(print::printers);
+    let asked = match &printers {
+        Some(listed) => listed.names.get(listed.pick(printer.as_deref())).cloned(),
+        None => printer,
+    };
+    let paper = print::paper_of(asked.as_deref());
+    Lookup { printers, paper }
 }
 
 impl App {
@@ -110,7 +109,11 @@ impl App {
         self.settle_wheel(true);
         let kept = print::kept(self.config.as_deref());
         self.printing = Some(Printing {
-            lookup: Some(look_up(kept.printer.clone(), true)),
+            lookup: Some(background({
+                let printer = kept.printer.clone();
+                move || ask_cups(printer, true)
+            })),
+            ask: ask_cups,
             wanted: kept.printer,
             paper: None,
             printers: print::Printers::default(),
@@ -415,7 +418,8 @@ impl Printing {
                 self.printer = step(self.printer, self.printers.names.len(), up);
                 let printer = self.printers.names.get(self.printer).cloned();
                 self.paper = None;
-                self.lookup = Some(look_up(printer, false));
+                let ask = self.ask;
+                self.lookup = Some(background(move || ask(printer, false)));
             }
         }
     }

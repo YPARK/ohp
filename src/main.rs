@@ -139,7 +139,8 @@ struct Args {
     /// qwen2.5-3b, qwen2.5-1.5b, qwen3-4b, llama3.2-3b or qwen2.5-7b, a
     /// repo on Hugging Face as owner/repo or owner/repo/file.gguf,
     /// downloaded once into its cache, or a GGUF file here; m picks
-    /// another. [default: qwen2.5-3b on macOS, qwen2.5-1.5b elsewhere]
+    /// another. [default: qwen2.5-3b on macOS or built with cuda,
+    /// qwen2.5-1.5b elsewhere]
     #[cfg(feature = "summary")]
     #[arg(long, env = "OHP_MODEL", value_name = "MODEL", value_parser = summary::weights)]
     model: Option<summary::Weights>,
