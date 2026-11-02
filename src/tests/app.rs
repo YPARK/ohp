@@ -159,7 +159,7 @@ fn the_grid_scrolls_to_keep_the_current_slide_on_screen() {
     for cur in [149, 0, 75] {
         app.cur = cur;
         app.scroll();
-        let first = app.top * grid.cols;
+        let first = app.top;
         assert!(
             (first..first + grid.rows * grid.cols).contains(&cur),
             "slide {cur}"
@@ -168,15 +168,30 @@ fn the_grid_scrolls_to_keep_the_current_slide_on_screen() {
 }
 
 #[test]
-fn zooming_out_near_the_end_leaves_no_empty_rows() {
+fn zooming_out_near_the_end_leaves_no_empty_slots() {
     let (_dir, mut app) = app(150);
     press(&mut app, &[KeyCode::Char('g')]);
     app.cur = 149;
     press(&mut app, &[KeyCode::Char('-'); 50]);
     app.scroll();
     let grid = app.grid();
-    let rows = 150usize.div_ceil(grid.cols);
-    assert_eq!(app.top, rows.saturating_sub(grid.rows));
+    assert_eq!(app.top, 150usize.saturating_sub(grid.rows * grid.cols));
+}
+
+#[test]
+fn the_grid_moves_a_slide_at_a_time() {
+    let (_dir, mut app) = app(150);
+    press(&mut app, &[KeyCode::Char('g')]);
+    let grid = app.grid();
+    let shown = grid.rows * grid.cols;
+    app.cur = shown - 1;
+    app.scroll();
+    assert_eq!(app.top, 0);
+    press(&mut app, &[KeyCode::Char('n')]);
+    app.scroll();
+    assert_eq!((app.cur, app.top), (shown, 1));
+    let slots: Vec<usize> = app.slots(&app.grid()).map(|(i, _)| i).collect();
+    assert_eq!(slots, (1..=shown).collect::<Vec<_>>());
 }
 
 #[test]
