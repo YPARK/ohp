@@ -62,8 +62,27 @@ fn notes_are_saved_beside_the_deck() {
     let dir = tempfile::tempdir().unwrap();
     let pdf = dir.path().join("talk.pdf");
     let file = file_for(&pdf);
-    assert_eq!(file, dir.path().join("talk.notes.md"));
+    assert_eq!(file, dir.path().join("talk.md"));
     save(&file, 2, "remember this").unwrap();
     assert_eq!(written(&file, 2), "remember this");
     assert_eq!(Beside::new(&[pdf], &[0]).read()[&2], "remember this");
+}
+
+#[test]
+fn a_markdown_file_named_as_the_slides_is_notes_only_if_begun_by_a_page() {
+    assert!(is_notes(""));
+    assert!(is_notes("Notes for the talk\n\n# 1\nhi\n"));
+    assert!(!is_notes("---\ntitle: Talk\n---\n# Introduction\n"));
+    assert!(!is_notes("Some slides, split by rules\n\n---\n"));
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = dir.path().join("talk.pdf");
+    let md = dir.path().join("talk.md");
+    // What the PDF was made from: never written into.
+    std::fs::write(&md, "# Introduction\nhello\n").unwrap();
+    assert_eq!(beside(&pdf), None);
+    assert_eq!(file_for(&pdf), dir.path().join("talk.notes.md"));
+    std::fs::write(&md, "# 2\nsecond\n").unwrap();
+    assert_eq!(beside(&pdf), Some(md.clone()));
+    // Markdown slides keep their notes apart from themselves.
+    assert_eq!(file_for(&md), dir.path().join("talk.notes.md"));
 }

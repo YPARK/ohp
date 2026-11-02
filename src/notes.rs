@@ -1,10 +1,10 @@
 //! Speaker notes, shown to the presenter beside the slides.
 //!
 //! They come from markdown's `::: notes` divs, as pandoc writes speaker
-//! notes, placed on the page their slide is set on, and from a file beside
-//! each of the deck's: `talk.notes.md` (or `talk.notes.txt`, `talk.notes`)
-//! for `talk.pdf`, in which a heading that is a number, as `## 3` or
-//! `# Slide 3`, begins the notes of that page of the file:
+//! notes, placed on the page their slide is set on, and from a markdown
+//! file named as each of the deck's files is: `talk.md` for `talk.pdf`, in
+//! which a heading that is a number, as `## 3` or `# Slide 3`, begins the
+//! notes of that page of the file:
 //!
 //! ```text
 //! # 1
@@ -13,6 +13,11 @@
 //! # 3
 //! The figure is from the 2024 run.
 //! ```
+//!
+//! `talk.md` is as often what the PDF was made from, by pandoc, or the
+//! slides themselves, so it is taken for notes only while empty or begun by
+//! a page's heading; else the notes are in `talk.notes.md` (or
+//! `talk.notes.txt`, `talk.notes`).
 //!
 //! Beamer's `\note{}`, set beside each slide with `show notes on second
 //! screen=right`, is a page of its own half, which [`crate::split`] cuts
@@ -25,27 +30,49 @@ use std::path::{Path, PathBuf};
 /// Notes by page of the deck, from 0.
 pub type Notes = BTreeMap<usize, String>;
 
-/// The endings a notes file beside a deck's file has, in the order looked for.
+/// The endings a notes file beside a deck's file has, past `talk.md`, in
+/// the order looked for.
 const ENDINGS: [&str; 3] = ["notes.md", "notes.txt", "notes"];
+
+/// `talk.md` beside `talk.pdf`, unless that is `path` itself.
+fn same_name(path: &Path) -> Option<PathBuf> {
+    let md = path.with_extension("md");
+    (md != path && !render::document(path)).then_some(md)
+}
+
+/// Whether `text` is notes: nothing yet, or begun by a page's heading.
+/// Anything else is the slides, or what they were made from.
+pub fn is_notes(text: &str) -> bool {
+    let first = text.lines().find(|l| l.trim_start().starts_with('#'));
+    match first {
+        Some(line) => heading(line).is_some(),
+        None => text.trim().is_empty(),
+    }
+}
 
 /// The notes file beside `path`, if there is one.
 pub fn beside(path: &Path) -> Option<PathBuf> {
     let stem = path.file_stem()?.to_string_lossy();
     let dir = path.parent().unwrap_or(Path::new(""));
-    ENDINGS
-        .iter()
-        .map(|end| dir.join(format!("{stem}.{end}")))
+    let own =
+        same_name(path).filter(|md| std::fs::read_to_string(md).is_ok_and(|text| is_notes(&text)));
+    own.into_iter()
+        .chain(ENDINGS.iter().map(|end| dir.join(format!("{stem}.{end}"))))
         .find(|p| p.is_file())
 }
 
-/// The notes file to write `path`'s notes into: the one beside it, or a
-/// new `talk.notes.md`.
+/// The notes file to write `path`'s notes into: the one beside it, else a
+/// new `talk.md` for `talk.pdf`, or `talk.notes.md` where `talk.md` is
+/// taken, by the slides or what they were made from.
 pub fn file_for(path: &Path) -> PathBuf {
-    beside(path).unwrap_or_else(|| {
-        let stem = path
-            .file_stem()
-            .map_or_else(Default::default, |s| s.to_string_lossy());
-        path.with_file_name(format!("{stem}.notes.md"))
+    beside(path).unwrap_or_else(|| match same_name(path) {
+        Some(md) if !md.exists() => md,
+        _ => {
+            let stem = path
+                .file_stem()
+                .map_or_else(Default::default, |s| s.to_string_lossy());
+            path.with_file_name(format!("{stem}.notes.md"))
+        }
     })
 }
 

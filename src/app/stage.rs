@@ -36,6 +36,10 @@ impl Clock {
         self.paused.unwrap_or_else(Instant::now) - self.began
     }
 
+    pub(super) fn paused(&self) -> bool {
+        self.paused.is_some()
+    }
+
     fn pause(&mut self) {
         match self.paused.take() {
             Some(at) => self.began += at.elapsed(),
@@ -342,7 +346,7 @@ impl App {
         }
     }
 
-    /// `e`: write the current slide's notes, into the notes file beside
+    /// `N`, or a click on the notes: write the current slide's notes, into the notes file beside
     /// the file it is from.
     fn begin_writing(&mut self) {
         let source = self.deck.source(self.cur);
@@ -358,6 +362,33 @@ impl App {
         });
     }
 
+    /// Save the notes being written, and stop writing.
+    fn finish_writing(&mut self) {
+        let Some(writing) = self.writing.take() else {
+            return;
+        };
+        let saved = notes::save(&writing.file, writing.page, &writing.text);
+        let name = writing.file.display().to_string();
+        self.notice = Some(match saved {
+            Ok(()) => format!("notes saved to {name}"),
+            Err(e) => format!("cannot save the notes to {name}: {e}"),
+        });
+        self.read_notes();
+    }
+
+    /// A click while writing notes: in them, the cursor goes there;
+    /// elsewhere, they are saved, as esc saves them.
+    pub(super) fn writing_click(&mut self, at: Position) {
+        let inner = Block::bordered().inner(self.boxes().notes);
+        match &mut self.writing {
+            Some(writing) if inner.contains(at) => {
+                writing.click(at.x - inner.x, at.y - inner.y, inner.width);
+            }
+            Some(_) => self.finish_writing(),
+            None => {}
+        }
+    }
+
     /// A key while writing notes: esc saves them, C-g drops them.
     pub(super) fn write_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
@@ -370,16 +401,7 @@ impl App {
                 self.writing = None;
                 self.notice = Some("notes left as they were".into());
             }
-            KeyCode::Esc => {
-                let saved = notes::save(&writing.file, writing.page, &writing.text);
-                let name = writing.file.display().to_string();
-                self.writing = None;
-                self.notice = Some(match saved {
-                    Ok(()) => format!("notes saved to {name}"),
-                    Err(e) => format!("cannot save the notes to {name}: {e}"),
-                });
-                self.read_notes();
-            }
+            KeyCode::Esc => self.finish_writing(),
             KeyCode::Char('a') if ctrl => writing.home(),
             KeyCode::Char('e') if ctrl => writing.end(),
             KeyCode::Char('b') if ctrl => writing.left(),
@@ -422,7 +444,7 @@ impl App {
                 );
             }
             KeyCode::Char('T') => self.clock.pause(),
-            KeyCode::Char('e') if self.stage_view() => self.begin_writing(),
+            KeyCode::Char('N') if self.stage_view() => self.begin_writing(),
             KeyCode::Char('0') if self.stage_view() => self.clock.reset(),
             // The presenter's slides are fitted to their boxes.
             KeyCode::Char('+' | '=' | '-' | '_') if self.stage_view() => {}
@@ -537,9 +559,18 @@ impl App {
     }
 
     /// A click in the presenter's view: on the strip, turn to that slide;
-    /// on the next slide, turn to it. True if it was one of those.
+    /// on the next slide, turn to it; on the time, pause it or go on; on
+    /// the notes, write them. True if it was one of those.
     pub(super) fn stage_click(&mut self, at: Position) -> bool {
         let boxes = self.boxes();
+        if boxes.clock.contains(at) {
+            self.clock.pause();
+            return true;
+        }
+        if boxes.notes.contains(at) {
+            self.begin_writing();
+            return true;
+        }
         if boxes.next.contains(at) && self.cur + 1 < self.deck.pages {
             self.step(1);
             return true;
@@ -557,7 +588,7 @@ impl App {
         let dim = Style::new().fg(Color::DarkGray);
         let red = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
 
-        let paused = self.clock.paused.is_some();
+        let paused = self.clock.paused();
         let face = clock_face(self.clock.elapsed());
         let (face_style, word) = if paused {
             (dim.add_modifier(Modifier::BOLD), "  paused (T)")
@@ -608,15 +639,12 @@ impl App {
                 .title_bottom(Span::styled(" esc saves · C-g drops ", dim));
             let inner = block.inner(boxes.notes);
             f.render_widget(block, boxes.notes);
-            f.render_widget(
-                Paragraph::new(writing.lines()).wrap(Wrap { trim: false }),
-                inner,
-            );
+            f.render_widget(Paragraph::new(writing.lines(inner.width)), inner);
             return self.draw_strip_and_current(f, &boxes);
         }
         let block = Block::bordered()
             .border_style(dim)
-            .title(Span::styled(" notes · e writes ", dim));
+            .title(Span::styled(" notes · N or a click writes ", dim));
         let inner = block.inner(boxes.notes);
         f.render_widget(block, boxes.notes);
         let mut inner = inner;
@@ -627,7 +655,7 @@ impl App {
             inner.height -= at.height;
         }
         let text = match self.notes.get(&self.cur) {
-            Some(note) => Paragraph::new(note.as_str()),
+            Some(note) => Paragraph::new(shown_markdown(note)),
             None if self.note_pages => Paragraph::new(""),
             None => {
                 let file = &self.deck.paths[self.deck.source(self.cur)];
@@ -844,29 +872,191 @@ impl Writing {
         self.at = (below + col).min(below_end);
     }
 
-    /// The text as lines, the cursor shown on the char it is before.
-    pub(super) fn lines(&self) -> Vec<Line<'static>> {
-        let cursor = Style::new().add_modifier(Modifier::REVERSED);
-        let mut lines = Vec::new();
-        let mut spans: Vec<Span> = Vec::new();
-        let mut run = String::new();
-        for (i, c) in self.text.chars().chain(std::iter::once('\n')).enumerate() {
-            if i == self.at {
-                spans.push(Span::raw(std::mem::take(&mut run)));
-                let shown = if c == '\n' { ' ' } else { c };
-                spans.push(Span::styled(shown.to_string(), cursor));
-                if c == '\n' {
-                    lines.push(Line::from(std::mem::take(&mut spans)));
-                }
-                continue;
+    /// The text as rows `width` cells wide, broken between words where a
+    /// line is too long: each the chars, by index, it shows.
+    fn rows(&self, width: u16) -> Vec<std::ops::Range<usize>> {
+        let width = usize::from(width.max(1));
+        let chars = self.chars();
+        let mut rows = Vec::new();
+        let mut start = 0;
+        loop {
+            let end = (start..chars.len())
+                .find(|&i| chars[i] == '\n')
+                .unwrap_or(chars.len());
+            // One line, as rows.
+            let mut from = start;
+            while end - from > width {
+                let cut = (from + 1..=from + width)
+                    .rev()
+                    .find(|&i| chars[i - 1] == ' ')
+                    .unwrap_or(from + width);
+                rows.push(from..cut);
+                from = cut;
             }
-            if c == '\n' {
-                spans.push(Span::raw(std::mem::take(&mut run)));
-                lines.push(Line::from(std::mem::take(&mut spans)));
-            } else {
-                run.push(c);
+            rows.push(from..end);
+            if end == chars.len() {
+                return rows;
             }
+            start = end + 1;
         }
-        lines
+    }
+
+    /// Put the cursor at column `x` of row `y` of the rows `width` wide.
+    fn click(&mut self, x: u16, y: u16, width: u16) {
+        let rows = self.rows(width);
+        let Some(row) = rows.get(usize::from(y)).or(rows.last()) else {
+            return;
+        };
+        self.at = (row.start + usize::from(x)).min(row.end);
+    }
+
+    /// The text as rows `width` wide, the cursor shown on the char it is
+    /// before.
+    pub(super) fn lines(&self, width: u16) -> Vec<Line<'static>> {
+        let cursor = Style::new().add_modifier(Modifier::REVERSED);
+        let chars = self.chars();
+        let rows = self.rows(width);
+        let last = rows.len() - 1;
+        rows.into_iter()
+            .enumerate()
+            .map(|(n, row)| {
+                let text = |r: std::ops::Range<usize>| chars[r].iter().collect::<String>();
+                // On this row: before its end, or at it, on its last row, or
+                // on a row a line ends after.
+                let ends_line = row.end == chars.len() || chars[row.end] == '\n';
+                let here =
+                    row.contains(&self.at) || (self.at == row.end && (ends_line || n == last));
+                if !here {
+                    return Line::raw(text(row));
+                }
+                let mut spans = vec![Span::raw(text(row.start..self.at))];
+                if self.at < row.end {
+                    spans.push(Span::styled(chars[self.at].to_string(), cursor));
+                    spans.push(Span::raw(text(self.at + 1..row.end)));
+                } else {
+                    spans.push(Span::styled(" ", cursor));
+                }
+                Line::from(spans)
+            })
+            .collect()
     }
 }
+
+/// A note, written in markdown, as lines to show: headings and bold in
+/// bold, emphasis in italics, code in colour, lists with their bullets.
+#[cfg(feature = "markdown")]
+pub(super) fn shown_markdown(text: &str) -> Vec<Line<'static>> {
+    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut style = Style::new();
+    // The lists the text is in: the next number of each ordered one.
+    let mut lists: Vec<Option<u64>> = Vec::new();
+    let mut quoted = 0usize;
+    let flush = |lines: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>| {
+        if !spans.is_empty() {
+            lines.push(Line::from(std::mem::take(spans)));
+        }
+    };
+    let gap = |lines: &mut Vec<Line<'static>>| {
+        if lines.last().is_some_and(|l| l.width() > 0) {
+            lines.push(Line::raw(""));
+        }
+    };
+    let lead = |quoted: usize| "│ ".repeat(quoted);
+    for event in Parser::new(text) {
+        match event {
+            Event::Start(Tag::Heading { .. }) => {
+                gap(&mut lines);
+                style = style.add_modifier(Modifier::BOLD).fg(Color::Yellow);
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                flush(&mut lines, &mut spans);
+                style = Style::new();
+            }
+            Event::Start(Tag::Paragraph) if lists.is_empty() => gap(&mut lines),
+            Event::End(TagEnd::Paragraph) => flush(&mut lines, &mut spans),
+            Event::Start(Tag::Strong) => style = style.add_modifier(Modifier::BOLD),
+            Event::End(TagEnd::Strong) => style = style.remove_modifier(Modifier::BOLD),
+            Event::Start(Tag::Emphasis) => style = style.add_modifier(Modifier::ITALIC),
+            Event::End(TagEnd::Emphasis) => style = style.remove_modifier(Modifier::ITALIC),
+            Event::Start(Tag::Strikethrough) => style = style.add_modifier(Modifier::CROSSED_OUT),
+            Event::End(TagEnd::Strikethrough) => {
+                style = style.remove_modifier(Modifier::CROSSED_OUT)
+            }
+            Event::Start(Tag::Link { .. }) => style = style.add_modifier(Modifier::UNDERLINED),
+            Event::End(TagEnd::Link) => style = style.remove_modifier(Modifier::UNDERLINED),
+            Event::Start(Tag::BlockQuote(_)) => quoted += 1,
+            Event::End(TagEnd::BlockQuote(_)) => quoted = quoted.saturating_sub(1),
+            Event::Start(Tag::List(first)) => {
+                if lists.is_empty() {
+                    gap(&mut lines);
+                }
+                flush(&mut lines, &mut spans);
+                lists.push(first);
+            }
+            Event::End(TagEnd::List(_)) => {
+                flush(&mut lines, &mut spans);
+                lists.pop();
+            }
+            Event::Start(Tag::Item) => {
+                flush(&mut lines, &mut spans);
+                let indent = "  ".repeat(lists.len().saturating_sub(1));
+                let bullet = match lists.last_mut() {
+                    Some(Some(n)) => {
+                        *n += 1;
+                        format!("{}. ", *n - 1)
+                    }
+                    _ => "• ".into(),
+                };
+                spans.push(Span::raw(format!("{}{indent}{bullet}", lead(quoted))));
+            }
+            Event::End(TagEnd::Item) => flush(&mut lines, &mut spans),
+            Event::Code(code) => {
+                spans.push(Span::styled(code.to_string(), style.fg(Color::Cyan)));
+            }
+            Event::Start(Tag::CodeBlock(_)) => gap(&mut lines),
+            Event::Text(t) if spans.is_empty() && quoted > 0 => {
+                spans.push(Span::styled(lead(quoted), Style::new().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    t.to_string(),
+                    style.add_modifier(Modifier::ITALIC),
+                ));
+            }
+            Event::Text(t) => {
+                // A code block's lines, each a line.
+                let mut parts = t.split('\n').peekable();
+                while let Some(part) = parts.next() {
+                    if !part.is_empty() {
+                        spans.push(Span::styled(part.to_string(), style));
+                    }
+                    if parts.peek().is_some() {
+                        flush(&mut lines, &mut spans);
+                    }
+                }
+            }
+            Event::SoftBreak => spans.push(Span::raw(" ")),
+            Event::HardBreak => flush(&mut lines, &mut spans),
+            Event::Rule => {
+                flush(&mut lines, &mut spans);
+                lines.push(Line::styled("────────", Style::new().fg(Color::DarkGray)));
+            }
+            Event::TaskListMarker(done) => {
+                spans.push(Span::raw(if done { "[x] " } else { "[ ] " }));
+            }
+            _ => {}
+        }
+    }
+    flush(&mut lines, &mut spans);
+    lines
+}
+
+/// A note as it is written, ohp being built without markdown.
+#[cfg(not(feature = "markdown"))]
+pub(super) fn shown_markdown(text: &str) -> Vec<Line<'static>> {
+    text.lines().map(|l| Line::raw(l.to_string())).collect()
+}
+
+#[cfg(test)]
+#[path = "../tests/app/stage.rs"]
+mod tests;

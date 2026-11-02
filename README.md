@@ -148,21 +148,25 @@ clipboard. Keys pressed in either window turn the slides in both.
 | Key, presenting | |
 |---|---|
 | `n` / `p`, arrows, `space`, `page down` / `page up` | next / previous slide, in both windows |
-| click | on the strip, turn to that slide; on the next slide, turn to it |
+| click | on the strip, turn to that slide; on the next slide, turn to it; on the time, pause it or go on; on the notes, write them |
 | `g` | pick from a grid of all the slides, privately: the audience goes on seeing the slide shown, marked *on screen*, until `enter`, or a double click, shows the one picked; `esc`, `g` or `C-g` go back to it |
-| `e` | write the slide's notes, as you practise: `enter` begins a line, arrows and Emacs's `C-a` `C-e` `C-f` `C-b` `C-n` `C-p` `C-d` `C-k` move and delete, `esc` saves them into the notes file beside the slides, and `C-g` drops them |
+| `N` | write the slide's notes, as you practise, as a click on them does: `enter` begins a line, a click or the arrows and Emacs's `C-a` `C-e` `C-f` `C-b` `C-n` `C-p` `C-d` `C-k` move and delete, `esc` or a click outside saves them into the notes file, and `C-g` drops them |
 | `b`, `.` | black out the audience's screen, or show it again |
 | `T` | pause the time, or go on |
 | `0` | start the time again from nought |
 | `w` | end: the audience's window closes; with it closed, `w` opens it again |
 
-Notes come from three places, and are shown together:
+Notes come from three places, and are shown together, as markdown:
+bold, italics, code, lists and quotes as such.
 
-- **A notes file beside the slides**: `talk.notes.md` for `talk.pdf` (or
-  `talk.notes.txt`, `talk.notes`), in which a heading that is a page's
-  number, as `# 3` or `## Slide 3`, begins that page's notes. It is read
-  again whenever it is saved, and `e` writes into it, making it if need
-  be, the rest of it left as it was.
+- **A markdown file named as the slides**: `talk.md` for `talk.pdf`, in
+  which a heading that is a page's number, as `# 3` or `## Slide 3`,
+  begins that page's notes. It is read again whenever it is saved, and
+  `N` writes into it, making it if need be, the rest of it left as it was.
+  A `talk.md` that is what the slides were made from, or the slides
+  themselves, is never taken for notes: one is taken only while empty or
+  begun by a page's heading, and otherwise the notes are in
+  `talk.notes.md`.
 - **Markdown's speaker notes**, written as pandoc has them, which are
   never shown on the slides:
 

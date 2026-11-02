@@ -847,7 +847,14 @@ fn clicking_the_strip_or_the_next_slide_turns_to_it() {
     assert_eq!(app.cur, i);
     assert!(app.stage_click(Position::new(boxes.next.x + 2, boxes.next.y + 2)));
     assert_eq!(app.cur, i + 1);
-    assert!(!app.stage_click(Position::new(boxes.notes.x + 2, boxes.notes.y + 2)));
+    // The time pauses, and goes on.
+    assert!(app.stage_click(Position::new(boxes.clock.x + 2, boxes.clock.y + 1)));
+    assert!(app.clock.paused());
+    assert!(app.stage_click(Position::new(boxes.clock.x + 2, boxes.clock.y + 1)));
+    assert!(!app.clock.paused());
+    // The notes are written.
+    assert!(app.stage_click(Position::new(boxes.notes.x + 2, boxes.notes.y + 2)));
+    assert!(app.writing.is_some());
 }
 
 #[test]
@@ -952,7 +959,7 @@ fn notes_written_while_practising_are_saved_beside_the_deck() {
     let (dir, mut app) = app(4);
     staged(&mut app);
     app.cur = 1;
-    press(&mut app, &[KeyCode::Char('e')]);
+    press(&mut app, &[KeyCode::Char('N')]);
     assert!(app.writing.is_some());
     for c in "hello".chars() {
         press(&mut app, &[KeyCode::Char(c)]);
@@ -966,12 +973,36 @@ fn notes_written_while_practising_are_saved_beside_the_deck() {
     assert_eq!(app.cur, 1);
     press(&mut app, &[KeyCode::Esc]);
     assert!(app.writing.is_none());
-    let file = dir.path().join("deck.notes.md");
+    let file = dir.path().join("deck.md");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "# 2\nhell\nqn\n");
     assert_eq!(app.notes[&1], "hell\nqn");
     // Written again, it starts from what was saved; C-g drops a change.
-    press(&mut app, &[KeyCode::Char('e'), KeyCode::Char('!')]);
+    press(&mut app, &[KeyCode::Char('N'), KeyCode::Char('!')]);
     press_ctrl(&mut app, 'g');
     assert!(app.writing.is_none());
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "# 2\nhell\nqn\n");
+}
+
+#[test]
+fn a_click_in_the_notes_moves_the_cursor_and_outside_saves_them() {
+    let (dir, mut app) = app(4);
+    staged(&mut app);
+    let notes = app.boxes().notes;
+    click(&mut app, Position::new(notes.x + 3, notes.y + 3));
+    assert!(app.writing.is_some());
+    for c in "ab\ncd".chars() {
+        app.key(KeyEvent::from(if c == '\n' {
+            KeyCode::Enter
+        } else {
+            KeyCode::Char(c)
+        }));
+    }
+    // Before the b, on the first row of the box's inside.
+    click(&mut app, Position::new(notes.x + 2, notes.y + 1));
+    press(&mut app, &[KeyCode::Char('X')]);
+    let current = app.boxes().current;
+    click(&mut app, Position::new(current.x + 5, current.y + 5));
+    assert!(app.writing.is_none());
+    let file = dir.path().join("deck.md");
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "# 1\naXb\ncd\n");
 }

@@ -267,11 +267,11 @@ impl App {
             ),
             View::Present if self.writing.is_some() => (
                 "writing notes",
-                "type · enter new line · arrows move · esc saves to the notes file",
+                "type · enter new line · arrows or click move · esc or click outside saves · C-g drops",
             ),
             View::Present if self.stage_view() => (
                 "presenter",
-                "n/p ←/→ space next/prev · click a slide to go · e write notes · b black · T pause · 0 restart time · g pick privately · w end · C-x C-c quit",
+                "n/p ←/→ space next/prev · click a slide to go · N or click notes to write · b black · T or click time to pause · 0 restart time · g pick privately · w end · C-x C-c quit",
             ),
             View::Present if self.zoomed() => (
                 zoom.as_str(),

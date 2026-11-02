@@ -29,6 +29,13 @@ impl App {
         if self.listing() || self.seat.is_some() {
             return;
         }
+        if self.writing.is_some() {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                self.writing_click(Position::new(mouse.column, mouse.row));
+                self.dirty = true;
+            }
+            return;
+        }
         let at = Position::new(mouse.column, mouse.row);
         // While printing, only the form's rows are clicked: the preview is
         // no page to put on, pan or turn.
