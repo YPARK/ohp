@@ -28,6 +28,11 @@ pub enum Sides {
 impl Sides {
     pub const ALL: [Sides; 3] = [Sides::Printer, Sides::One, Sides::Two];
 
+    /// The one `word` names, as `word` says it.
+    pub fn from_word(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.word() == word)
+    }
+
     /// As it is kept: `printer`, `one`, `two`.
     fn word(self) -> &'static str {
         match self {
@@ -52,6 +57,11 @@ pub enum Scale {
 
 impl Scale {
     pub const ALL: [Scale; 3] = [Scale::Auto, Scale::Fit, Scale::Actual];
+
+    /// The one `word` names, as `word` says it.
+    pub fn from_word(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.word() == word)
+    }
 
     /// As it is kept: `auto`, `fit`, `actual`.
     fn word(self) -> &'static str {
@@ -87,12 +97,10 @@ impl Kept {
             match key {
                 "printer" if !value.is_empty() => kept.printer = Some(value.to_string()),
                 "sides" => {
-                    let sides = Sides::ALL.into_iter().find(|s| s.word() == value);
-                    kept.sides = sides.unwrap_or(kept.sides);
+                    kept.sides = Sides::from_word(value).unwrap_or(kept.sides);
                 }
                 "scale" => {
-                    let scale = Scale::ALL.into_iter().find(|s| s.word() == value);
-                    kept.scale = scale.unwrap_or(kept.scale);
+                    kept.scale = Scale::from_word(value).unwrap_or(kept.scale);
                 }
                 _ => {}
             }
@@ -127,6 +135,9 @@ pub fn keep(config: Option<&Path>, kept: &Kept) -> std::io::Result<()> {
     };
     crate::write(&dir.join(KEPT), kept.text().as_bytes())
 }
+
+/// The most copies printed at once.
+pub const MOST_COPIES: u32 = 99;
 
 /// What to print, and how.
 #[derive(Clone, Debug, PartialEq)]

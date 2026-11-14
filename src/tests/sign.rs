@@ -350,3 +350,32 @@ fn of_fields_near_a_click_the_one_it_is_in_is_taken() {
     let got = field_at(&original, 0, (150., h - 112.)).unwrap();
     assert!((got[3] - (h - 100.)).abs() < 0.01, "{got:?}");
 }
+
+#[test]
+fn a_hidden_empty_or_signed_field_is_not_one_to_put_in() {
+    let open = Original::read(&with_field("Sig", [100., 50., 300., 90.])).unwrap();
+    assert_eq!(fields(&open, 0).len(), 1);
+    assert_eq!(all_fields(&open), vec![fields(&open, 0)]);
+    let empty = Original::read(&with_field("Sig", [0., 0., 0., 0.])).unwrap();
+    assert!(fields(&empty, 0).is_empty());
+    for (key, value) in [
+        ("F", Object::Integer(2)),
+        ("V", Object::Dictionary(Dictionary::new())),
+    ] {
+        let mut doc = Document::load_mem(&with_field("Sig", [100., 50., 300., 90.])).unwrap();
+        let page = *doc.get_pages().get(&1).unwrap();
+        let annots = doc.get_dictionary(page).unwrap().get(b"Annots").unwrap();
+        let id = annots.as_array().unwrap()[0].as_reference().unwrap();
+        doc.get_object_mut(id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(key, value);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).unwrap();
+        assert!(
+            fields(&Original::read(&out).unwrap(), 0).is_empty(),
+            "{key}"
+        );
+    }
+}
