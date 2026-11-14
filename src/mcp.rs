@@ -1,8 +1,9 @@
 //! `ohp mcp`: a Model Context Protocol server, over stdio, a JSON-RPC
 //! message a line. Through it an assistant shows a file in the ohp running
 //! here, or opens one in a window of its own, turns its slides, and lists,
-//! renders and reads the pages of any deck, PDF, markdown or the rest, and
-//! reads and writes their speaker notes.
+//! renders and reads the pages of any deck, PDF, markdown or the rest,
+//! reads and writes their speaker notes, annotates and signs a PDF, as `A`
+//! does on screen, and prints.
 //!
 //! What is shown is asked of the running ohp through [`crate::control`];
 //! the pages themselves are read here, so they can be read with no ohp
@@ -17,6 +18,10 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(feature = "sign")]
+mod annotate;
+mod printing;
+
 /// The protocol spoken where the client names none.
 const PROTOCOL: &str = "2025-06-18";
 
@@ -25,7 +30,11 @@ const MOST_TEXT: usize = 200_000;
 
 /// Serve the client on stdin and stdout until it goes.
 pub fn serve() -> anyhow::Result<()> {
-    let mut server = Server::default();
+    let mut server = Server {
+        config: crate::config(),
+        printing: vec!["lp".into(), "lpr".into()],
+        ..Server::default()
+    };
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -79,6 +88,14 @@ pub struct Server {
     kept: Option<Kept>,
     /// What the running ohp showed, asked once a tool call.
     shown: Option<Option<Status>>,
+    /// ohp's config folder, where the signature, what was typed and the
+    /// printer are kept: none, so none is read or kept, if `None`.
+    config: Option<PathBuf>,
+    /// The copies `annotate` wrote, each with the PDF it was made from and
+    /// its stamp as written: one is written over only while unchanged.
+    written: std::collections::HashMap<PathBuf, (PathBuf, Stamp)>,
+    /// What prints, `lp`, else `lpr`: nothing is printed if it is empty.
+    printing: Vec<std::ffi::OsString>,
 }
 
 /// The deck last read, when its files were changed then, and its pages'
@@ -108,7 +125,7 @@ impl Server {
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "ohp", "title": "ohp, an overhead projector", "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": "ohp shows slides and documents (PDF, markdown, R Markdown, HTML, images) in the terminal. Use `open` to put a file in front of the user, `goto` to turn to a slide while you talk about it, `slides`, `text` and `render` to read pages yourself, and `notes` for speaker notes. Pages are counted from 1.",
+                    "instructions": "ohp shows slides and documents (PDF, markdown, R Markdown, HTML, images) in the terminal. Use `open` to put a file in front of the user, `goto` to turn to a slide while you talk about it, `slides`, `text` and `render` to read pages yourself, and `notes` for speaker notes. To fill in or sign a PDF, `fields` lists its form fields and what there is to sign with, and `annotate` puts a signature, text, the date or ✓ ✕ ● on its pages, in a copy beside it; `render` the copy to check it. `print` prints a deck. Pages are counted from 1; points from a page's top left, as it is shown.",
                 })
             }
             "ping" => json!({}),
@@ -140,6 +157,12 @@ impl Server {
             "text" => text(self.text(args)?),
             "render" => self.render(args),
             "notes" => text(self.notes(args)?),
+            #[cfg(feature = "sign")]
+            "fields" => text(self.fields(args)?),
+            #[cfg(feature = "sign")]
+            "annotate" => text(self.annotate(args)?),
+            "print" => text(self.print(args)?),
+            "printers" => text(self.printers()),
             _ => Err(format!("ohp has no tool {name}")),
         }
     }
@@ -224,10 +247,7 @@ impl Server {
     fn page(&mut self, args: &Value, deck: &Deck) -> Result<usize, String> {
         let page = match number(args, "page")? {
             Some(n) => from_one(n)?,
-            None => self
-                .running()
-                .filter(|s| s.files == deck.paths)
-                .map_or(0, |s| s.page),
+            None => self.shown_page(deck),
         };
         if page >= deck.pages {
             return Err(format!(
@@ -237,6 +257,29 @@ impl Server {
             ));
         }
         Ok(page)
+    }
+
+    /// The page, from 0, the running ohp shows of `deck`, if it shows it,
+    /// or a copy `annotate` made of it; else the first.
+    fn shown_page(&mut self, deck: &Deck) -> usize {
+        self.shows(deck).unwrap_or(0)
+    }
+
+    /// The page, from 0, the running ohp shows of `deck`, if it shows it,
+    /// or a copy `annotate` made of it.
+    fn shows(&mut self, deck: &Deck) -> Option<usize> {
+        let shown = self.running()?;
+        let copied = self.original_of(&shown.files);
+        (shown.files == deck.paths || copied.is_some_and(|o| [o] == *deck.paths))
+            .then_some(shown.page)
+    }
+
+    /// The PDF the copy `files` is, if `annotate` made it.
+    fn original_of(&self, files: &[PathBuf]) -> Option<PathBuf> {
+        match files {
+            [copy] => self.written.get(copy).map(|(original, _)| original.clone()),
+            _ => None,
+        }
     }
 
     fn goto(&mut self, args: &Value) -> Result<String, String> {
@@ -331,13 +374,15 @@ impl Server {
         let width = number(args, "width")?.unwrap_or(1200).clamp(100, 4000) as u32;
         let png = render::png(deck.data.clone(), page, width).map_err(|e| format!("{e:#}"))?;
         let data = base64::engine::general_purpose::STANDARD.encode(png);
+        let (w, h) = deck.sizes[page];
         Ok(vec![
             json!({"type": "image", "data": data, "mimeType": "image/png"}),
             json!({"type": "text", "text": format!(
-                "page {} of {} of {}, {width} pixels across",
+                "page {} of {} of {}, {width} pixels across: {w:.0}×{h:.0} pt, a pixel {:.4} pt",
                 page + 1,
                 deck.pages,
-                render::shown(&deck.paths)
+                render::shown(&deck.paths),
+                w / width as f32,
             )}),
         ])
     }
@@ -458,6 +503,88 @@ fn all_notes(deck: &Deck) -> notes::Notes {
 
 /// The tools, as `tools/list` gives them.
 fn tools() -> Value {
+    let mut tools = reading_tools();
+    let list = tools.as_array_mut().expect("a list");
+    #[cfg(feature = "sign")]
+    list.extend(signing_tools());
+    list.extend(printing_tools());
+    tools
+}
+
+/// The tools that annotate and sign a PDF.
+#[cfg(feature = "sign")]
+fn signing_tools() -> Vec<Value> {
+    let page = json!({"type": "integer", "minimum": 1, "description": "Page number, from 1."});
+    let path = json!({"type": "string", "description": "The PDF. Without it, the one the running ohp shows."});
+    let mark = json!({
+        "type": "object",
+        "properties": {
+            "what": {"type": "string", "enum": ["signature", "text", "date", "check", "cross", "dot"], "description": "The signature (an image), `text`, today's date, or a ✓ ✕ ● mark."},
+            "text": {"type": "string", "description": "For `text`: one line, in Latin letters, as Helvetica sets it."},
+            "page": {"type": "integer", "minimum": 1, "description": "Page number, from 1. Without it, the page on screen; with `field`, the page it is found on."},
+            "x": {"type": "number", "description": "Points from the page's left, as shown: a signature's or text's left edge, a ✓ ✕ ●'s middle."},
+            "y": {"type": "number", "description": "Points from the page's top, as shown: halfway up what is put."},
+            "field": {"type": "string", "description": "In place of x and y: the form field, by its name as `fields` lists it, to fit a signature or text to."},
+            "size": {"type": "number", "minimum": 0.2, "maximum": 6, "description": "How much larger than its own size, 1: a signature 150 pt wide at most and 32 tall, text 11 pt, a mark 14 pt. Without it, the size the user last put that kind at."},
+            "fit": {"type": "boolean", "description": "Put at x, y in or near a form field, fit a signature or text to it, as a click does; true if not given."},
+        },
+        "required": ["what"],
+    });
+    vec![
+        json!({
+            "name": "fields",
+            "title": "A PDF's form fields",
+            "description": "A PDF's form fields to sign or type in, by name, page and box in points from the page's top left, as shown, with each page's size; and what there is to annotate it with: the signature kept, the texts the user typed before (their name, an address), today's date, and the sizes each kind is put at.",
+            "inputSchema": {"type": "object", "properties": {"path": path, "page": page}},
+            "annotations": {"readOnlyHint": true, "openWorldHint": false},
+        }),
+        json!({
+            "name": "annotate",
+            "title": "Annotate and sign a PDF",
+            "description": "Put a signature, text, the date or ✓ ✕ ● marks on a PDF's pages, as ohp's `A` does, drawn into the pages of a copy beside it (form.pdf to form-signed.pdf), the PDF itself never changed, so a digital signature on it stays valid. Each call draws all its `marks` afresh on the PDF: to move, size or take back one, call again with the list changed. A copy annotate wrote is written over while unchanged since; any other file there only with `replace`. An ohp showing the copy turns to the first mark; `open` the copy to show it. `render` the copy to check it.",
+            "inputSchema": {"type": "object", "properties": {
+                "path": path,
+                "marks": {"type": "array", "items": mark, "minItems": 1, "description": "What to put, each where it goes."},
+                "signature": {"type": "string", "description": "An image of the signature: a PNG with a clear background, or a photo or scan of it on paper, whose paper is made clear. Without it, the one kept."},
+                "keep_signature": {"type": "boolean", "description": "Keep `signature` to sign with from now on, as ohp's own, once the copy is written; false if not given."},
+                "name": {"type": "string", "description": "What to call the copy, beside the PDF; its name with -signed added if not given."},
+                "replace": {"type": "boolean", "description": "Write over a file of the copy's name that annotate did not leave there, as one signed on screen; false if not given."},
+            }, "required": ["marks"]},
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false},
+        }),
+    ]
+}
+
+/// The tools that print.
+fn printing_tools() -> Vec<Value> {
+    let path = json!({"type": "string", "description": "A PDF, markdown, R Markdown, HTML or image file, read with no code in it run: R Markdown's chunks are printed, not knitted; an annotated PDF is its copy. Without it, the deck the running ohp shows, as it shows it."});
+    vec![
+        json!({
+            "name": "printers",
+            "title": "The printers",
+            "description": "The printers CUPS lists here, the default first, and the one printed with last.",
+            "inputSchema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": true, "openWorldHint": false},
+        }),
+        json!({
+            "name": "print",
+            "title": "Print",
+            "description": "Print a deck, as ohp's `P` does, with CUPS's lp, on the paper the printer is set to. Without a `printer`, sides or scale, those printed with last.",
+            "inputSchema": {"type": "object", "properties": {
+                "path": path,
+                "pages": {"type": "string", "description": "`all`, `this` for the page on screen, or as `3-7, 9`; all if not given."},
+                "copies": {"type": "integer", "minimum": 1, "maximum": 99},
+                "sides": {"type": "string", "enum": ["printer", "one", "two"], "description": "As the printer is set, one-sided or two-sided."},
+                "scale": {"type": "string", "enum": ["auto", "fit", "actual"], "description": "Shrunk to fit only if larger than the paper; fitted to the paper; or actual size."},
+                "printer": {"type": "string", "description": "A printer, as `printers` names it."},
+            }},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": true},
+        }),
+    ]
+}
+
+/// The tools that show and read decks.
+fn reading_tools() -> Value {
     let page =
         json!({"type": "integer", "minimum": 1, "description": "Slide or page number, from 1."});
     let path = json!({"type": "string", "description": "A PDF, markdown, R Markdown, HTML or image file, read with no code in it run: R Markdown's chunks are shown, not knitted. Without it, the deck the running ohp shows, as it shows it."});

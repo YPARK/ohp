@@ -204,8 +204,9 @@ bold, italics, code, lists and quotes as such.
 
 `ohp mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
 server, on stdio, so an assistant can show you a file, turn to the slide
-it is talking about, and read, see and annotate the pages of any deck
-itself, PDF, markdown or the rest:
+it is talking about, read and see the pages of any deck itself, PDF,
+markdown or the rest, write its speaker notes, fill in and sign a PDF,
+and print:
 
 | Tool | |
 |---|---|
@@ -216,6 +217,22 @@ itself, PDF, markdown or the rest:
 | `text` | a page's text, or every page's |
 | `render` | a page as a PNG, to see its layout, figures and tables |
 | `notes` | read a slide's speaker notes, or write them into the notes file presenter view shows |
+| `fields` | a PDF's form fields to sign or type in, by name and box, and what there is to sign with: the signature kept, what you typed before, the date |
+| `annotate` | put a signature, text, the date, ✓ ✕ ● on a PDF's pages, by point or by form field, in a copy, as `A` does |
+| `printers` | the printers CUPS lists, the default first |
+| `print` | print a deck, its pages, copies, sides and scale, as `P` does |
+
+`annotate` draws all the marks it is given afresh on the PDF each call,
+into its copy, `form-signed.pdf` beside `form.pdf` unless it is named, as
+[Annotating and signing](#annotating-and-signing) has it: to move, size
+or take one back, it is called again with the list changed. Points are
+counted from a page's top left as it is shown, as `fields` gives a
+field's box and `render` says how many a pixel is; a signature or text
+put in a form field, or named by its field, is fitted to it. The copy
+is written over only while it is as `annotate` left it, so one signed on
+screen with `A` is not lost; an ohp showing the copy turns to the first
+mark. What is typed, the sizes and the printer are not kept for next
+time, as they are on screen: what you pick stays yours.
 
 `slides`, `text`, `render` and `notes` take a `path`, and read the file
 themselves, so they work with no ohp running, running no code in it: R

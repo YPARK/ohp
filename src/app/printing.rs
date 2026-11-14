@@ -18,9 +18,6 @@ use std::ffi::{OsStr, OsString};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-/// Most copies `→` asks for.
-const MOST_COPIES: u32 = 99;
-
 /// The form's rows, in order.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Row {
@@ -408,7 +405,7 @@ impl Printing {
     fn change(&mut self, up: bool) {
         match self.row {
             Row::Pages => {}
-            Row::Copies if up => self.copies = (self.copies + 1).min(MOST_COPIES),
+            Row::Copies if up => self.copies = (self.copies + 1).min(print::MOST_COPIES),
             Row::Copies => self.copies = (self.copies - 1).max(1),
             Row::Sides => self.sides = cycle(&Sides::ALL, self.sides, up),
             Row::Scale => self.scale = cycle(&Scale::ALL, self.scale, up),

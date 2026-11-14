@@ -635,21 +635,12 @@ impl App {
         let Some(mut s) = self.signing.take() else {
             return;
         };
-        let name = s
-            .naming
-            .take()
-            .map(|f| f.text.trim().to_string())
-            .unwrap_or_default();
-        let name = match name.to_lowercase().ends_with(".pdf") {
-            _ if name.is_empty() => render::name(&s.copy),
-            true => name,
-            false => format!("{name}.pdf"),
-        };
-        let kept = s.copy.with_file_name(name.replace('/', "-"));
+        let name = s.naming.take().map(|f| f.text).unwrap_or_default();
+        let kept = sign::named(&s.copy, &name);
         if kept != s.copy
             && let Err(e) = std::fs::rename(&s.copy, &kept)
         {
-            self.notice = Some(format!("cannot name it {name}: {e}"));
+            self.notice = Some(format!("cannot name it {}: {e}", render::name(&kept)));
             self.signing = Some(s);
             return;
         }
@@ -699,31 +690,11 @@ impl App {
     }
 }
 
-/// `mark` as it is put: in a form field to sign or type in, if it was put
-/// in one, the signature fitted to it, and text at its left edge, halfway
-/// up it, no taller than it; else at the size its kind is put at.
+/// `mark` as it is put: at the size its kind is put at, unless fitted to
+/// a form field it was put in.
 fn placed(s: &Signing, mark: Mark) -> Mark {
     let scale = s.sizes.of(mark.what.kind());
-    let fits = matches!(mark.what, What::Signature | What::Text(_));
-    let field = fits
-        .then(|| sign::field_at(&s.original, mark.page, mark.at))
-        .flatten();
-    match (&mark.what, field, &s.signature) {
-        (What::Signature, Some(field), Some(signature)) => {
-            let (at, scale) = sign::fit(signature, field);
-            Mark { at, scale, ..mark }
-        }
-        (What::Text(_), Some([x0, y0, _, y1]), _) => {
-            let tallest = 0.7 * (y1 - y0) / sign::TEXT_SIZE;
-            let at = (x0 + 2., (y0 + y1) / 2.);
-            Mark {
-                at,
-                scale: scale.min(tallest),
-                ..mark
-            }
-        }
-        _ => Mark { scale, ..mark },
-    }
+    sign::place(&s.original, Mark { scale, ..mark }, s.signature.as_ref()).0
 }
 
 /// A scale as a percent, as `115`.

@@ -96,29 +96,92 @@ pub fn bounds(mark: &Mark, signature: Option<&Signature>) -> [f32; 4] {
     }
 }
 
-/// The box, as `bounds` has boxes, of the form field to sign or type in
-/// that is at `point` on `page`, as shown, or near it, if one is: a signature's or a
+/// A form field to sign or type in, on a page: a signature's or a
 /// text's, not a checkbox's or a button's.
-pub fn field_at(original: &Original, page: usize, (u, v): (f32, f32)) -> Option<[f32; 4]> {
+#[derive(Clone, Debug, PartialEq)]
+pub struct Field {
+    /// Its whole name, as `name.first` for a field `first` under `name`.
+    pub name: Option<String>,
+    /// A signature's field, else a text's.
+    pub signature: bool,
+    /// Its box, as `bounds` has boxes.
+    pub shown: [f32; 4],
+}
+
+/// The form fields to sign or type in on `page`, in the order it lists
+/// them.
+pub fn fields(original: &Original, page: usize) -> Vec<Field> {
     let doc = original.0.get_prev_documents();
-    let id = *doc.get_pages().get(&(u32::try_from(page).ok()? + 1))?;
+    let id = u32::try_from(page)
+        .ok()
+        .and_then(|n| doc.get_pages().get(&(n + 1)).copied());
+    id.map_or_else(Vec::new, |id| fields_on(doc, id))
+}
+
+/// Each page's form fields to sign or type in, as `fields` lists them,
+/// the pages walked once.
+pub fn all_fields(original: &Original) -> Vec<Vec<Field>> {
+    let doc = original.0.get_prev_documents();
+    doc.get_pages()
+        .values()
+        .map(|&id| fields_on(doc, id))
+        .collect()
+}
+
+/// The form fields to sign or type in on the page `id` of `doc`.
+fn fields_on(doc: &Document, id: ObjectId) -> Vec<Field> {
     let view = page_view(doc, id);
-    let annots = doc.get_dictionary(id).ok()?.get(b"Annots").ok()?;
-    let (_, annots) = doc.dereference(annots).ok()?;
+    let annots = (doc.get_dictionary(id).ok())
+        .and_then(|page| page.get(b"Annots").ok())
+        .and_then(|annots| doc.dereference(annots).ok())
+        .and_then(|(_, annots)| annots.as_array().ok());
+    let Some(annots) = annots else {
+        return Vec::new();
+    };
+    annots
+        .iter()
+        .filter_map(|a| {
+            let widget = doc.dereference(a).ok()?.1.as_dict().ok()?;
+            let signature = match field_type(doc, widget)? {
+                b"Sig" => true,
+                b"Tx" => false,
+                _ => return None,
+            };
+            // Not one to put anything in: a signature field signed already,
+            // or one hidden, as a digital signature's often is.
+            let signed = signature && field_value(doc, widget, b"V").is_some();
+            let flags = widget.get(b"F").and_then(Object::as_i64).unwrap_or(0);
+            if signed || flags & (HIDDEN | NO_VIEW) != 0 {
+                return None;
+            }
+            let rect = widget.get(b"Rect").ok()?.as_array().ok()?;
+            let n: Vec<f32> = rect.iter().filter_map(|n| n.as_float().ok()).collect();
+            let [x0, y0, x1, y1] = <[f32; 4]>::try_from(n).ok()?;
+            if (x1 - x0).abs() < 1. || (y1 - y0).abs() < 1. {
+                return None;
+            }
+            let (a, b) = (view.shown((x0, y0)), view.shown((x1, y1)));
+            Some(Field {
+                name: field_name(doc, widget),
+                signature,
+                shown: [a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1)],
+            })
+        })
+        .collect()
+}
+
+/// The box, as `bounds` has boxes, of the form field to sign or type in
+/// that is at `point` on `page`, as shown, or near it, if one is.
+pub fn field_at(original: &Original, page: usize, (u, v): (f32, f32)) -> Option<[f32; 4]> {
     // The field the point is in, else the nearest it is near.
     let away = |p: f32, from: f32, to: f32| (from - p).max(p - to).max(0.);
-    let fields = annots.as_array().ok()?.iter().filter_map(|a| {
-        let widget = doc.dereference(a).ok()?.1.as_dict().ok()?;
-        let fillable = matches!(field_type(doc, widget)?, b"Sig" | b"Tx");
-        let rect = widget.get(b"Rect").ok()?.as_array().ok()?;
-        let n: Vec<f32> = rect.iter().filter_map(|n| n.as_float().ok()).collect();
-        let [x0, y0, x1, y1] = <[f32; 4]>::try_from(n).ok()?;
-        let (a, b) = (view.shown((x0, y0)), view.shown((x1, y1)));
-        let shown = [a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1)];
-        let far = away(u, shown[0], shown[2]).hypot(away(v, shown[1], shown[3]));
-        (fillable && far <= NEAR).then_some((far, shown))
-    });
-    fields
+    fields(original, page)
+        .into_iter()
+        .map(|f| {
+            let [x0, y0, x1, y1] = f.shown;
+            (away(u, x0, x1).hypot(away(v, y0, y1)), f.shown)
+        })
+        .filter(|(far, _)| *far <= NEAR)
         .min_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, shown)| shown)
 }
@@ -129,10 +192,15 @@ const NEAR: f32 = 8.;
 
 /// A field's type, `/FT`, as its widget has it or a field above it does.
 fn field_type<'a>(doc: &'a Document, widget: &'a Dictionary) -> Option<&'a [u8]> {
+    field_value(doc, widget, b"FT")?.as_name().ok()
+}
+
+/// A field's `key`, as its widget has it or a field above it does.
+fn field_value<'a>(doc: &'a Document, widget: &'a Dictionary, key: &[u8]) -> Option<&'a Object> {
     let mut at = widget;
     for _ in 0..16 {
-        if let Ok(kind) = at.get(b"FT").and_then(Object::as_name) {
-            return Some(kind);
+        if let Ok(value) = at.get(key) {
+            return doc.dereference(value).ok().map(|(_, v)| v);
         }
         let parent = at.get(b"Parent").ok()?;
         at = doc.dereference(parent).ok()?.1.as_dict().ok()?;
@@ -140,10 +208,39 @@ fn field_type<'a>(doc: &'a Document, widget: &'a Dictionary) -> Option<&'a [u8]>
     None
 }
 
+/// An annotation's flags, `/F`: hidden, and not shown.
+const HIDDEN: i64 = 2;
+const NO_VIEW: i64 = 32;
+
+/// A field's whole name: its widget's `/T`, and those of the fields above
+/// it, joined by dots, as forms name them.
+fn field_name(doc: &Document, widget: &Dictionary) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut at = widget;
+    for _ in 0..16 {
+        if let Some(t) = at
+            .get(b"T")
+            .ok()
+            .and_then(|t| lopdf::decode_text_string(t).ok())
+        {
+            parts.push(t);
+        }
+        let Some(parent) = at.get(b"Parent").ok().and_then(|p| doc.dereference(p).ok()) else {
+            break;
+        };
+        let Ok(parent) = parent.1.as_dict() else {
+            break;
+        };
+        at = parent;
+    }
+    parts.reverse();
+    (!parts.is_empty()).then(|| parts.join("."))
+}
+
 /// Where to put `signature`, and at what scale, to fit the field `field`,
 /// a box as `bounds` has boxes: as large as it is, a little inside it, its
 /// left edge at the field's, halfway up it.
-pub fn fit(signature: &Signature, [x0, y0, x1, y1]: [f32; 4]) -> ((f32, f32), f32) {
+fn fit(signature: &Signature, [x0, y0, x1, y1]: [f32; 4]) -> ((f32, f32), f32) {
     let (w, h) = (x1 - x0, y1 - y0);
     let one = signature.width_at(1.);
     let scale = (0.94 * w / one).min(0.84 * h / signature.height_at(one));
@@ -151,6 +248,46 @@ pub fn fit(signature: &Signature, [x0, y0, x1, y1]: [f32; 4]) -> ((f32, f32), f3
         (x0 + 0.03 * w, (y0 + y1) / 2.),
         scale.clamp(SMALLEST, LARGEST),
     )
+}
+
+/// `mark` as it is put: in a form field to sign or type in, if it was put
+/// in one or near it, fitted to it, as `fit_to` fits it; else as it is.
+/// The field's box, if it was fitted to one.
+pub fn place(
+    original: &Original,
+    mark: Mark,
+    signature: Option<&Signature>,
+) -> (Mark, Option<[f32; 4]>) {
+    let fits = matches!(mark.what, What::Signature | What::Text(_));
+    match fits
+        .then(|| field_at(original, mark.page, mark.at))
+        .flatten()
+    {
+        Some(field) => (fit_to(mark, field, signature), Some(field)),
+        None => (mark, None),
+    }
+}
+
+/// `mark` fitted to the field `field`, a box as `bounds` has boxes: a
+/// signature as `fit` fits it; text at its left edge, halfway up it, no
+/// taller than it; anything else as it is.
+pub fn fit_to(mark: Mark, field: [f32; 4], signature: Option<&Signature>) -> Mark {
+    match (&mark.what, signature) {
+        (What::Signature, Some(signature)) => {
+            let (at, scale) = fit(signature, field);
+            Mark { at, scale, ..mark }
+        }
+        (What::Text(_), _) => {
+            let [x0, y0, _, y1] = field;
+            let tallest = 0.7 * (y1 - y0) / TEXT_SIZE;
+            Mark {
+                at: (x0 + 2., (y0 + y1) / 2.),
+                scale: mark.scale.min(tallest),
+                ..mark
+            }
+        }
+        _ => mark,
+    }
 }
 
 /// Which of `marks` is at `point` on `page`: the last put of those there.
@@ -405,6 +542,21 @@ pub fn copy_of(path: &Path, added: &str) -> PathBuf {
     let added = added.trim().trim_start_matches(['-', '_', ' ']);
     let added = if added.is_empty() { SIGNED } else { added };
     path.with_file_name(format!("{stem}-{added}.pdf"))
+}
+
+/// The copy `copy` under the name `name` typed for it, beside it: `.pdf`
+/// added if it has none, and a `/` made a `-`; as it is if `name` is
+/// blank.
+pub fn named(copy: &Path, name: &str) -> PathBuf {
+    let name = name.trim();
+    if name.is_empty() {
+        return copy.to_path_buf();
+    }
+    let name = name.replace('/', "-");
+    match name.to_lowercase().ends_with(".pdf") {
+        true => copy.with_file_name(name),
+        false => copy.with_file_name(format!("{name}.pdf")),
+    }
 }
 
 /// The signature kept in `dir`, as `keep` keeps it.
