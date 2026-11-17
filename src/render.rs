@@ -113,7 +113,7 @@ pub fn stamp(path: &Path) -> Stamp {
 
 /// Whether the file ends the way a finished PDF does. LaTeX may pause while
 /// writing one, so a file that stopped changing is not necessarily done.
-/// Markdown, HTML and an image are written all at once.
+/// Markdown, HTML, Office files and an image are written all at once.
 pub fn finished(path: &Path) -> bool {
     if document(path) || image(path) {
         return path.is_file();
@@ -142,10 +142,49 @@ pub fn html(path: &Path) -> bool {
         .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "html" | "htm"))
 }
 
-/// Whether `path` names markdown, R Markdown or HTML, typeset rather than
-/// read as a PDF.
+/// What a Word or PowerPoint file's extension makes it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Office {
+    Word,
+    Slides,
+    /// Office's old binary format, and the extension to save it as anew.
+    Old(&'static str),
+}
+
+/// Word's and PowerPoint's extensions, and what each is. Not `.dot` or
+/// `.pot`, which are Graphviz's and gettext's too.
+const OFFICE: [(&str, Office); 13] = [
+    ("docx", Office::Word),
+    ("docm", Office::Word),
+    ("dotx", Office::Word),
+    ("dotm", Office::Word),
+    ("pptx", Office::Slides),
+    ("pptm", Office::Slides),
+    ("potx", Office::Slides),
+    ("potm", Office::Slides),
+    ("ppsx", Office::Slides),
+    ("ppsm", Office::Slides),
+    ("doc", Office::Old("docx")),
+    ("ppt", Office::Old("pptx")),
+    ("pps", Office::Old("ppsx")),
+];
+
+/// What `path` is, if its extension names a Word or PowerPoint file.
+pub fn office_kind(path: &Path) -> Option<Office> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    OFFICE.iter().find(|(e, _)| *e == ext).map(|(_, k)| *k)
+}
+
+/// Whether `path` names a Word or PowerPoint file, `.docx` or `.pptx`,
+/// typeset as markdown is, or an old one, told to be saved anew.
+pub fn office(path: &Path) -> bool {
+    office_kind(path).is_some()
+}
+
+/// Whether `path` names markdown, R Markdown, HTML, or a Word or PowerPoint
+/// file, typeset rather than read as a PDF.
 pub fn document(path: &Path) -> bool {
-    markdown(path) || html(path)
+    markdown(path) || html(path) || office(path)
 }
 
 /// Whether `path` names an image, shown as a slide of its own.
@@ -207,6 +246,7 @@ fn typeset(paths: &[PathBuf], options: &Options) -> anyhow::Result<Made> {
 fn typeset(paths: &[PathBuf], _: &Options) -> anyhow::Result<Made> {
     let why = match paths {
         [path] if html(path) => format!("{} is HTML", path.display()),
+        [path] if office(path) => format!("{} is a Word or PowerPoint file", path.display()),
         [path] if markdown(path) => format!("{} is markdown", path.display()),
         [path] => format!("{} is an image", path.display()),
         _ => "showing several files together needs typst".into(),

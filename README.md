@@ -1,7 +1,7 @@
 # ohp
 
 An overhead projector: present beamer PDF slides, or markdown, R
-Markdown and HTML, in the terminal.
+Markdown, HTML, Word and PowerPoint, in the terminal.
 
 Slides are rasterised in pure Rust by [hayro](https://crates.io/crates/hayro)
 and shown through [ratatui-image](https://crates.io/crates/ratatui-image),
@@ -63,6 +63,8 @@ ohp user@host:~/talks/talk.pdf       # slides on another machine
 ohp talk.Rmd                         # R Markdown slides, chunks run by knitr
 ohp --paper a4 notes.md              # a markdown document, on A4 pages
 ohp notes.html                       # an HTML document
+ohp report.docx                      # a Word document
+ohp talk.pptx                        # PowerPoint slides, with their notes
 ohp plot.png                         # an image
 ohp intro.pdf figs/*.png photo.jpg   # several files, mixed, one after another
 ohp host:talk.pdf host:fig.png       # several on another machine
@@ -80,8 +82,8 @@ file is shown first.
 
 Several files given, or marked, are shown as one deck, in the order
 given: each page of a PDF as a slide, each image, PNG, JPEG, GIF, WebP or
-SVG, as a slide its own shape, and markdown or HTML typeset as it is
-alone. The status line names the file the slide is from. A photo larger than a
+SVG, as a slide its own shape, and markdown, HTML, Word or PowerPoint
+typeset as it is alone. The status line names the file the slide is from. A photo larger than a
 screen shows, past 4096 pixels across or down, is made that small first.
 A file that cannot be read is left out, and named in the status line. A
 change to any of them reloads the deck, reading again only the files
@@ -214,7 +216,7 @@ and print:
 | `open` | show a file in the running ohp, from a slide; with none running, open ohp on it in a new terminal window |
 | `goto` | turn to a slide, by number or by words of its title; presenting, the audience sees it too |
 | `slides` | the page count, and each page's title and size, and whether it has notes |
-| `text` | a page's text, or every page's |
+| `text` | a page's text, or every page's; with `source`, the markdown a document is typeset from, its equations in LaTeX |
 | `render` | a page as a PNG, to see its layout, figures and tables |
 | `notes` | read a slide's speaker notes, or write them into the notes file presenter view shows |
 | `fields` | a PDF's form fields to sign or type in, by name and box, and what there is to sign with: the signature kept, what you typed before, the date |
@@ -319,6 +321,38 @@ flowchart drawn from its source. A reveal.js deck, the `<section>` slides in
 kept in `<textarea id="source">` and typeset as written.
 Anything else is a document, on the same paper as markdown, and `--paper`
 sets it.
+
+## Word and PowerPoint
+
+`.docx` and `.pptx` files are read in Rust, as the zips of XML they are,
+into markdown, and typeset as markdown is. A Word document is its body:
+headings, by their styles, as the document outline has them; bulleted and
+numbered lists, nested; tables; links; bold, italic, struck-out and
+typewriter text; code, in a code style, as a block; footnotes; pictures;
+and equations, written in Word's equation editor, as LaTeX. Its title, and
+author, are taken from the document's properties, or from a paragraph in
+the Title style. A table of contents is left out.
+
+A PowerPoint deck is laid out as its slides are: each slide a page of
+the deck's own size and shape, 16:9, 4:3 or a portrait page of figures,
+each picture, text box, table, filled shape and line where it is and as
+large as it is, cropped as it is, and text at its sizes, in its fonts and
+colours, aligned, bulleted and spaced, shrunk to fit where PowerPoint
+shrinks it. What a slide's placeholders take from its layout and master,
+their place and their text's style, is taken as PowerPoint takes it, and
+the shapes the master and layout put on every slide, as a logo, are
+drawn under the slide's own. Its speaker notes are the presenter view's.
+Hidden slides are left out; charts and SmartArt are not drawn, an outline
+stands where they are. A font the machine does not have is set in
+Helvetica Neue or Arial. A deck that cannot be laid out is set as
+markdown, its slides' text, and the status line says why.
+
+A picture in a format typst cannot read, as a Windows metafile (EMF,
+WMF), is left out, and the status line says how many were. Office's old
+binary formats, `.doc` and `.ppt`, are not read: save them as `.docx`
+and `.pptx`. Where an assistant reads a document or a deck over `ohp
+mcp`, `text` with `source` gives it as markdown, its equations in LaTeX
+and a deck's speaker notes with it, and `render` shows its figures.
 
 ## Reading aloud
 

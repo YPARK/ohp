@@ -83,11 +83,11 @@ pub(super) fn trim_code(s: &str) -> &str {
         .unwrap_or(s)
 }
 
-fn fence_for(code: &str) -> String {
+pub(crate) fn fence_for(code: &str) -> String {
     "`".repeat(longest(code, '`').max(2) + 1)
 }
 
-fn code_span(text: &str) -> String {
+pub(crate) fn code_span(text: &str) -> String {
     let text = text.replace(['\n', '\r'], " ");
     let fence = "`".repeat(longest(&text, '`') + 1);
     let pad = if text.starts_with('`') || text.ends_with('`') {

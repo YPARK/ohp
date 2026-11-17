@@ -125,7 +125,7 @@ impl Server {
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "ohp", "title": "ohp, an overhead projector", "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": "ohp shows slides and documents (PDF, markdown, R Markdown, HTML, images) in the terminal. Use `open` to put a file in front of the user, `goto` to turn to a slide while you talk about it, `slides`, `text` and `render` to read pages yourself, and `notes` for speaker notes. To fill in or sign a PDF, `fields` lists its form fields and what there is to sign with, and `annotate` puts a signature, text, the date or ✓ ✕ ● on its pages, in a copy beside it; `render` the copy to check it. `print` prints a deck. Pages are counted from 1; points from a page's top left, as it is shown.",
+                    "instructions": "ohp shows slides and documents (PDF, markdown, R Markdown, HTML, Word .docx, PowerPoint .pptx, images) in the terminal. Use `open` to put a file in front of the user, `goto` to turn to a slide while you talk about it, `slides`, `text` and `render` to read pages yourself (`text` with `source` gives a document's markdown, its equations in LaTeX, and `render` shows its figures), and `notes` for speaker notes. To fill in or sign a PDF, `fields` lists its form fields and what there is to sign with, and `annotate` puts a signature, text, the date or ✓ ✕ ● on its pages, in a copy beside it; `render` the copy to check it. `print` prints a deck. Pages are counted from 1; points from a page's top left, as it is shown.",
                 })
             }
             "ping" => json!({}),
@@ -173,12 +173,12 @@ impl Server {
         self.shown.get_or_insert_with(running).clone()
     }
 
-    /// The deck in `path`, else the one the running ohp shows.
-    fn deck(&mut self, args: &Value) -> Result<Arc<Deck>, String> {
-        // A file named is read with no code run: its R chunks are shown,
-        // not knitted. The deck on screen is read as the ohp showing it
-        // reads it, so its pages are the ones on screen.
-        let (paths, options) = match args.get("path").and_then(Value::as_str) {
+    /// The file named, else those the running ohp shows, and how to read
+    /// them. A file named is read with no code run: its R chunks are shown,
+    /// not knitted. The deck on screen is read as the ohp showing it reads
+    /// it, so its pages are the ones on screen.
+    fn paths(&mut self, args: &Value) -> Result<(Vec<PathBuf>, Options), String> {
+        Ok(match args.get("path").and_then(Value::as_str) {
             Some(path) => (
                 vec![resolve(path)?],
                 Options {
@@ -198,7 +198,12 @@ impl Server {
                 };
                 (shown.files, options)
             }
-        };
+        })
+    }
+
+    /// The deck in `path`, else the one the running ohp shows.
+    fn deck(&mut self, args: &Value) -> Result<Arc<Deck>, String> {
+        let (paths, options) = self.paths(args)?;
         let stamps: Vec<Stamp> = paths.iter().map(|p| render::stamp(p)).collect();
         if let Some(kept) = &self.kept
             && kept.paths == paths
@@ -341,6 +346,9 @@ impl Server {
     }
 
     fn text(&mut self, args: &Value) -> Result<String, String> {
+        if args.get("source").and_then(Value::as_bool) == Some(true) {
+            return self.source(args);
+        }
         let deck = self.deck(args)?;
         let pages: Vec<usize> = match number(args, "page")? {
             Some(_) => vec![self.page(args, &deck)?],
@@ -366,6 +374,36 @@ impl Server {
             }
         }
         Ok(out)
+    }
+
+    /// The markdown the file is typeset from.
+    #[cfg(feature = "markdown")]
+    fn source(&mut self, args: &Value) -> Result<String, String> {
+        let (paths, _) = self.paths(args)?;
+        let mut md = String::new();
+        for path in &paths {
+            let source = crate::typeset::source(path).map_err(|e| format!("{e:#}"))?;
+            // Several files shown together are each headed by their name.
+            if paths.len() > 1 {
+                md.push_str(&format!("<!-- {} -->\n", path.display()));
+            }
+            md.push_str(&source);
+            md.push('\n');
+        }
+        if md.len() > MOST_TEXT {
+            let cut = (0..=MOST_TEXT)
+                .rev()
+                .find(|&i| md.is_char_boundary(i))
+                .unwrap_or(0);
+            md.truncate(cut);
+            md.push_str("\n… cut here: the source is longer");
+        }
+        Ok(md)
+    }
+
+    #[cfg(not(feature = "markdown"))]
+    fn source(&mut self, _: &Value) -> Result<String, String> {
+        Err("ohp was built without its `markdown` feature, so it reads no source".into())
     }
 
     fn render(&mut self, args: &Value) -> Result<Vec<Value>, String> {
@@ -557,7 +595,7 @@ fn signing_tools() -> Vec<Value> {
 
 /// The tools that print.
 fn printing_tools() -> Vec<Value> {
-    let path = json!({"type": "string", "description": "A PDF, markdown, R Markdown, HTML or image file, read with no code in it run: R Markdown's chunks are printed, not knitted; an annotated PDF is its copy. Without it, the deck the running ohp shows, as it shows it."});
+    let path = json!({"type": "string", "description": "A PDF, markdown, R Markdown, HTML, Word (.docx), PowerPoint (.pptx) or image file, read with no code in it run: R Markdown's chunks are printed, not knitted; an annotated PDF is its copy. Without it, the deck the running ohp shows, as it shows it."});
     vec![
         json!({
             "name": "printers",
@@ -587,7 +625,7 @@ fn printing_tools() -> Vec<Value> {
 fn reading_tools() -> Value {
     let page =
         json!({"type": "integer", "minimum": 1, "description": "Slide or page number, from 1."});
-    let path = json!({"type": "string", "description": "A PDF, markdown, R Markdown, HTML or image file, read with no code in it run: R Markdown's chunks are shown, not knitted. Without it, the deck the running ohp shows, as it shows it."});
+    let path = json!({"type": "string", "description": "A PDF, markdown, R Markdown, HTML, Word (.docx), PowerPoint (.pptx) or image file, read with no code in it run: R Markdown's chunks are shown, not knitted. Without it, the deck the running ohp shows, as it shows it."});
     let read_only = json!({"readOnlyHint": true, "openWorldHint": false});
     json!([
         {
@@ -601,7 +639,7 @@ fn reading_tools() -> Value {
             "name": "open",
             "title": "Show a file",
             "description": "Show a file to the user in the ohp running here, from the slide given; with none running, open ohp on it in a new terminal window.",
-            "inputSchema": {"type": "object", "properties": {"path": {"type": "string", "description": "The file to show: PDF, markdown, R Markdown, HTML or an image."}, "page": page}, "required": ["path"]},
+            "inputSchema": {"type": "object", "properties": {"path": {"type": "string", "description": "The file to show: PDF, markdown, R Markdown, HTML, Word (.docx), PowerPoint (.pptx) or an image."}, "page": page}, "required": ["path"]},
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false},
         },
         {
@@ -621,8 +659,8 @@ fn reading_tools() -> Value {
         {
             "name": "text",
             "title": "Read a page's text",
-            "description": "The text of one page, or of every page, in the order it is read.",
-            "inputSchema": {"type": "object", "properties": {"path": path, "page": page}},
+            "description": "The text of one page, or of every page, in the order it is read. With `source`, instead the markdown the file is typeset from, for markdown, R Markdown, HTML, Word (.docx) and PowerPoint (.pptx): its headings, lists, tables, links and speaker notes, and its equations in LaTeX, as the page's text cannot give them; `render` a page to see its figures.",
+            "inputSchema": {"type": "object", "properties": {"path": path, "page": page, "source": {"type": "boolean", "description": "The markdown source, all of it, rather than a page's text."}}},
             "annotations": read_only,
         },
         {

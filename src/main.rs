@@ -24,7 +24,7 @@ use std::time::Duration;
 
 #[cfg_attr(
     feature = "markdown",
-    doc = "Present a beamer PDF, or markdown, R Markdown or HTML, in the terminal."
+    doc = "Present a beamer PDF, or markdown, R Markdown, HTML, Word or PowerPoint, in the terminal."
 )]
 #[cfg_attr(
     not(feature = "markdown"),
@@ -56,7 +56,7 @@ use std::time::Duration;
 struct Args {
     #[cfg_attr(
         feature = "markdown",
-        doc = "The slides: a PDF, `.md`, `.Rmd` or `.html` file, or an image, here, or on another machine"
+        doc = "The slides: a PDF, `.md`, `.Rmd`, `.html`, `.docx` or `.pptx` file, or an image, here, or on another machine"
     )]
     #[cfg_attr(
         not(feature = "markdown"),
@@ -67,7 +67,7 @@ struct Args {
     /// list.
     #[cfg_attr(
         feature = "markdown",
-        doc = "Several files, here or not, PDFs, images, markdown and HTML mixed, are shown one after another as one deck."
+        doc = "Several files, here or not, PDFs, images, markdown, HTML, Word and PowerPoint mixed, are shown one after another as one deck."
     )]
     files: Vec<PathBuf>,
     /// Start with slides as text, even where the terminal shows images.

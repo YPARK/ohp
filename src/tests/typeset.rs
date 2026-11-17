@@ -337,3 +337,48 @@ fn a_speaker_note_changes_neither_the_slides_nor_a_list() {
     let notes: Vec<&str> = noted.speaker.values().map(String::as_str).collect();
     assert_eq!(notes, ["about the part", "about one"]);
 }
+
+#[test]
+fn a_word_file_s_source_names_its_pictures_by_their_parts() {
+    use std::io::Write as _;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pic.docx");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    let stored =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let rels = |id: &str, kind: &str, target: &str| {
+        format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="{id}" Type="{rel}/{kind}" Target="{target}"/></Relationships>"#
+        )
+    };
+    let doc = format!(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="{rel}"><w:body><w:p><w:r><w:drawing><a:blip r:embed="rId9"/></w:drawing></w:r></w:p></w:body></w:document>"#
+    );
+    for (name, body) in [
+        (
+            "_rels/.rels",
+            rels("rId1", "officeDocument", "word/document.xml"),
+        ),
+        ("word/document.xml", doc),
+        (
+            "word/_rels/document.xml.rels",
+            rels("rId9", "image", "media/image1.png"),
+        ),
+        ("word/media/image1.png", "png".into()),
+    ] {
+        zip.start_file(name, stored).unwrap();
+        zip.write_all(body.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap();
+    assert_eq!(
+        source(&path).unwrap().trim(),
+        "![](<word/media/image1.png>)"
+    );
+}
+
+#[test]
+fn a_pdf_has_no_source() {
+    let err = source(Path::new("talk.pdf")).err().unwrap().to_string();
+    assert!(err.contains("has no source"), "{err}");
+}

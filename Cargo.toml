@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.92"
 license = "MIT"
 authors = ["Yongjin Park <yongjin.park@ubc.ca>"]
-description = "Present beamer PDF slides, markdown and HTML in the terminal over the kitty graphics protocol"
+description = "Present beamer PDF slides, markdown, HTML, Word and PowerPoint files in the terminal over the kitty graphics protocol"
 repository = "https://github.com/YPARK/ohp"
 keywords = ["pdf", "beamer", "slides", "tui", "markdown"]
 categories = ["command-line-utilities", "visualization"]
@@ -42,7 +42,7 @@ cuda = ["summary", "candle-core/cuda", "candle-nn/cuda", "candle-transformers/cu
 sign = ["dep:jiff", "dep:lopdf", "image/png", "image/jpeg"]
 # Slides read aloud by a speech program, run as R is, in a session of its own.
 speech = ["dep:libc", "dep:signal-hook", "dep:serde_json"]
-# Markdown, R Markdown and HTML, typeset by typst. Typst's evaluator grows
+# Markdown, R Markdown, HTML, and Word and PowerPoint files, typeset by typst. Typst's evaluator grows
 # its stack through `psm`, which assembles one small file with the C
 # toolchain. Citations are read with typst's own bibliography crates.
 # Images, and several files shown together, are set by typst too; ohp
@@ -58,6 +58,7 @@ markdown = [
     "dep:libc",
     "dep:percent-encoding",
     "dep:pulldown-cmark",
+    "dep:roxmltree",
     "dep:scraper",
     "dep:serde_json",
     "dep:serde_yaml",
@@ -67,6 +68,7 @@ markdown = [
     "dep:typst-kit",
     "dep:typst-layout",
     "dep:typst-pdf",
+    "dep:zip",
 ]
 
 [dependencies]
@@ -85,6 +87,9 @@ lopdf = { version = "0.46", optional = true, default-features = false }
 percent-encoding = { version = "2.3", optional = true }
 pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 ratatui = "0.30"
+# Word and PowerPoint files are zips of XML: read with roxmltree, which
+# typst reads SVG with, and zip, inflating with flate2, which hayro has.
+roxmltree = { version = "0.21", optional = true }
 # Without default features: `chafa-dyn` links a C library.
 ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
 scraper = { version = "0.23", optional = true, default-features = false }
@@ -98,6 +103,7 @@ typst-kit = { version = "0.15.1", default-features = false, features = ["scan-fo
 typst-layout = { version = "0.15.1", optional = true }
 typst-pdf = { version = "0.15.1", optional = true }
 unicode-width = "0.2"
+zip = { version = "7.4", optional = true, default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(unix)'.dependencies]
 # To stop knitr's chunks with R, and a speech pipeline, as their process group.

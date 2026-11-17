@@ -14,9 +14,8 @@
 //! `textarea` of id `source`, is that markdown.
 
 use scraper::{ElementRef, Html, Selector};
-use std::path::Path;
 
-mod code;
+pub(crate) mod code;
 mod math;
 mod media;
 mod table;
@@ -33,9 +32,10 @@ pub struct Read {
 }
 
 impl Read {
-    /// Where images embedded in the HTML were written, when there were any.
-    pub(crate) fn files(&self) -> Option<&Path> {
-        self.images.as_ref().map(tempfile::TempDir::path)
+    /// The markdown, and where images embedded in the HTML were written,
+    /// kept as long as it is.
+    pub(crate) fn into_parts(self) -> (String, Option<tempfile::TempDir>) {
+        (self.markdown, self.images)
     }
 }
 
@@ -185,7 +185,7 @@ fn strip_title(body: &str, title: &str) -> String {
     }
 }
 
-fn yaml_quote(s: &str) -> String {
+pub(crate) fn yaml_quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
@@ -831,11 +831,11 @@ fn brace_escape(s: &str) -> String {
     out
 }
 
-fn clean_url(src: &str) -> String {
+pub(crate) fn clean_url(src: &str) -> String {
     src.replace(['<', '>', '\n', '\r'], "")
 }
 
-fn escape_to_string(s: &str) -> String {
+pub(crate) fn escape_to_string(s: &str) -> String {
     let mut out = String::new();
     push_escaped(&mut out, s);
     out

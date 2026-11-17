@@ -233,10 +233,12 @@ impl Parser<'_> {
                 let (under, base) = (self.arg()?, self.arg()?);
                 format!("limits({})_({})", quote_separators(&base), under.trim())
             }
-            "text" | "textrm" | "textnormal" | "textup" | "mbox" => string(&self.raw_group()?),
+            "text" | "textrm" | "textnormal" | "textup" | "mbox" => {
+                string(&text_mode(&self.raw_group()?))
+            }
             "mathbf" => format!("bold(upright({}))", self.call_arg()?),
-            "textit" => call("italic", string(&self.raw_group()?)),
-            "textbf" => call("bold", string(&self.raw_group()?)),
+            "textit" => call("italic", string(&text_mode(&self.raw_group()?))),
+            "textbf" => call("bold", string(&text_mode(&self.raw_group()?))),
             "operatorname" => format!("op({})", string(&self.raw_group()?)),
             "left" | "right" | "middle" | "big" | "Big" | "bigg" | "Bigg" | "bigl" | "bigr"
             | "Bigl" | "Bigr" | "biggl" | "biggr" | "Biggl" | "Biggr" => {
@@ -341,6 +343,23 @@ fn push(out: &mut String, atom: &str) {
         out.push(' ');
     }
     out.push_str(atom);
+}
+
+/// Text in `\text{}` as LaTeX sets it: `\%`, `\$`, `\#`, `\&`, `\_`, `\{` and
+/// `\}` are the characters themselves.
+fn text_mode(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, chars.peek()) {
+            ('\\', Some(&n)) if matches!(n, '%' | '$' | '#' | '&' | '_' | '{' | '}') => {
+                out.push(n);
+                chars.next();
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// A character as typst math reads it as itself.
