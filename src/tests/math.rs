@@ -95,3 +95,9 @@ fn what_is_not_known_or_not_whole_is_not_converted() {
         assert_eq!(convert(latex), None, "{latex}");
     }
 }
+
+#[test]
+fn escaped_characters_in_text_are_themselves() {
+    assert_eq!(ok(r"\text{costs \$5, 50\% off}"), "\"costs $5, 50% off\"");
+    assert_eq!(ok(r"\text{a\_b \# \& \{x\}}"), "\"a_b # & {x}\"");
+}

@@ -55,23 +55,89 @@ pub fn paper(name: &str) -> Result<String, String> {
         .map_err(|_| format!("unknown paper size {name:?}; try us-letter, a4 or presentation-16-9"))
 }
 
-pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
+/// A file as the markdown it is typeset from, what was left out reading
+/// it, and the files its markdown names, kept as long as it is.
+struct Read {
+    text: String,
+    notes: Vec<String>,
+    /// Whether it is written as markdown, so its chunks may be knitted.
+    written: bool,
+    _kept: Option<tempfile::TempDir>,
+}
+
+/// The markdown, R Markdown, HTML, Word or PowerPoint file at `path` as
+/// markdown: an Office file's pictures written aside, or named by their
+/// parts, as `pictures` says.
+fn read(path: &Path, pictures: crate::office::Pictures) -> anyhow::Result<Read> {
+    if crate::render::office(path) {
+        let read = crate::office::read(path, pictures)?;
+        return Ok(Read {
+            text: read.markdown,
+            notes: read.notes,
+            written: false,
+            _kept: read.kept,
+        });
+    }
     let file =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    if crate::render::html(path) {
+        let (text, kept) = crate::html::read(&file).into_parts();
+        return Ok(Read {
+            text,
+            notes: Vec::new(),
+            written: false,
+            _kept: kept,
+        });
+    }
+    Ok(Read {
+        text: file,
+        notes: Vec::new(),
+        written: true,
+        _kept: None,
+    })
+}
+
+/// The markdown `path` is typeset from, as written, or as HTML, a Word or a
+/// PowerPoint file is read into, its equations in LaTeX. A Word or
+/// PowerPoint file's pictures are named by their places in it, as
+/// `word/media/image1.png`. R Markdown's chunks are as written, not
+/// knitted. A PDF or an image has none.
+pub fn source(path: &Path) -> anyhow::Result<String> {
+    if !crate::render::document(path) {
+        anyhow::bail!(
+            "{} is not typeset from markdown: it has no source",
+            path.display()
+        );
+    }
+    Ok(read(path, crate::office::Pictures::Named)?.text)
+}
+
+pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
+    // A deck is laid out as its slides are; failing that, it is set as
+    // markdown, as a Word document is, and the status line says why.
+    let mut laying = None;
+    if crate::office::slides(path) {
+        match lay_out(path, options) {
+            Ok(done) => return Ok(done),
+            Err(e) if e.is::<Stopped>() => return Err(e),
+            Err(e) => laying = Some(format!("set as text, not as laid out: {e:#}")),
+        }
+    }
+    // Pictures and images the markdown names stay until the PDF is made.
+    let Read {
+        text: file,
+        notes: read_notes,
+        written,
+        _kept,
+    } = read(path, crate::office::Pictures::Written)?;
     let base = path.parent().unwrap_or(Path::new("."));
     // Why chunks were not run, which holds however the text is shown.
     let mut knitting = None;
     let rmd = path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("rmd"));
-    // HTML is markdown from here. Its embedded images stay until the PDF is
-    // made: the markdown names them.
-    let embedded = crate::render::html(path).then(|| crate::html::read(&file));
-    let _kept = embedded.as_ref().and_then(crate::html::Read::files);
     // The directory is kept until typeset: knitted plots are in it.
-    let (text, _knitted) = if let Some(read) = &embedded {
-        (read.markdown.clone(), None)
-    } else if options.knit && has_chunks(&file, rmd) {
+    let (text, _knitted) = if written && options.knit && has_chunks(&file, rmd) {
         match knit(path, &options.stop) {
             Knitted::Done(dir, md) => (md, Some(dir)),
             Knitted::Failed(why) => {
@@ -88,7 +154,7 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
     let mut source_only = HashSet::new();
     let mut broken = HashSet::new();
     // What was left out to typeset the text.
-    let mut dropped: Vec<String> = Vec::new();
+    let mut dropped: Vec<String> = laying.into_iter().chain(read_notes).collect();
     let mut rendered = HashMap::new();
     let mut loaded = HashMap::new();
     let mut citations = true;
@@ -127,17 +193,8 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
         let world = Doc::new(doc.source, &doc.images, &doc.files, &mut loaded);
         match compile_marked(&world) {
             Ok((pdf, marks)) => {
-                let speaker = marks
-                    .into_iter()
-                    .filter_map(|(page, n)| Some((page, doc.speaker.get(n)?.clone())))
-                    .collect();
-                let notes: Vec<String> = knitting
-                    .into_iter()
-                    .chain(dropped)
-                    .chain(doc.warnings)
-                    .collect();
-                let note = (!notes.is_empty()).then(|| notes.join("; "));
-                return Ok(Typeset { pdf, note, speaker });
+                let notes = knitting.into_iter().chain(dropped).chain(doc.warnings);
+                return Ok(finished(pdf, marks, &doc.speaker, notes.collect()));
             }
             Err(errors) => {
                 failure = errors[0].message.to_string();
@@ -215,6 +272,34 @@ pub fn typeset(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
         note: Some(notes.join("; ")),
         speaker: Vec::new(),
     })
+}
+
+/// A PowerPoint deck laid out as its slides are, typeset.
+fn lay_out(path: &Path, options: &Options) -> anyhow::Result<Typeset> {
+    let laid = crate::office::deck::lay_out(path, &options.stop)?;
+    let world = Doc::new(laid.source, &laid.pictures, &[], &mut HashMap::new());
+    let (pdf, marks) = compile_marked(&world).map_err(|e| anyhow::anyhow!("{}", e[0].message))?;
+    // Stopped while typeset, as ohp quits, it is not worth showing.
+    if options.stop.load(Ordering::Relaxed) {
+        return Err(Stopped.into());
+    }
+    Ok(finished(pdf, marks, &laid.speaker, laid.notes))
+}
+
+/// A typeset PDF: its speaker notes on the pages their marks are on, and
+/// what was left out said on the status line.
+fn finished(
+    pdf: Vec<u8>,
+    marks: Vec<(usize, usize)>,
+    speaker: &[String],
+    notes: Vec<String>,
+) -> Typeset {
+    let speaker = marks
+        .into_iter()
+        .filter_map(|(page, n)| Some((page, speaker.get(n)?.clone())))
+        .collect();
+    let note = (!notes.is_empty()).then(|| notes.join("; "));
+    Typeset { pdf, note, speaker }
 }
 
 pub fn compile(world: &Doc) -> Result<Vec<u8>, Vec<SourceDiagnostic>> {

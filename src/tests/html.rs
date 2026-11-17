@@ -282,7 +282,7 @@ fn an_embedded_image_is_a_file_the_markdown_names() {
     let png_bytes = std::fs::read(paths[0]).unwrap();
     assert_eq!(&png_bytes[..8], b"\x89PNG\r\n\x1a\n");
     assert_eq!(std::fs::read_to_string(paths[1]).unwrap(), "<svg></svg>");
-    assert!(read.files().is_some());
+    assert!(read.images.is_some());
 }
 
 fn image_paths(markdown: &str) -> Vec<&str> {

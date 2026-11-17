@@ -42,6 +42,8 @@ mod mermaid;
 #[cfg(feature = "summary")]
 mod models;
 mod notes;
+#[cfg(feature = "markdown")]
+mod office;
 pub mod print;
 #[cfg(any(feature = "markdown", feature = "speech", feature = "summary"))]
 pub mod process;
